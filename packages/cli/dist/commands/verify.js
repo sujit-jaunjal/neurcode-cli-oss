@@ -2210,6 +2210,11 @@ async function verifyCommand(options) {
             const filteredViolations = violations.filter((p) => !shouldIgnore(p));
             // Step D: The Block (only report scope violations for non-ignored files)
             if (filteredViolations.length > 0) {
+                const aiDebtSummaryForScope = toAiDebtSummary((0, ai_debt_budget_1.evaluateAiDebtBudget)({
+                    diffFiles,
+                    bloatCount: filteredViolations.length,
+                    config: aiDebtConfig,
+                }));
                 recordVerifyEvent('FAIL', `scope_violation=${filteredViolations.length}`, modifiedFiles, finalPlanId);
                 const scopeViolationItems = filteredViolations.map((file) => ({
                     file,
@@ -2217,6 +2222,11 @@ async function verifyCommand(options) {
                     severity: 'block',
                     message: 'File modified outside the plan',
                 }));
+                const aiDebtViolationItems = toAiDebtReportViolations(aiDebtSummaryForScope);
+                const scopeViolationReportItems = [
+                    ...scopeViolationItems,
+                    ...aiDebtViolationItems,
+                ];
                 const scopeViolationMessage = `Scope violation: ${filteredViolations.length} file(s) modified outside the plan`;
                 if (options.json) {
                     // Output JSON for scope violation BEFORE exit. Must include violations for GitHub Action annotations.
@@ -2224,7 +2234,7 @@ async function verifyCommand(options) {
                         grade: 'F',
                         score: 0,
                         verdict: 'FAIL',
-                        violations: scopeViolationItems,
+                        violations: scopeViolationReportItems,
                         adherenceScore: 0,
                         bloatCount: filteredViolations.length,
                         bloatFiles: filteredViolations,
@@ -2234,10 +2244,12 @@ async function verifyCommand(options) {
                         scopeGuardPassed: false,
                         mode: 'plan_enforced',
                         policyOnly: false,
+                        aiDebt: aiDebtSummaryForScope,
                         ...(governanceResult
                             ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
                                 changeContract: changeContractSummary,
                                 compiledPolicy: compiledPolicyMetadata,
+                                aiDebt: aiDebtSummaryForScope,
                             })
                             : {}),
                     };
@@ -2245,7 +2257,7 @@ async function verifyCommand(options) {
                     emitVerifyJson(jsonOutput);
                     await recordVerificationIfRequested(options, config, {
                         grade: 'F',
-                        violations: scopeViolationItems,
+                        violations: scopeViolationReportItems,
                         verifyResult: {
                             adherenceScore: 0,
                             verdict: 'FAIL',
@@ -2259,6 +2271,7 @@ async function verifyCommand(options) {
                             ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
                                 changeContract: changeContractSummary,
                                 compiledPolicy: compiledPolicyMetadata,
+                                aiDebt: aiDebtSummaryForScope,
                             })
                             : undefined,
                     });
@@ -2278,13 +2291,31 @@ async function verifyCommand(options) {
                     filteredViolations.forEach(file => {
                         console.log(chalk.dim(`   neurcode allow ${file}`));
                     });
+                    if (aiDebtSummaryForScope.mode !== 'off') {
+                        console.log('');
+                        const header = aiDebtSummaryForScope.mode === 'enforce'
+                            ? aiDebtSummaryForScope.pass
+                                ? chalk.green('AI Debt Budget: PASS')
+                                : chalk.red('AI Debt Budget: BLOCK')
+                            : chalk.yellow('AI Debt Budget: ADVISORY');
+                        console.log(header);
+                        console.log(chalk.dim(`   Score: ${aiDebtSummaryForScope.score} | TODO/FIXME +${aiDebtSummaryForScope.metrics.addedTodoFixme} | ` +
+                            `console.log +${aiDebtSummaryForScope.metrics.addedConsoleLogs} | any +${aiDebtSummaryForScope.metrics.addedAnyTypes} | ` +
+                            `large files ${aiDebtSummaryForScope.metrics.largeFilesTouched} | bloat ${aiDebtSummaryForScope.metrics.bloatFiles}`));
+                        if (aiDebtSummaryForScope.violations.length > 0) {
+                            aiDebtSummaryForScope.violations.forEach((item) => {
+                                const color = aiDebtSummaryForScope.mode === 'enforce' ? chalk.red : chalk.yellow;
+                                console.log(color(`   • ${item.message}`));
+                            });
+                        }
+                    }
                     if (governanceResult) {
                         displayGovernanceInsights(governanceResult, { explain: options.explain });
                     }
                     console.log('');
                     await recordVerificationIfRequested(options, config, {
                         grade: 'F',
-                        violations: scopeViolationItems,
+                        violations: scopeViolationReportItems,
                         verifyResult: {
                             adherenceScore: 0,
                             verdict: 'FAIL',
@@ -2298,6 +2329,7 @@ async function verifyCommand(options) {
                             ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
                                 changeContract: changeContractSummary,
                                 compiledPolicy: compiledPolicyMetadata,
+                                aiDebt: aiDebtSummaryForScope,
                             })
                             : undefined,
                     });
