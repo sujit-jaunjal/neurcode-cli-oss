@@ -618,6 +618,12 @@ export declare class ApiClient {
         limit?: number;
         mine?: boolean;
     }): Promise<VerificationFeedbackInboxItem[]>;
+    getVerificationFeedbackStats(options?: {
+        reviewStatus?: 'pending' | 'approved' | 'rejected';
+        mine?: boolean;
+        days?: number;
+        limit?: number;
+    }): Promise<VerificationFeedbackStatsResponse>;
     reviewVerificationFeedback(verificationId: string, feedbackId: string, payload: {
         decision: 'approved' | 'rejected';
         reviewNote?: string;
@@ -932,6 +938,40 @@ export interface VerificationFeedbackInboxItem extends VerificationFeedbackItem 
         branch: string | null;
         commitSha: string | null;
     };
+}
+export interface VerificationFeedbackStatsRow {
+    label: string;
+    total: number;
+    falsePositive: number;
+    falseNegative: number;
+    pending: number;
+    approved: number;
+    rejected: number;
+}
+export interface VerificationFeedbackStatsResponse {
+    organizationId: string;
+    generatedAt: string;
+    windowDays: number;
+    filters: {
+        mine: boolean;
+        reviewStatus: 'pending' | 'approved' | 'rejected' | null;
+    };
+    totals: {
+        total: number;
+        pending: number;
+        approved: number;
+        rejected: number;
+        falsePositive: number;
+        falseNegative: number;
+        truePositive: number;
+        acceptedRisk: number;
+        reviewed: number;
+        approvalRate: number;
+        falsePositiveRate: number;
+        falseNegativeRate: number;
+    };
+    topRules: VerificationFeedbackStatsRow[];
+    topFiles: VerificationFeedbackStatsRow[];
 }
 export interface VerifyPlanResponse {
     verificationId: string;

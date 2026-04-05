@@ -64,6 +64,7 @@ const policy_audit_1 = require("../utils/policy-audit");
 const governance_1 = require("../utils/governance");
 const policy_compiler_1 = require("../utils/policy-compiler");
 const change_contract_1 = require("../utils/change-contract");
+const runtime_guard_1 = require("../utils/runtime-guard");
 const artifact_signature_1 = require("../utils/artifact-signature");
 const policy_1 = require("@neurcode-ai/policy");
 // Import chalk with fallback
@@ -433,6 +434,51 @@ function isEnabledFlag(value) {
         return false;
     const normalized = value.trim().toLowerCase();
     return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+function createRuntimeGuardSummary(required, projectRoot, runtimeGuardPath) {
+    return {
+        required,
+        path: (0, runtime_guard_1.resolveRuntimeGuardPath)(projectRoot, runtimeGuardPath),
+        exists: false,
+        valid: false,
+        active: false,
+        pass: !required,
+        changedFiles: 0,
+        outOfScopeFiles: [],
+        constraintViolations: [],
+        violations: [],
+    };
+}
+function runtimeGuardViolationsToReport(summary) {
+    if (!summary.required || summary.pass) {
+        return [];
+    }
+    if (!summary.exists) {
+        return [
+            {
+                file: summary.path,
+                rule: 'runtime_guard_missing',
+                severity: 'block',
+                message: 'Runtime guard artifact is missing. Run `neurcode guard start` before verify.',
+            },
+        ];
+    }
+    if (!summary.valid) {
+        return [
+            {
+                file: summary.path,
+                rule: 'runtime_guard_invalid',
+                severity: 'block',
+                message: 'Runtime guard artifact is invalid. Regenerate with `neurcode guard start`.',
+            },
+        ];
+    }
+    return summary.violations.map((item) => ({
+        file: item.file || summary.path,
+        rule: `runtime_guard:${item.code.toLowerCase()}`,
+        severity: 'block',
+        message: item.message,
+    }));
 }
 function parseSigningKeyRing(raw) {
     if (!raw || !raw.trim()) {
@@ -1188,6 +1234,8 @@ async function verifyCommand(options) {
             && !isEnabledFlag(process.env.NEURCODE_VERIFY_ALLOW_NON_STRICT_CI)
             && Boolean(options.apiKey || process.env.NEURCODE_API_KEY);
         const strictArtifactMode = explicitStrictArtifactMode || ciEnterpriseDefaultStrict;
+        const requireRuntimeGuard = options.requireRuntimeGuard === true
+            || isEnabledFlag(process.env.NEURCODE_VERIFY_REQUIRE_RUNTIME_GUARD);
         const signingConfig = resolveGovernanceSigningConfig();
         const aiLogSigningKey = signingConfig.signingKey;
         const aiLogSigningKeyId = signingConfig.signingKeyId;
@@ -1201,6 +1249,7 @@ async function verifyCommand(options) {
             || (!allowUnsignedArtifacts && strictArtifactMode && hasSigningMaterial);
         const changeContractRead = (0, change_contract_1.readChangeContract)(projectRoot, options.changeContract);
         const compiledPolicyRead = (0, policy_compiler_1.readCompiledPolicyArtifact)(projectRoot, options.compiledPolicy);
+        let runtimeGuardSummary = createRuntimeGuardSummary(requireRuntimeGuard, projectRoot, options.runtimeGuard);
         let compiledPolicyMetadata = resolveCompiledPolicyMetadata(compiledPolicyRead.artifact, compiledPolicyRead.exists ? compiledPolicyRead.path : null);
         const compiledPolicySignatureStatus = compiledPolicyRead.artifact
             ? (0, artifact_signature_1.verifyGovernanceArtifactSignature)({
@@ -1705,6 +1754,140 @@ async function verifyCommand(options) {
             const normalized = toUnixPath(filePath || '');
             return ignoreFilter(normalized) || runtimeIgnoreSet.has(normalized);
         };
+        if (requireRuntimeGuard) {
+            const guardRead = (0, runtime_guard_1.readRuntimeGuardArtifact)(projectRoot, options.runtimeGuard);
+            runtimeGuardSummary = {
+                ...runtimeGuardSummary,
+                path: guardRead.path,
+                exists: guardRead.exists,
+                valid: Boolean(guardRead.artifact),
+            };
+            if (!guardRead.artifact) {
+                const message = guardRead.error
+                    ? `Runtime guard artifact is invalid: ${guardRead.error}`
+                    : 'Runtime guard artifact missing. Run `neurcode guard start` before verify.';
+                runtimeGuardSummary = {
+                    ...runtimeGuardSummary,
+                    active: false,
+                    pass: false,
+                    violations: [
+                        {
+                            code: guardRead.error ? 'RUNTIME_GUARD_INACTIVE' : 'RUNTIME_GUARD_INACTIVE',
+                            message,
+                        },
+                    ],
+                };
+                const runtimeGuardViolationItems = runtimeGuardViolationsToReport(runtimeGuardSummary);
+                recordVerifyEvent('FAIL', 'runtime_guard_missing_or_invalid', diffFiles.map((f) => f.path));
+                if (options.json) {
+                    emitVerifyJson({
+                        grade: 'F',
+                        score: 0,
+                        verdict: 'FAIL',
+                        violations: runtimeGuardViolationItems,
+                        adherenceScore: 0,
+                        bloatCount: 0,
+                        bloatFiles: [],
+                        plannedFilesModified: 0,
+                        totalPlannedFiles: 0,
+                        message,
+                        scopeGuardPassed: false,
+                        mode: 'runtime_guard_required',
+                        policyOnly: Boolean(options.policyOnly),
+                        runtimeGuard: runtimeGuardSummary,
+                    });
+                }
+                else {
+                    console.log(chalk.red('\n⛔ Runtime Guard Required'));
+                    console.log(chalk.red(`   ${message}`));
+                    console.log(chalk.dim(`   Path: ${runtimeGuardSummary.path}`));
+                    console.log(chalk.dim('   Start guard: neurcode guard start --strict\n'));
+                }
+                await recordVerificationIfRequested(options, config, {
+                    grade: 'F',
+                    violations: runtimeGuardViolationItems,
+                    verifyResult: {
+                        adherenceScore: 0,
+                        verdict: 'FAIL',
+                        bloatCount: 0,
+                        bloatFiles: [],
+                        message,
+                    },
+                    projectId: projectId || undefined,
+                    jsonMode: Boolean(options.json),
+                });
+                process.exit(2);
+            }
+            const runtimeGuardEvaluation = (0, runtime_guard_1.evaluateRuntimeGuardArtifact)(guardRead.artifact, diffFiles.filter((file) => !shouldIgnore(file.path)));
+            runtimeGuardSummary = {
+                ...runtimeGuardSummary,
+                active: guardRead.artifact.active,
+                pass: runtimeGuardEvaluation.pass,
+                changedFiles: runtimeGuardEvaluation.changedFiles.length,
+                outOfScopeFiles: runtimeGuardEvaluation.outOfScopeFiles,
+                constraintViolations: runtimeGuardEvaluation.constraintViolations,
+                violations: runtimeGuardEvaluation.violations.map((item) => ({
+                    code: item.code,
+                    message: item.message,
+                    ...(item.file ? { file: item.file } : {}),
+                })),
+            };
+            const runtimeGuardUpdated = (0, runtime_guard_1.withRuntimeGuardCheckStats)(guardRead.artifact, {
+                blocked: !runtimeGuardEvaluation.pass,
+            });
+            (0, runtime_guard_1.writeRuntimeGuardArtifact)(projectRoot, runtimeGuardUpdated, options.runtimeGuard);
+            if (!runtimeGuardEvaluation.pass) {
+                const message = runtimeGuardEvaluation.violations.length > 0
+                    ? `Runtime guard blocked ${runtimeGuardEvaluation.violations.length} violation(s).`
+                    : 'Runtime guard blocked verification.';
+                const runtimeGuardViolationItems = runtimeGuardViolationsToReport(runtimeGuardSummary);
+                recordVerifyEvent('FAIL', `runtime_guard_violations=${runtimeGuardEvaluation.violations.length}`, diffFiles.map((f) => f.path));
+                if (options.json) {
+                    emitVerifyJson({
+                        grade: 'F',
+                        score: 0,
+                        verdict: 'FAIL',
+                        violations: runtimeGuardViolationItems,
+                        adherenceScore: 0,
+                        bloatCount: runtimeGuardEvaluation.outOfScopeFiles.length,
+                        bloatFiles: runtimeGuardEvaluation.outOfScopeFiles,
+                        plannedFilesModified: runtimeGuardEvaluation.plannedFilesModified,
+                        totalPlannedFiles: runtimeGuardEvaluation.totalPlannedFiles,
+                        message,
+                        scopeGuardPassed: false,
+                        mode: 'runtime_guard_blocked',
+                        policyOnly: Boolean(options.policyOnly),
+                        runtimeGuard: runtimeGuardSummary,
+                    });
+                }
+                else {
+                    console.log(chalk.red('\n⛔ Runtime Guard Blocked Verification'));
+                    runtimeGuardEvaluation.violations.forEach((item) => {
+                        const file = item.file ? `${item.file}: ` : '';
+                        console.log(chalk.red(`   • ${file}${item.message}`));
+                    });
+                    console.log(chalk.dim(`\n   Guard artifact: ${runtimeGuardSummary.path}\n`));
+                }
+                await recordVerificationIfRequested(options, config, {
+                    grade: 'F',
+                    violations: runtimeGuardViolationItems,
+                    verifyResult: {
+                        adherenceScore: runtimeGuardEvaluation.adherenceScore,
+                        verdict: 'FAIL',
+                        bloatCount: runtimeGuardEvaluation.outOfScopeFiles.length,
+                        bloatFiles: runtimeGuardEvaluation.outOfScopeFiles,
+                        message,
+                    },
+                    projectId: projectId || undefined,
+                    jsonMode: Boolean(options.json),
+                });
+                process.exit(2);
+            }
+            if (!options.json) {
+                console.log(chalk.dim(`   Runtime guard passed (${runtimeGuardSummary.changedFiles} changed file(s), ` +
+                    `${runtimeGuardSummary.violations.length} violation(s))`));
+            }
+        }
         const baselineContextPolicyLocal = (0, policy_1.loadContextPolicy)(projectRoot);
         const baselineContextPolicy = orgGovernanceSettings?.contextPolicy
             ? (0, policy_1.mergeContextPolicies)(baselineContextPolicyLocal, orgGovernanceSettings.contextPolicy)
@@ -2707,6 +2890,7 @@ async function verifyCommand(options) {
                     },
                     policyExceptions: policyExceptionsSummary,
                     policyGovernance: policyGovernanceSummary,
+                    ...(runtimeGuardSummary.required ? { runtimeGuard: runtimeGuardSummary } : {}),
                     ...(policyViolations.length > 0 && { policyDecision }),
                     ...(effectiveRules.policyPack
                         ? {
@@ -2787,6 +2971,9 @@ async function verifyCommand(options) {
                     auditIntegrityStatus.issues.slice(0, 5).forEach((issue) => {
                         console.log(chalk.red(`   • ${issue}`));
                     });
+                }
+                if (runtimeGuardSummary.required) {
+                    console.log(chalk.dim(`\n   Runtime guard: ${runtimeGuardSummary.pass ? 'pass' : 'block'} (${runtimeGuardSummary.path})`));
                 }
             }
             // Report to Neurcode Cloud if --record flag is set

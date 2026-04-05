@@ -31,6 +31,10 @@ interface VerifyOptions {
     strictArtifacts?: boolean;
     /** Require cryptographic signatures on deterministic artifacts. */
     requireSignedArtifacts?: boolean;
+    /** Require runtime guard artifact to pass before verification evaluation. */
+    requireRuntimeGuard?: boolean;
+    /** Path to runtime guard artifact (default: .neurcode/runtime-guard.json). */
+    runtimeGuard?: string;
     /** Print detailed AI change justification reasoning. */
     explain?: boolean;
     /** Use queue-backed async verification mode on the API. */

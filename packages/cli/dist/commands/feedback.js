@@ -237,6 +237,79 @@ function feedbackCommand(program) {
         }
     });
     feedback
+        .command('stats')
+        .description('Aggregate false-positive/false-negative feedback quality stats for org policy tuning')
+        .option('--status <status>', 'pending | approved | rejected')
+        .option('--days <n>', 'Lookback window in days (default: 30)', (value) => parseInt(value, 10))
+        .option('--limit <n>', 'Top rule/file rows to return (default: 10)', (value) => parseInt(value, 10))
+        .option('--mine', 'Only include feedback submitted by current user')
+        .option('--org-wide', 'For owners/admins: include feedback from entire organization')
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        try {
+            const reviewStatus = normalizeReviewStatus(options.status);
+            if (options.status && !reviewStatus) {
+                throw new Error('Invalid --status. Use: pending, approved, rejected');
+            }
+            let mine;
+            if (options.orgWide === true) {
+                mine = false;
+            }
+            else if (options.mine === true) {
+                mine = true;
+            }
+            else {
+                mine = undefined;
+            }
+            const client = createClient();
+            const stats = await client.getVerificationFeedbackStats({
+                reviewStatus: reviewStatus || undefined,
+                mine,
+                days: Number.isFinite(options.days) ? options.days : undefined,
+                limit: Number.isFinite(options.limit) ? options.limit : undefined,
+            });
+            if (options.json === true) {
+                console.log(JSON.stringify({ success: true, stats }, null, 2));
+                return;
+            }
+            console.log(chalk.bold.cyan('\n📈 Verification Feedback Stats\n'));
+            console.log(chalk.dim(`Window: last ${stats.windowDays} day(s)`));
+            console.log(chalk.dim(`Scope: ${stats.filters.mine ? 'mine' : 'organization'}`));
+            if (stats.filters.reviewStatus) {
+                console.log(chalk.dim(`Status filter: ${stats.filters.reviewStatus}`));
+            }
+            console.log('');
+            console.log(chalk.white(`Total feedback: ${stats.totals.total}`));
+            console.log(chalk.dim(`Pending: ${stats.totals.pending} | Approved: ${stats.totals.approved} | Rejected: ${stats.totals.rejected}`));
+            console.log(chalk.dim(`False+ : ${stats.totals.falsePositive} (${(stats.totals.falsePositiveRate * 100).toFixed(1)}%)`));
+            console.log(chalk.dim(`False- : ${stats.totals.falseNegative} (${(stats.totals.falseNegativeRate * 100).toFixed(1)}%)`));
+            console.log(chalk.dim(`Approval rate: ${(stats.totals.approvalRate * 100).toFixed(1)}%`));
+            if (stats.topRules.length > 0) {
+                console.log(chalk.bold('\nTop noisy rules:'));
+                stats.topRules.forEach((row) => {
+                    console.log(chalk.dim(`  • ${row.label} | total=${row.total} fp=${row.falsePositive} fn=${row.falseNegative} pending=${row.pending}`));
+                });
+            }
+            if (stats.topFiles.length > 0) {
+                console.log(chalk.bold('\nTop noisy files:'));
+                stats.topFiles.forEach((row) => {
+                    console.log(chalk.dim(`  • ${row.label} | total=${row.total} fp=${row.falsePositive} fn=${row.falseNegative} pending=${row.pending}`));
+                });
+            }
+            console.log('');
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            if (options.json === true) {
+                console.log(JSON.stringify({ success: false, message }, null, 2));
+            }
+            else {
+                console.error(chalk.red(`\n❌ Feedback stats failed: ${message}\n`));
+            }
+            process.exit(1);
+        }
+    });
+    feedback
         .command('review')
         .description('Admin/owner review decision on submitted feedback')
         .argument('<verification-id>', 'Verification ID from action verifications')

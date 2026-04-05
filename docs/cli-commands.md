@@ -85,6 +85,7 @@ neurcode policy uninstall
 neurcode feedback submit <verification-id> --type false_positive --reason "Expected migration exception" --rule no_console_log --file src/migrate.ts
 neurcode feedback list <verification-id> --status pending
 neurcode feedback inbox --status pending --org-wide
+neurcode feedback stats --org-wide --days 30 --limit 10
 neurcode feedback review <verification-id> <feedback-id> --decision approved --note "Confirmed false positive"
 ```
 
@@ -140,12 +141,13 @@ neurcode doctor
 - `simulate`: `--staged`, `--head`, `--base`, `--max-impacted`, `--depth`, `--json`
 - `audit evidence`: `--include-events`, `--limit`, `--action`, `--actor-user-id`, `--target-type`, `--from`, `--to`, `--out`, `--json`
 - `verify`: `--plan-id`, `--policy-only`, `--staged`, `--base`, `--record`, `--json`
-- `verify`: `--compiled-policy`, `--change-contract`, `--enforce-change-contract`, `--async`, `--verify-job-poll-ms`, `--verify-job-timeout-ms`, `--verify-idempotency-key`, `--verify-job-max-attempts`
+- `verify`: `--compiled-policy`, `--change-contract`, `--enforce-change-contract`, `--require-runtime-guard`, `--runtime-guard`, `--async`, `--verify-job-poll-ms`, `--verify-job-timeout-ms`, `--verify-idempotency-key`, `--verify-job-max-attempts`
 - `ship`: `--max-fix-attempts`, `--test-command`, `--skip-tests`, `--allow-dirty`, `--json`
 - `repo link`: `--alias`, `--json`
 - `policy install`: `--force` (replace existing installed pack)
 - `policy compile`: `--require-deterministic-match` (fail if intent text cannot be deterministically enforced)
 - `feedback inbox`: `--status`, `--mine`, `--org-wide`, `--limit`, `--json`
+- `feedback stats`: `--status`, `--days`, `--limit`, `--mine`, `--org-wide`, `--json`
 - `brain mode`: `--storage-mode full|no-code`
 
 ## Command Discovery

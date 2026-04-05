@@ -1140,6 +1140,25 @@ class ApiClient {
             },
         });
     }
+    async getVerificationFeedbackStats(options) {
+        const params = new URLSearchParams();
+        if (options?.reviewStatus)
+            params.set('reviewStatus', options.reviewStatus);
+        if (typeof options?.mine === 'boolean')
+            params.set('mine', options.mine ? 'true' : 'false');
+        if (Number.isFinite(options?.days))
+            params.set('days', String(options?.days));
+        if (Number.isFinite(options?.limit))
+            params.set('limit', String(options?.limit));
+        const queryString = params.toString();
+        const url = `${this.apiUrl}/api/v1/action/verifications/feedback/stats${queryString ? `?${queryString}` : ''}`;
+        return this.makeRequest(url, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+    }
     async reviewVerificationFeedback(verificationId, feedbackId, payload) {
         const url = `${this.apiUrl}/api/v1/action/verifications/${verificationId}/feedback/${feedbackId}/review`;
         return this.makeRequest(url, {

@@ -593,6 +593,8 @@ program
     .option('--enforce-change-contract', 'Treat change contract drift as a hard verification failure')
     .option('--strict-artifacts', 'Require deterministic compiled-policy + change-contract artifacts')
     .option('--require-signed-artifacts', 'Require cryptographic signatures on compiled-policy + change-contract artifacts')
+    .option('--require-runtime-guard', 'Require runtime guard artifact to pass before verify evaluation')
+    .option('--runtime-guard <path>', 'Runtime guard artifact path (default: .neurcode/runtime-guard.json)')
     .option('--async', 'Use queue-backed async verification mode (enterprise)')
     .option('--verify-job-poll-ms <ms>', 'Polling interval for async verification jobs (default: 1500ms)', (val) => parseInt(val, 10))
     .option('--verify-job-timeout-ms <ms>', 'Timeout for async verification jobs (default: 300000ms)', (val) => parseInt(val, 10))
@@ -627,6 +629,8 @@ program
         enforceChangeContract: options.enforceChangeContract === true,
         strictArtifacts: options.strictArtifacts === true,
         requireSignedArtifacts: options.requireSignedArtifacts === true,
+        requireRuntimeGuard: options.requireRuntimeGuard === true,
+        runtimeGuard: options.runtimeGuard,
         asyncMode: options.async === true,
         verifyJobPollMs: Number.isFinite(options.verifyJobPollMs) ? options.verifyJobPollMs : undefined,
         verifyJobTimeoutMs: Number.isFinite(options.verifyJobTimeoutMs) ? options.verifyJobTimeoutMs : undefined,
