@@ -1,6 +1,6 @@
 {
   "name": "@neurcode-ai/cli",
-  "version": "0.9.40",
+  "version": "0.9.41",
   "description": "Neurcode CLI - AI code governance and diff analysis",
   "bin": {
     "neurcode": "dist/index.js"
@@ -40,7 +40,7 @@
     "@neurcode-ai/contracts": "^0.1.1",
     "@neurcode-ai/core": "^0.1.0",
     "@neurcode-ai/diff-parser": "^0.1.0",
-    "@neurcode-ai/governance-runtime": "^0.1.1",
+    "@neurcode-ai/governance-runtime": "^0.1.2",
     "@neurcode-ai/policy": "^0.1.0",
     "@neurcode-ai/policy-engine": "^0.1.0",
     "better-sqlite3": "^12.5.0",

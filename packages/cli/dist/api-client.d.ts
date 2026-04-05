@@ -628,6 +628,16 @@ export declare class ApiClient {
         decision: 'approved' | 'rejected';
         reviewNote?: string;
     }): Promise<VerificationFeedbackItem>;
+    escalateVerificationFeedback(verificationId: string, feedbackId: string, payload?: {
+        rulePattern?: string;
+        filePattern?: string;
+        reason?: string;
+        ticket?: string;
+        severity?: 'allow' | 'warn' | 'block';
+        expiresAt?: string;
+        expiresInDays?: number;
+        metadata?: Record<string, unknown>;
+    }): Promise<VerificationFeedbackEscalateResponse>;
     /**
      * Allow a file to be modified in a session (bypass scope guard)
      */
@@ -972,6 +982,10 @@ export interface VerificationFeedbackStatsResponse {
     };
     topRules: VerificationFeedbackStatsRow[];
     topFiles: VerificationFeedbackStatsRow[];
+}
+export interface VerificationFeedbackEscalateResponse {
+    feedback: VerificationFeedbackItem;
+    exception: OrgPolicyException;
 }
 export interface VerifyPlanResponse {
     verificationId: string;

@@ -47,6 +47,15 @@ function normalizeReviewStatus(value) {
     }
     return null;
 }
+function normalizeExceptionSeverity(value) {
+    if (!value)
+        return null;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'allow' || normalized === 'warn' || normalized === 'block') {
+        return normalized;
+    }
+    return null;
+}
 function createClient() {
     const config = (0, config_1.loadConfig)();
     if (!config.apiKey) {
@@ -345,6 +354,65 @@ function feedbackCommand(program) {
             }
             else {
                 console.error(chalk.red(`\n❌ Feedback review failed: ${message}\n`));
+            }
+            process.exit(1);
+        }
+    });
+    feedback
+        .command('escalate')
+        .description('Admin/owner: escalate approved feedback into organization policy exception workflow')
+        .argument('<verification-id>', 'Verification ID from action verifications')
+        .argument('<feedback-id>', 'Feedback entry ID')
+        .option('--rule <pattern>', 'Override exception rule pattern (defaults to feedback.rule)')
+        .option('--file <pattern>', 'Override exception file pattern (defaults to feedback.filePath)')
+        .option('--reason <text>', 'Override exception reason (defaults to feedback.reason)')
+        .option('--ticket <id>', 'Optional ticket/reference ID')
+        .option('--severity <level>', 'allow | warn | block')
+        .option('--expires-at <iso>', 'Exception expiry timestamp (ISO-8601)')
+        .option('--expires-in-days <n>', 'Exception expiry offset in days (default: 14)', (value) => parseInt(value, 10))
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (verificationId, feedbackId, options) => {
+        try {
+            const severity = normalizeExceptionSeverity(options.severity);
+            if (options.severity && !severity) {
+                throw new Error('Invalid --severity. Use: allow, warn, or block');
+            }
+            const expiresInDays = Number.isFinite(options.expiresInDays)
+                ? Number(options.expiresInDays)
+                : undefined;
+            if (Number.isFinite(expiresInDays) && expiresInDays <= 0) {
+                throw new Error('--expires-in-days must be greater than 0');
+            }
+            const client = createClient();
+            const result = await client.escalateVerificationFeedback(verificationId, feedbackId, {
+                rulePattern: typeof options.rule === 'string' ? options.rule : undefined,
+                filePattern: typeof options.file === 'string' ? options.file : undefined,
+                reason: typeof options.reason === 'string' ? options.reason : undefined,
+                ticket: typeof options.ticket === 'string' ? options.ticket : undefined,
+                severity: severity || undefined,
+                expiresAt: typeof options.expiresAt === 'string' ? options.expiresAt : undefined,
+                expiresInDays,
+            });
+            if (options.json === true) {
+                console.log(JSON.stringify({ success: true, ...result }, null, 2));
+                return;
+            }
+            console.log(chalk.bold.cyan('\n🔁 Feedback Escalated\n'));
+            console.log(chalk.green(`Feedback: ${result.feedback.id}`));
+            console.log(chalk.green(`Exception: ${result.exception.id}`));
+            console.log(chalk.dim(`Workflow: ${result.exception.workflowState} | Effective: ${result.exception.effectiveState}`));
+            console.log(chalk.dim(`Rule: ${result.exception.rulePattern}`));
+            console.log(chalk.dim(`File: ${result.exception.filePattern}`));
+            console.log(chalk.dim(`Approvals: ${result.exception.approvalCount}/${result.exception.requiredApprovals}`));
+            console.log(chalk.dim(`Expires: ${new Date(result.exception.expiresAt).toLocaleString()}\n`));
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            if (options.json === true) {
+                console.log(JSON.stringify({ success: false, message }, null, 2));
+            }
+            else {
+                console.error(chalk.red(`\n❌ Feedback escalation failed: ${message}\n`));
             }
             process.exit(1);
         }

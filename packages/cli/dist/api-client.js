@@ -1169,6 +1169,16 @@ class ApiClient {
             body: JSON.stringify(payload),
         });
     }
+    async escalateVerificationFeedback(verificationId, feedbackId, payload) {
+        const url = `${this.apiUrl}/api/v1/action/verifications/${verificationId}/feedback/${feedbackId}/escalate`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload || {}),
+        });
+    }
     /**
      * Allow a file to be modified in a session (bypass scope guard)
      */

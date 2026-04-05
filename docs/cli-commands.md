@@ -88,6 +88,7 @@ neurcode feedback list <verification-id> --status pending
 neurcode feedback inbox --status pending --org-wide
 neurcode feedback stats --org-wide --days 30 --limit 10
 neurcode feedback review <verification-id> <feedback-id> --decision approved --note "Confirmed false positive"
+neurcode feedback escalate <verification-id> <feedback-id> --expires-in-days 14 --ticket SEC-123
 ```
 
 ## Compliance Evidence Export
