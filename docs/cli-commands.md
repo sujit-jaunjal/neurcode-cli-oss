@@ -42,6 +42,7 @@ neurcode repo list
 
 ```bash
 neurcode plan-slo status
+neurcode contract import --provider claude --auto-detect
 neurcode apply <plan-id>
 neurcode simulate --base origin/main
 neurcode policy install soc2
@@ -142,6 +143,7 @@ neurcode doctor
 - `audit evidence`: `--include-events`, `--limit`, `--action`, `--actor-user-id`, `--target-type`, `--from`, `--to`, `--out`, `--json`
 - `verify`: `--plan-id`, `--policy-only`, `--staged`, `--base`, `--record`, `--json`
 - `verify`: `--compiled-policy`, `--change-contract`, `--enforce-change-contract`, `--require-runtime-guard`, `--runtime-guard`, `--async`, `--verify-job-poll-ms`, `--verify-job-timeout-ms`, `--verify-idempotency-key`, `--verify-job-max-attempts`
+- `contract import`: `--auto-detect`, `--agent-path`, `--input`, `--stdin`, `--text`
 - `ship`: `--max-fix-attempts`, `--test-command`, `--skip-tests`, `--allow-dirty`, `--json`
 - `repo link`: `--alias`, `--json`
 - `policy install`: `--force` (replace existing installed pack)

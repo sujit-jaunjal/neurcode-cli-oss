@@ -56,6 +56,103 @@ function parseAsJsonIfPossible(raw) {
         return null;
     }
 }
+function normalizeProvider(provider) {
+    return String(provider || 'generic').trim().toLowerCase();
+}
+function listFilesRecursively(dirPath, maxDepth = 4, maxFiles = 240) {
+    const files = [];
+    const walk = (current, depth) => {
+        if (depth > maxDepth || files.length >= maxFiles) {
+            return;
+        }
+        let entries;
+        try {
+            entries = (0, fs_1.readdirSync)(current, { withFileTypes: true });
+        }
+        catch {
+            return;
+        }
+        for (const entry of entries) {
+            if (files.length >= maxFiles)
+                return;
+            if (entry.name === '.git' || entry.name === 'node_modules') {
+                continue;
+            }
+            const absolutePath = (0, path_1.resolve)(current, entry.name);
+            if (entry.isDirectory()) {
+                walk(absolutePath, depth + 1);
+            }
+            else if (entry.isFile()) {
+                files.push(absolutePath);
+            }
+        }
+    };
+    walk(dirPath, 0);
+    return files;
+}
+function isCandidatePlanFile(filePath) {
+    const extension = (0, path_1.extname)(filePath).toLowerCase();
+    if (!['.md', '.markdown', '.txt', '.json'].includes(extension)) {
+        return false;
+    }
+    const normalized = filePath.toLowerCase();
+    return (normalized.includes('plan')
+        || normalized.includes('architect')
+        || normalized.includes('implementation')
+        || normalized.includes('contract')
+        || normalized.includes('prompt'));
+}
+function fileRecencyScore(filePath) {
+    try {
+        return (0, fs_1.statSync)(filePath).mtimeMs || 0;
+    }
+    catch {
+        return 0;
+    }
+}
+function discoverAgentPlanFile(projectRoot, options) {
+    const provider = normalizeProvider(options.provider);
+    const explicitPath = options.agentPath?.trim();
+    const explicitRoots = explicitPath ? [(0, path_1.resolve)(projectRoot, explicitPath)] : [];
+    const providerRoots = {
+        claude: ['.claude', '.claude/plans', '.claude/tasks', '.neurcode/import'],
+        cursor: ['.cursor', '.cursor/plans', '.neurcode/import'],
+        codex: ['.codex', '.codex/plans', '.neurcode/import'],
+        chatgpt: ['.chatgpt', '.openai', '.neurcode/import'],
+        generic: ['.neurcode/import', '.claude/plans', '.cursor/plans', '.codex/plans'],
+    };
+    const defaultRoots = providerRoots[provider] || providerRoots.generic;
+    const roots = [...explicitRoots, ...defaultRoots.map((entry) => (0, path_1.resolve)(projectRoot, entry))];
+    const candidates = [];
+    for (const root of roots) {
+        if (!(0, fs_1.existsSync)(root)) {
+            continue;
+        }
+        try {
+            const stat = (0, fs_1.statSync)(root);
+            if (stat.isFile()) {
+                if (isCandidatePlanFile(root)) {
+                    candidates.push(root);
+                }
+                continue;
+            }
+            const discovered = listFilesRecursively(root);
+            for (const file of discovered) {
+                if (isCandidatePlanFile(file)) {
+                    candidates.push(file);
+                }
+            }
+        }
+        catch {
+            // Continue scanning remaining roots.
+        }
+    }
+    if (candidates.length === 0) {
+        return null;
+    }
+    candidates.sort((left, right) => fileRecencyScore(right) - fileRecencyScore(left));
+    return candidates[0] || null;
+}
 async function resolveImportPayload(projectRoot, options) {
     if (options.text && options.text.trim()) {
         return {
@@ -81,6 +178,26 @@ async function resolveImportPayload(projectRoot, options) {
             planText: raw,
         };
     }
+    if (options.autoDetect || (options.agentPath && options.agentPath.trim())) {
+        const detectedFile = discoverAgentPlanFile(projectRoot, options);
+        if (detectedFile) {
+            const raw = (0, fs_1.readFileSync)(detectedFile, 'utf-8');
+            const parsed = parseAsJsonIfPossible(raw);
+            if (parsed !== null) {
+                return {
+                    source: 'agent_auto',
+                    planJson: parsed,
+                };
+            }
+            return {
+                source: 'agent_auto',
+                planText: raw,
+            };
+        }
+        if (options.autoDetect || (options.agentPath && options.agentPath.trim())) {
+            throw new Error('No agent plan artifact found for auto-detect. Use --input <path> or provide --text.');
+        }
+    }
     const shouldReadStdin = options.stdin === true || !process.stdin.isTTY;
     if (shouldReadStdin) {
         const raw = await readStdinText();
@@ -99,7 +216,7 @@ async function resolveImportPayload(projectRoot, options) {
             planText: raw,
         };
     }
-    throw new Error('Provide one of --text, --input <path>, or --stdin to import an external plan.');
+    throw new Error('Provide one of --text, --input <path>, --auto-detect, or --stdin to import an external plan.');
 }
 function contractCommand(program) {
     const contract = program
@@ -115,6 +232,8 @@ function contractCommand(program) {
         .option('--input <path>', 'Read plan payload from file (JSON or markdown/text)')
         .option('--text <payload>', 'Inline plan payload (JSON or plain text)')
         .option('--stdin', 'Read plan payload from stdin')
+        .option('--auto-detect', 'Auto-detect latest plan artifact from local AI assistant directories')
+        .option('--agent-path <path>', 'Optional file/dir override when using --auto-detect')
         .option('--no-write-change-contract', 'Skip writing .neurcode/change-contract.json')
         .option('--json', 'Output machine-readable JSON')
         .action(async (options) => {
@@ -183,6 +302,9 @@ function contractCommand(program) {
                 return;
             }
             console.log(chalk.bold.cyan('\n📥 Neurcode Contract Import\n'));
+            if (payload.source === 'agent_auto') {
+                console.log(chalk.dim('Import source: auto-detected agent artifact'));
+            }
             console.log(chalk.dim(`Provider: ${response.provider}`));
             console.log(chalk.dim(`Parse mode: ${response.parseMode}`));
             console.log(chalk.dim(`Imported files: ${response.importedFiles}`));
@@ -224,9 +346,10 @@ function contractCommand(program) {
                 process.exit(1);
             }
             console.error(chalk.red(`\n❌ Contract import failed: ${message}\n`));
-            console.log(chalk.dim('Provide one of: --text, --input <path>, or --stdin'));
+            console.log(chalk.dim('Provide one of: --text, --input <path>, --auto-detect, or --stdin'));
             console.log(chalk.dim('Examples:'));
             console.log(chalk.dim('  neurcode contract import --provider claude --input ./plan.md'));
+            console.log(chalk.dim('  neurcode contract import --provider claude --auto-detect'));
             console.log(chalk.dim('  cat plan.json | neurcode contract import --provider cursor --stdin\n'));
             process.exit(1);
         }

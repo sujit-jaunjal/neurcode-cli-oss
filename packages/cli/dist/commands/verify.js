@@ -67,6 +67,7 @@ const change_contract_1 = require("../utils/change-contract");
 const runtime_guard_1 = require("../utils/runtime-guard");
 const artifact_signature_1 = require("../utils/artifact-signature");
 const policy_1 = require("@neurcode-ai/policy");
+const ai_debt_budget_1 = require("../utils/ai-debt-budget");
 // Import chalk with fallback
 let chalk;
 try {
@@ -477,6 +478,48 @@ function runtimeGuardViolationsToReport(summary) {
         file: item.file || summary.path,
         rule: `runtime_guard:${item.code.toLowerCase()}`,
         severity: 'block',
+        message: item.message,
+    }));
+}
+function toAiDebtSummary(evaluation) {
+    return {
+        mode: evaluation.mode,
+        pass: evaluation.pass,
+        score: evaluation.score,
+        source: evaluation.source,
+        metrics: {
+            addedTodoFixme: evaluation.metrics.addedTodoFixme,
+            addedConsoleLogs: evaluation.metrics.addedConsoleLogs,
+            addedAnyTypes: evaluation.metrics.addedAnyTypes,
+            largeFilesTouched: evaluation.metrics.largeFilesTouched,
+            bloatFiles: evaluation.metrics.bloatFiles,
+        },
+        thresholds: {
+            maxAddedTodoFixme: evaluation.thresholds.maxAddedTodoFixme,
+            maxAddedConsoleLogs: evaluation.thresholds.maxAddedConsoleLogs,
+            maxAddedAnyTypes: evaluation.thresholds.maxAddedAnyTypes,
+            maxLargeFilesTouched: evaluation.thresholds.maxLargeFilesTouched,
+            largeFileDeltaLines: evaluation.thresholds.largeFileDeltaLines,
+            maxBloatFiles: evaluation.thresholds.maxBloatFiles,
+        },
+        violations: evaluation.violations.map((item) => ({
+            code: item.code,
+            metric: item.metric,
+            observed: item.observed,
+            budget: item.budget,
+            message: item.message,
+        })),
+    };
+}
+function toAiDebtReportViolations(summary) {
+    if (summary.mode === 'off' || summary.violations.length === 0) {
+        return [];
+    }
+    const severity = summary.mode === 'enforce' ? 'block' : 'warn';
+    return summary.violations.map((item) => ({
+        rule: `ai_debt:${item.code}`,
+        file: '.neurcode/ai-debt-budget.json',
+        severity,
         message: item.message,
     }));
 }
@@ -1234,8 +1277,16 @@ async function verifyCommand(options) {
             && !isEnabledFlag(process.env.NEURCODE_VERIFY_ALLOW_NON_STRICT_CI)
             && Boolean(options.apiKey || process.env.NEURCODE_API_KEY);
         const strictArtifactMode = explicitStrictArtifactMode || ciEnterpriseDefaultStrict;
+        const runtimeGuardArtifactPath = (0, runtime_guard_1.resolveRuntimeGuardPath)(projectRoot, options.runtimeGuard);
+        const autoRuntimeGuardInStrict = strictArtifactMode
+            && (0, fs_1.existsSync)(runtimeGuardArtifactPath)
+            && !isEnabledFlag(process.env.NEURCODE_VERIFY_DISABLE_AUTO_RUNTIME_GUARD);
         const requireRuntimeGuard = options.requireRuntimeGuard === true
-            || isEnabledFlag(process.env.NEURCODE_VERIFY_REQUIRE_RUNTIME_GUARD);
+            || isEnabledFlag(process.env.NEURCODE_VERIFY_REQUIRE_RUNTIME_GUARD)
+            || autoRuntimeGuardInStrict;
+        const aiDebtConfig = (0, ai_debt_budget_1.resolveAiDebtBudgetConfig)(projectRoot, {
+            strictDefault: strictArtifactMode || requireRuntimeGuard,
+        });
         const signingConfig = resolveGovernanceSigningConfig();
         const aiLogSigningKey = signingConfig.signingKey;
         const aiLogSigningKeyId = signingConfig.signingKeyId;
@@ -1439,6 +1490,9 @@ async function verifyCommand(options) {
             }
             if (ciEnterpriseDefaultStrict && !explicitStrictArtifactMode) {
                 console.log(chalk.dim('   CI enterprise mode detected: strict deterministic artifact enforcement is auto-enabled (set NEURCODE_VERIFY_ALLOW_NON_STRICT_CI=1 to opt out).'));
+            }
+            if (autoRuntimeGuardInStrict && !options.requireRuntimeGuard && !isEnabledFlag(process.env.NEURCODE_VERIFY_REQUIRE_RUNTIME_GUARD)) {
+                console.log(chalk.dim(`   Strict mode detected runtime guard artifact: auto-enforcing runtime guard (${runtimeGuardArtifactPath}).`));
             }
             if (requireSignedArtifacts) {
                 console.log(chalk.dim('   Artifact signature enforcement: enabled (set NEURCODE_VERIFY_ALLOW_UNSIGNED_ARTIFACTS=1 to relax)'));
@@ -2770,12 +2824,19 @@ async function verifyCommand(options) {
                     message: localEvaluation.message,
                 };
             }
+            const aiDebtEvaluation = (0, ai_debt_budget_1.evaluateAiDebtBudget)({
+                diffFiles,
+                bloatCount: verifyResult.bloatCount,
+                config: aiDebtConfig,
+            });
+            const aiDebtSummary = toAiDebtSummary(aiDebtEvaluation);
+            const aiDebtHardBlock = aiDebtSummary.mode === 'enforce' && aiDebtSummary.violations.length > 0;
             // Apply custom policy verdict: block from dashboard overrides API verdict
             const policyBlock = policyDecision === 'block' && policyViolations.length > 0;
             const governanceDecisionBlock = governanceResult?.governanceDecision?.decision === 'block';
             const governanceIntegrityBlock = signedLogsRequired && governanceResult ? governanceResult.aiChangeLogIntegrity.valid !== true : false;
             const governanceHardBlock = governanceDecisionBlock || governanceIntegrityBlock;
-            const effectiveVerdict = policyBlock || governanceHardBlock
+            const effectiveVerdict = policyBlock || governanceHardBlock || aiDebtHardBlock
                 ? 'FAIL'
                 : verifyResult.verdict;
             const policyMessageBase = policyBlock
@@ -2786,9 +2847,12 @@ async function verifyCommand(options) {
                 : governanceDecisionBlock
                     ? governanceResult?.governanceDecision?.summary || 'Governance decision matrix returned BLOCK.'
                     : null;
+            const aiDebtBlockReason = aiDebtHardBlock
+                ? `AI debt budget exceeded: ${aiDebtSummary.violations.map((item) => item.message).join(' ')}`
+                : null;
             const effectiveMessage = (policyExceptionsSummary.suppressed > 0
                 ? `${policyMessageBase} Policy exceptions suppressed ${policyExceptionsSummary.suppressed} violation(s).`
-                : policyMessageBase) + (governanceBlockReason ? ` ${governanceBlockReason}` : '');
+                : policyMessageBase) + (governanceBlockReason ? ` ${governanceBlockReason}` : '') + (aiDebtBlockReason ? ` ${aiDebtBlockReason}` : '');
             // Calculate grade from effective verdict and score
             // CRITICAL: 0/0 planned files = 'F' (Incomplete), not 'B'
             // Bloat automatically drops grade by at least one letter
@@ -2834,10 +2898,11 @@ async function verifyCommand(options) {
             const changedPathsForBrain = diffFiles
                 .flatMap((file) => [file.path, file.oldPath])
                 .filter((value) => Boolean(value));
-            recordVerifyEvent(effectiveVerdict, `adherence=${verifyResult.adherenceScore};bloat=${verifyResult.bloatCount};scopeGuard=${scopeGuardPassed ? 1 : 0};policy=${policyDecision};policyExceptions=${policyExceptionsSummary.suppressed}`, changedPathsForBrain, finalPlanId);
+            recordVerifyEvent(effectiveVerdict, `adherence=${verifyResult.adherenceScore};bloat=${verifyResult.bloatCount};scopeGuard=${scopeGuardPassed ? 1 : 0};policy=${policyDecision};policyExceptions=${policyExceptionsSummary.suppressed};aiDebt=${aiDebtSummary.score}`, changedPathsForBrain, finalPlanId);
             const shouldForceGovernancePass = scopeGuardPassed &&
                 !policyBlock &&
                 !governanceHardBlock &&
+                !aiDebtHardBlock &&
                 (effectiveVerdict === 'PASS' ||
                     ((verifyResult.verdict === 'FAIL' || verifyResult.verdict === 'WARN') &&
                         policyViolations.length === 0 &&
@@ -2858,7 +2923,8 @@ async function verifyCommand(options) {
                     message: v.message,
                     ...(v.line != null ? { startLine: v.line } : {}),
                 }));
-                const violations = [...scopeViolations, ...policyViolationItems];
+                const aiDebtViolationItems = toAiDebtReportViolations(aiDebtSummary);
+                const violations = [...scopeViolations, ...policyViolationItems, ...aiDebtViolationItems];
                 const jsonOutput = {
                     grade,
                     score: verifyResult.adherenceScore,
@@ -2874,12 +2940,14 @@ async function verifyCommand(options) {
                     verificationSource: verifySource,
                     mode: 'plan_enforced',
                     policyOnly: false,
+                    aiDebt: aiDebtSummary,
                     changeContract: changeContractSummary,
                     ...(compiledPolicyMetadata ? { policyCompilation: compiledPolicyMetadata } : {}),
                     ...(governanceResult
                         ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
                             changeContract: changeContractSummary,
                             compiledPolicy: compiledPolicyMetadata,
+                            aiDebt: aiDebtSummary,
                         })
                         : {}),
                     policyLock: {
@@ -2922,6 +2990,7 @@ async function verifyCommand(options) {
                         ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
                             changeContract: changeContractSummary,
                             compiledPolicy: compiledPolicyMetadata,
+                            aiDebt: aiDebtSummary,
                         })
                         : undefined,
                 });
@@ -2951,6 +3020,23 @@ async function verifyCommand(options) {
                 }, policyViolations);
                 if (governanceResult) {
                     displayGovernanceInsights(governanceResult, { explain: options.explain });
+                }
+                if (aiDebtSummary.mode !== 'off') {
+                    const header = aiDebtSummary.mode === 'enforce'
+                        ? aiDebtSummary.pass
+                            ? chalk.green('\nAI Debt Budget: PASS')
+                            : chalk.red('\nAI Debt Budget: BLOCK')
+                        : chalk.yellow('\nAI Debt Budget: ADVISORY');
+                    console.log(header);
+                    console.log(chalk.dim(`   Score: ${aiDebtSummary.score} | TODO/FIXME +${aiDebtSummary.metrics.addedTodoFixme} | ` +
+                        `console.log +${aiDebtSummary.metrics.addedConsoleLogs} | any +${aiDebtSummary.metrics.addedAnyTypes} | ` +
+                        `large files ${aiDebtSummary.metrics.largeFilesTouched} | bloat ${aiDebtSummary.metrics.bloatFiles}`));
+                    if (aiDebtSummary.violations.length > 0) {
+                        aiDebtSummary.violations.forEach((item) => {
+                            const color = aiDebtSummary.mode === 'enforce' ? chalk.red : chalk.yellow;
+                            console.log(color(`   • ${item.message}`));
+                        });
+                    }
                 }
                 console.log(chalk.dim(`\n   Policy exceptions source: ${describePolicyExceptionSource(policyExceptionsSummary.sourceMode)}`));
                 if (policyExceptionsSummary.suppressed > 0) {
@@ -2991,6 +3077,7 @@ async function verifyCommand(options) {
                     severity: v.severity,
                     message: v.message,
                 })),
+                ...toAiDebtReportViolations(aiDebtSummary),
             ];
             await recordVerificationIfRequested(options, config, {
                 grade,
@@ -3010,6 +3097,7 @@ async function verifyCommand(options) {
                     ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
                         changeContract: changeContractSummary,
                         compiledPolicy: compiledPolicyMetadata,
+                        aiDebt: aiDebtSummary,
                     })
                     : undefined,
             });
@@ -3352,6 +3440,7 @@ function buildGovernancePayload(governance, orgGovernanceSettings, options) {
             : null,
         ...(options?.compiledPolicy ? { policyCompilation: options.compiledPolicy } : {}),
         ...(options?.changeContract ? { changeContract: options.changeContract } : {}),
+        ...(options?.aiDebt ? { aiDebt: options.aiDebt } : {}),
     };
 }
 function displayGovernanceInsights(governance, options = {}) {
