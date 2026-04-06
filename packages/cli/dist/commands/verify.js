@@ -367,6 +367,152 @@ function getRuntimeIgnoreSetFromEnv() {
         .map((item) => toUnixPath(item.trim()))
         .filter(Boolean));
 }
+const INTENT_PROOF_CODE_EXTENSIONS = new Set([
+    '.ts',
+    '.tsx',
+    '.js',
+    '.jsx',
+    '.mjs',
+    '.cjs',
+    '.mts',
+    '.cts',
+    '.py',
+    '.java',
+    '.go',
+    '.rb',
+    '.rs',
+]);
+const INTENT_PROOF_IGNORED_DIRECTORIES = new Set([
+    '.git',
+    '.hg',
+    '.svn',
+    '.neurcode',
+    'node_modules',
+    'vendor',
+    'dist',
+    'build',
+    'out',
+    'coverage',
+    '.next',
+    '.turbo',
+    '.cache',
+]);
+function isIntentProofSourceFile(pathValue) {
+    const lower = pathValue.toLowerCase();
+    for (const extension of INTENT_PROOF_CODE_EXTENSIONS) {
+        if (lower.endsWith(extension)) {
+            return true;
+        }
+    }
+    return false;
+}
+function dedupeDeterministicRules(rules) {
+    const seen = new Set();
+    const out = [];
+    for (const rule of rules) {
+        const key = [
+            rule.id,
+            rule.source,
+            rule.statement,
+            rule.matchToken,
+            rule.evaluationMode || '',
+            rule.evaluationScope || '',
+            typeof rule.minMatchesPerFile === 'number' ? String(rule.minMatchesPerFile) : '',
+            typeof rule.maxMatchesPerFile === 'number' ? String(rule.maxMatchesPerFile) : '',
+            rule.pathIncludePatterns?.join('|') || '',
+            rule.pathExcludePatterns?.join('|') || '',
+        ].join('::');
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        out.push(rule);
+    }
+    return out;
+}
+function collectIntentProofFileContents(projectRoot, changedPaths, maxFiles, maxTotalBytes, maxPerFileBytes) {
+    const fileContents = {};
+    let scannedFiles = 0;
+    let scannedBytes = 0;
+    let truncated = false;
+    const tryAddFile = (relativePath) => {
+        if (!relativePath || fileContents[relativePath] !== undefined)
+            return;
+        if (!isIntentProofSourceFile(relativePath) || isExcludedFile(relativePath))
+            return;
+        if (scannedFiles >= maxFiles) {
+            truncated = true;
+            return;
+        }
+        const absolutePath = (0, path_1.join)(projectRoot, relativePath);
+        if (!(0, fs_1.existsSync)(absolutePath))
+            return;
+        try {
+            const stat = (0, fs_1.statSync)(absolutePath);
+            if (!stat.isFile())
+                return;
+            if (stat.size > maxPerFileBytes)
+                return;
+            if (scannedBytes + stat.size > maxTotalBytes) {
+                truncated = true;
+                return;
+            }
+            const content = (0, fs_1.readFileSync)(absolutePath, 'utf-8');
+            fileContents[relativePath] = content;
+            scannedFiles += 1;
+            scannedBytes += stat.size;
+        }
+        catch {
+            // Non-text/unreadable: skip.
+        }
+    };
+    for (const rawPath of changedPaths) {
+        tryAddFile(toUnixPath(rawPath));
+    }
+    const stack = [projectRoot];
+    while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current)
+            continue;
+        let entries;
+        try {
+            entries = (0, fs_1.readdirSync)(current, { withFileTypes: true });
+        }
+        catch {
+            continue;
+        }
+        for (const entry of entries) {
+            if (entry.name === '.' || entry.name === '..')
+                continue;
+            const absolutePath = (0, path_1.join)(current, entry.name);
+            const relativePath = toUnixPath(absolutePath.slice(projectRoot.length + 1));
+            if (entry.isDirectory()) {
+                if (INTENT_PROOF_IGNORED_DIRECTORIES.has(entry.name))
+                    continue;
+                if (isExcludedFile(`${relativePath}/`))
+                    continue;
+                stack.push(absolutePath);
+                continue;
+            }
+            if (!entry.isFile()) {
+                continue;
+            }
+            if (scannedFiles >= maxFiles) {
+                truncated = true;
+                break;
+            }
+            tryAddFile(relativePath);
+        }
+        if (truncated && scannedFiles >= maxFiles) {
+            break;
+        }
+    }
+    return {
+        fileContents,
+        scannedFiles,
+        scannedBytes,
+        truncated,
+    };
+}
 async function buildEffectivePolicyRules(client, projectRoot, useDashboardPolicies) {
     const defaultPolicy = (0, policy_engine_1.createDefaultPolicy)();
     const customRules = [];
@@ -2496,6 +2642,11 @@ async function verifyCommand(options) {
         const hydratedCompiledPolicyRules = effectiveCompiledPolicy
             ? (0, policy_compiler_1.hydrateCompiledPolicyRules)(effectiveCompiledPolicy)
             : [];
+        const deterministicPolicyRules = effectiveCompiledPolicy
+            ? [...effectiveCompiledPolicy.statements.policyRules]
+            : effectiveRules.customPolicies
+                .map((policy) => policy.rule_text)
+                .filter((ruleText) => typeof ruleText === 'string' && ruleText.trim().length > 0);
         if (effectiveCompiledPolicy?.source.policyLockFingerprint &&
             policyLockEvaluation.lockPresent &&
             effectiveCompiledPolicy.source.policyLockFingerprint !== (0, policy_packs_1.readPolicyLockFile)(projectRoot).lock?.effective.fingerprint) {
@@ -2661,6 +2812,17 @@ async function verifyCommand(options) {
                 eventCount: auditIntegrity.count,
             },
         };
+        let intentProofSummary = {
+            enabled: false,
+            pass: true,
+            checkedRules: 0,
+            repoScopedRules: 0,
+            signatureDriftRules: 0,
+            scannedFiles: 0,
+            scannedBytes: 0,
+            truncated: false,
+            violations: [],
+        };
         if (!options.json && effectiveRules.customRules.length > 0) {
             console.log(chalk.dim(`   Evaluating ${effectiveRules.customRules.length} custom policy rule(s) from dashboard`));
         }
@@ -2692,6 +2854,73 @@ async function verifyCommand(options) {
                 })),
             })),
         }));
+        const compiledIntentProof = (0, governance_runtime_1.compileDeterministicConstraints)({
+            intentConstraints: intentConstraintsForVerification,
+            policyRules: deterministicPolicyRules,
+        });
+        const proofRules = dedupeDeterministicRules([
+            ...compiledIntentProof.rules,
+            ...hydratedCompiledPolicyRules,
+        ].filter((rule) => rule.evaluationScope === 'repo'
+            || rule.evaluationMode === 'signature_delta'));
+        if (proofRules.length > 0) {
+            const repoScopedRules = proofRules.filter((rule) => rule.evaluationScope === 'repo');
+            const signatureDriftRules = proofRules.filter((rule) => rule.evaluationMode === 'signature_delta');
+            const maxProofFiles = Math.max(100, Math.floor(Number(process.env.NEURCODE_INTENT_PROOF_MAX_FILES || 2500)));
+            const maxProofBytes = Math.max(1024 * 1024, Math.floor(Number(process.env.NEURCODE_INTENT_PROOF_MAX_BYTES || (32 * 1024 * 1024))));
+            const maxProofPerFileBytes = Math.max(4096, Math.floor(Number(process.env.NEURCODE_INTENT_PROOF_MAX_FILE_BYTES || (768 * 1024))));
+            let proofContents;
+            let proofScannedFiles = 0;
+            let proofScannedBytes = 0;
+            let proofTruncated = false;
+            if (repoScopedRules.length > 0) {
+                const scan = collectIntentProofFileContents(projectRoot, changedFiles.map((file) => file.path), maxProofFiles, maxProofBytes, maxProofPerFileBytes);
+                proofContents = scan.fileContents;
+                proofScannedFiles = scan.scannedFiles;
+                proofScannedBytes = scan.scannedBytes;
+                proofTruncated = scan.truncated;
+            }
+            const proofEvaluation = (0, governance_runtime_1.evaluatePlanVerification)({
+                planFiles: planFilesForVerification.map((path) => ({
+                    path,
+                    action: 'MODIFY',
+                })),
+                changedFiles,
+                diffStats,
+                extraConstraintRules: proofRules,
+                fileContents: proofContents,
+            });
+            intentProofSummary = {
+                enabled: true,
+                pass: proofEvaluation.constraintViolations.length === 0,
+                checkedRules: proofRules.length,
+                repoScopedRules: repoScopedRules.length,
+                signatureDriftRules: signatureDriftRules.length,
+                scannedFiles: proofScannedFiles,
+                scannedBytes: proofScannedBytes,
+                truncated: proofTruncated,
+                violations: [...proofEvaluation.constraintViolations],
+            };
+            if (proofEvaluation.constraintViolations.length > 0) {
+                const intentProofPolicyViolations = proofEvaluation.constraintViolations.map((violation) => ({
+                    file: '.neurcode/intent-proof',
+                    rule: 'intent_proof',
+                    severity: 'block',
+                    message: violation,
+                }));
+                policyViolations.push(...intentProofPolicyViolations);
+                policyDecision = resolvePolicyDecisionFromViolations(policyViolations);
+            }
+            if (!options.json) {
+                if (intentProofSummary.pass) {
+                    console.log(chalk.dim(`   Intent proof checks passed (${intentProofSummary.checkedRules} rule(s)` +
+                        `${intentProofSummary.repoScopedRules > 0 ? `, repo scan ${intentProofSummary.scannedFiles} file(s)` : ''})`));
+                }
+                else {
+                    console.log(chalk.red(`   Intent proof checks failed (${intentProofSummary.violations.length} violation(s), ${intentProofSummary.checkedRules} rule(s))`));
+                }
+            }
+        }
         const changeContractEvaluation = changeContractRead.contract
             ? (0, change_contract_1.evaluateChangeContract)(changeContractRead.contract, {
                 planId: finalPlanId,
@@ -2795,11 +3024,6 @@ async function verifyCommand(options) {
         try {
             let verifySource = 'api';
             let verifyResult;
-            const deterministicPolicyRules = effectiveCompiledPolicy
-                ? [...effectiveCompiledPolicy.statements.policyRules]
-                : effectiveRules.customPolicies
-                    .map((policy) => policy.rule_text)
-                    .filter((ruleText) => typeof ruleText === 'string' && ruleText.trim().length > 0);
             try {
                 verifyResult = await client.verifyPlan(finalPlanId, diffStats, changedFiles, projectId, intentConstraintsForVerification, deterministicPolicyRules, 'api', compiledPolicyMetadata, {
                     async: options.asyncMode === true,
@@ -2990,6 +3214,7 @@ async function verifyCommand(options) {
                     },
                     policyExceptions: policyExceptionsSummary,
                     policyGovernance: policyGovernanceSummary,
+                    intentProof: intentProofSummary,
                     ...(runtimeGuardSummary.required ? { runtimeGuard: runtimeGuardSummary } : {}),
                     ...(policyViolations.length > 0 && { policyDecision }),
                     ...(effectiveRules.policyPack
@@ -3092,6 +3317,25 @@ async function verifyCommand(options) {
                 }
                 if (runtimeGuardSummary.required) {
                     console.log(chalk.dim(`\n   Runtime guard: ${runtimeGuardSummary.pass ? 'pass' : 'block'} (${runtimeGuardSummary.path})`));
+                }
+                if (intentProofSummary.enabled) {
+                    const proofHeader = intentProofSummary.pass
+                        ? chalk.dim(`   Intent proof: pass (${intentProofSummary.checkedRules} rule(s)` +
+                            `${intentProofSummary.repoScopedRules > 0 ? `, scanned ${intentProofSummary.scannedFiles} file(s)` : ''})`)
+                        : chalk.red(`\n⛔ Intent proof enforcement: ${intentProofSummary.violations.length} violation(s) ` +
+                            `(${intentProofSummary.checkedRules} rule(s))`);
+                    console.log(`\n${proofHeader}`);
+                    if (!intentProofSummary.pass) {
+                        intentProofSummary.violations.slice(0, 5).forEach((issue) => {
+                            console.log(chalk.red(`   • ${issue}`));
+                        });
+                        if (intentProofSummary.violations.length > 5) {
+                            console.log(chalk.dim(`   ... ${intentProofSummary.violations.length - 5} more violation(s)`));
+                        }
+                    }
+                    else if (intentProofSummary.truncated) {
+                        console.log(chalk.dim('   Intent proof repo scan reached configured file/byte limit (truncated).'));
+                    }
                 }
             }
             // Report to Neurcode Cloud if --record flag is set

@@ -10,7 +10,15 @@ interface RemediateOptions {
     strictArtifacts?: boolean;
     enforceChangeContract?: boolean;
     requireRuntimeGuard?: boolean;
+    requireApproval?: boolean;
+    minApprovals?: number;
+    approvalCommit?: string;
     autoRepairAiLog?: boolean;
+    rollbackOnRegression?: boolean;
+    requireRollbackSnapshot?: boolean;
+    snapshotMaxFiles?: number;
+    snapshotMaxBytes?: number;
+    snapshotMaxFileBytes?: number;
     noRecord?: boolean;
     skipTests?: boolean;
     publishCard?: boolean;

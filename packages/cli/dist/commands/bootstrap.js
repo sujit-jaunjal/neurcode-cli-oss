@@ -1,88 +1,15 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.bootstrapCommand = bootstrapCommand;
-const child_process_1 = require("child_process");
 const fs_1 = require("fs");
 const project_root_1 = require("../utils/project-root");
-let chalk;
-try {
-    chalk = require('chalk');
-}
-catch {
-    chalk = {
-        green: (value) => value,
-        yellow: (value) => value,
-        red: (value) => value,
-        bold: (value) => value,
-        dim: (value) => value,
-        cyan: (value) => value,
-    };
-}
-function stripAnsi(value) {
-    return value.replace(/\u001b\[[0-9;]*m/g, '');
-}
-function extractLastJsonObject(output) {
-    const clean = stripAnsi(output).trim();
-    const end = clean.lastIndexOf('}');
-    if (end === -1)
-        return null;
-    for (let start = end; start >= 0; start -= 1) {
-        if (clean[start] !== '{')
-            continue;
-        const candidate = clean.slice(start, end + 1);
-        try {
-            const parsed = JSON.parse(candidate);
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                return parsed;
-            }
-        }
-        catch {
-            // Keep searching until parseable JSON object is found.
-        }
-    }
-    return null;
-}
-function asString(record, key) {
-    if (!record)
-        return null;
-    const value = record[key];
-    return typeof value === 'string' ? value : null;
-}
-function asNumber(value) {
+const cli_json_1 = require("../utils/cli-json");
+const chalk = (0, cli_json_1.loadChalk)();
+function asNumberValue(value) {
     return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
-async function runCliJson(commandArgs, cwd) {
-    const args = commandArgs.includes('--json') ? [...commandArgs] : [...commandArgs, '--json'];
-    const stdoutChunks = [];
-    const stderrChunks = [];
-    const exitCode = await new Promise((resolvePromise, reject) => {
-        const child = (0, child_process_1.spawn)(process.execPath, [process.argv[1], ...args], {
-            cwd,
-            env: {
-                ...process.env,
-                CI: process.env.CI || 'true',
-                FORCE_COLOR: '0',
-            },
-            stdio: ['pipe', 'pipe', 'pipe'],
-        });
-        child.stdout.on('data', (chunk) => stdoutChunks.push(String(chunk)));
-        child.stderr.on('data', (chunk) => stderrChunks.push(String(chunk)));
-        child.on('error', (error) => reject(error));
-        child.on('close', (code) => resolvePromise(typeof code === 'number' ? code : 1));
-    });
-    const stdout = stdoutChunks.join('');
-    const stderr = stderrChunks.join('');
-    const payload = extractLastJsonObject(`${stdout}\n${stderr}`);
-    return {
-        exitCode,
-        stdout,
-        stderr,
-        payload,
-        command: args,
-    };
-}
 function emitJson(payload) {
-    console.log(JSON.stringify(payload, null, 2));
+    (0, cli_json_1.emitJson)(payload);
 }
 function hasPlanImportInput(options) {
     return Boolean((options.planInput && options.planInput.trim())
@@ -93,7 +20,7 @@ function hasExistingChangeContract(projectRoot) {
     return (0, fs_1.existsSync)(`${projectRoot}/.neurcode/change-contract.json`);
 }
 function shouldFallbackToAdvisory(result) {
-    const message = (asString(result.payload, 'message')
+    const message = ((0, cli_json_1.asString)(result.payload, 'message')
         || result.stderr
         || result.stdout
         || '').toLowerCase();
@@ -128,14 +55,14 @@ async function bootstrapCommand(options = {}) {
         if (options.requireDashboard === true) {
             policyArgs.push('--require-dashboard');
         }
-        const policyRun = await runCliJson(policyArgs, projectRoot);
+        const policyRun = await (0, cli_json_1.runCliJson)(policyArgs, { cwd: projectRoot });
         if (policyRun.exitCode !== 0) {
             stages.push({
                 stage: 'policy_bootstrap',
                 status: 'failed',
                 command: policyRun.command,
                 exitCode: policyRun.exitCode,
-                message: asString(policyRun.payload, 'error') || 'Policy bootstrap failed.',
+                message: (0, cli_json_1.asString)(policyRun.payload, 'error') || 'Policy bootstrap failed.',
                 payload: policyRun.payload,
             });
             const output = {
@@ -168,7 +95,7 @@ async function bootstrapCommand(options = {}) {
         const bootstrapMeta = policyRun.payload && typeof policyRun.payload === 'object'
             ? policyRun.payload.bootstrap
             : undefined;
-        const deterministicRuleCount = asNumber(bootstrapMeta?.deterministicRuleCount);
+        const deterministicRuleCount = asNumberValue(bootstrapMeta?.deterministicRuleCount);
         const unmatchedStatements = Array.isArray(bootstrapMeta?.unmatchedStatements)
             ? bootstrapMeta.unmatchedStatements.length
             : 0;
@@ -197,14 +124,14 @@ async function bootstrapCommand(options = {}) {
             else if (options.planStdin === true) {
                 contractArgs.push('--stdin');
             }
-            const contractRun = await runCliJson(contractArgs, projectRoot);
+            const contractRun = await (0, cli_json_1.runCliJson)(contractArgs, { cwd: projectRoot });
             if (contractRun.exitCode !== 0) {
                 stages.push({
                     stage: 'contract_import',
                     status: 'failed',
                     command: contractRun.command,
                     exitCode: contractRun.exitCode,
-                    message: asString(contractRun.payload, 'message') || 'Contract import failed.',
+                    message: (0, cli_json_1.asString)(contractRun.payload, 'message') || 'Contract import failed.',
                     payload: contractRun.payload,
                 });
                 const output = {
@@ -226,7 +153,7 @@ async function bootstrapCommand(options = {}) {
                 }
                 process.exit(1);
             }
-            planIdFromContract = asString(contractRun.payload, 'planId');
+            planIdFromContract = (0, cli_json_1.asString)(contractRun.payload, 'planId');
             stages.push({
                 stage: 'contract_import',
                 status: 'success',
@@ -272,7 +199,7 @@ async function bootstrapCommand(options = {}) {
             if (planIdFromContract) {
                 guardArgs.push('--plan-id', planIdFromContract);
             }
-            const guardRun = await runCliJson(guardArgs, projectRoot);
+            const guardRun = await (0, cli_json_1.runCliJson)(guardArgs, { cwd: projectRoot });
             if (guardRun.exitCode === 0) {
                 stages.push({
                     stage: 'guard_start',
@@ -286,7 +213,7 @@ async function bootstrapCommand(options = {}) {
                 });
             }
             else if (strictGuard && allowAdvisoryFallback && shouldFallbackToAdvisory(guardRun)) {
-                const advisoryRun = await runCliJson(['guard', 'start', '--no-strict'], projectRoot);
+                const advisoryRun = await (0, cli_json_1.runCliJson)(['guard', 'start', '--no-strict'], { cwd: projectRoot });
                 if (advisoryRun.exitCode === 0) {
                     finalMode = 'advisory';
                     stages.push({
@@ -305,8 +232,8 @@ async function bootstrapCommand(options = {}) {
                         status: 'failed',
                         command: advisoryRun.command,
                         exitCode: advisoryRun.exitCode,
-                        message: asString(advisoryRun.payload, 'message')
-                            || asString(guardRun.payload, 'message')
+                        message: (0, cli_json_1.asString)(advisoryRun.payload, 'message')
+                            || (0, cli_json_1.asString)(guardRun.payload, 'message')
                             || 'Runtime guard start failed.',
                         payload: advisoryRun.payload || guardRun.payload,
                     });
@@ -318,7 +245,7 @@ async function bootstrapCommand(options = {}) {
                     status: 'failed',
                     command: guardRun.command,
                     exitCode: guardRun.exitCode,
-                    message: asString(guardRun.payload, 'message') || 'Runtime guard start failed.',
+                    message: (0, cli_json_1.asString)(guardRun.payload, 'message') || 'Runtime guard start failed.',
                     payload: guardRun.payload,
                 });
             }

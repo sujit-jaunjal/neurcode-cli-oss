@@ -49,7 +49,11 @@ function serializeDeterministicRule(rule) {
         ...(typeof rule.maxMatchesPerFile === 'number' && Number.isFinite(rule.maxMatchesPerFile)
             ? { maxMatchesPerFile: rule.maxMatchesPerFile }
             : {}),
+        ...(typeof rule.minMatchesPerFile === 'number' && Number.isFinite(rule.minMatchesPerFile)
+            ? { minMatchesPerFile: rule.minMatchesPerFile }
+            : {}),
         ...(rule.evaluationMode ? { evaluationMode: rule.evaluationMode } : {}),
+        ...(rule.evaluationScope ? { evaluationScope: rule.evaluationScope } : {}),
     };
 }
 function compilePathPatterns(patterns) {
@@ -93,7 +97,11 @@ function hydrateDeterministicRule(record) {
             ...(typeof record.maxMatchesPerFile === 'number' && Number.isFinite(record.maxMatchesPerFile)
                 ? { maxMatchesPerFile: record.maxMatchesPerFile }
                 : {}),
+            ...(typeof record.minMatchesPerFile === 'number' && Number.isFinite(record.minMatchesPerFile)
+                ? { minMatchesPerFile: record.minMatchesPerFile }
+                : {}),
             ...(record.evaluationMode ? { evaluationMode: record.evaluationMode } : {}),
+            ...(record.evaluationScope ? { evaluationScope: record.evaluationScope } : {}),
         };
     }
     catch {

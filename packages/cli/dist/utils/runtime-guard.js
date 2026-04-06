@@ -50,7 +50,11 @@ function serializeRule(rule) {
         ...(typeof rule.maxMatchesPerFile === 'number' && Number.isFinite(rule.maxMatchesPerFile)
             ? { maxMatchesPerFile: rule.maxMatchesPerFile }
             : {}),
+        ...(typeof rule.minMatchesPerFile === 'number' && Number.isFinite(rule.minMatchesPerFile)
+            ? { minMatchesPerFile: rule.minMatchesPerFile }
+            : {}),
         ...(rule.evaluationMode ? { evaluationMode: rule.evaluationMode } : {}),
+        ...(rule.evaluationScope ? { evaluationScope: rule.evaluationScope } : {}),
     };
 }
 function compilePathPatterns(patterns) {
@@ -94,7 +98,11 @@ function hydrateRule(rule) {
             ...(typeof rule.maxMatchesPerFile === 'number' && Number.isFinite(rule.maxMatchesPerFile)
                 ? { maxMatchesPerFile: rule.maxMatchesPerFile }
                 : {}),
+            ...(typeof rule.minMatchesPerFile === 'number' && Number.isFinite(rule.minMatchesPerFile)
+                ? { minMatchesPerFile: rule.minMatchesPerFile }
+                : {}),
             ...(rule.evaluationMode ? { evaluationMode: rule.evaluationMode } : {}),
+            ...(rule.evaluationScope ? { evaluationScope: rule.evaluationScope } : {}),
         };
     }
     catch {

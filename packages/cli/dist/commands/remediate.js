@@ -1,101 +1,18 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.remediateCommand = remediateCommand;
+const crypto_1 = require("crypto");
 const child_process_1 = require("child_process");
 const fs_1 = require("fs");
+const path_1 = require("path");
 const project_root_1 = require("../utils/project-root");
+const manual_approvals_1 = require("../utils/manual-approvals");
 const core_1 = require("@neurcode-ai/core");
 const analysis_1 = require("@neurcode-ai/analysis");
-let chalk;
-try {
-    chalk = require('chalk');
-}
-catch {
-    chalk = {
-        green: (value) => value,
-        yellow: (value) => value,
-        red: (value) => value,
-        bold: (value) => value,
-        dim: (value) => value,
-        cyan: (value) => value,
-    };
-}
+const cli_json_1 = require("../utils/cli-json");
+const chalk = (0, cli_json_1.loadChalk)();
 function emitJson(payload) {
-    console.log(JSON.stringify(payload, null, 2));
-}
-function stripAnsi(value) {
-    return value.replace(/\u001b\[[0-9;]*m/g, '');
-}
-function extractLastJsonObject(output) {
-    const clean = stripAnsi(output).trim();
-    const end = clean.lastIndexOf('}');
-    if (end === -1)
-        return null;
-    for (let start = end; start >= 0; start -= 1) {
-        if (clean[start] !== '{')
-            continue;
-        const candidate = clean.slice(start, end + 1);
-        try {
-            const parsed = JSON.parse(candidate);
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                return parsed;
-            }
-        }
-        catch {
-            // Keep searching.
-        }
-    }
-    return null;
-}
-function asString(record, key) {
-    if (!record)
-        return null;
-    const value = record[key];
-    return typeof value === 'string' ? value : null;
-}
-function asNumber(record, key) {
-    if (!record)
-        return null;
-    const value = record[key];
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-function asViolationsCount(record) {
-    if (!record)
-        return 0;
-    const value = record.violations;
-    if (!Array.isArray(value))
-        return 0;
-    return value.length;
-}
-async function runCliJson(commandArgs) {
-    const args = commandArgs.includes('--json') ? [...commandArgs] : [...commandArgs, '--json'];
-    const stdoutChunks = [];
-    const stderrChunks = [];
-    const exitCode = await new Promise((resolvePromise, reject) => {
-        const child = (0, child_process_1.spawn)(process.execPath, [process.argv[1], ...args], {
-            cwd: process.cwd(),
-            env: {
-                ...process.env,
-                CI: process.env.CI || 'true',
-                FORCE_COLOR: '0',
-            },
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        child.stdout.on('data', (chunk) => stdoutChunks.push(String(chunk)));
-        child.stderr.on('data', (chunk) => stderrChunks.push(String(chunk)));
-        child.on('error', (error) => reject(error));
-        child.on('close', (code) => resolvePromise(typeof code === 'number' ? code : 1));
-    });
-    const stdout = stdoutChunks.join('');
-    const stderr = stderrChunks.join('');
-    const payload = extractLastJsonObject(`${stdout}\n${stderr}`);
-    return {
-        exitCode,
-        stdout,
-        stderr,
-        payload,
-        command: args,
-    };
+    (0, cli_json_1.emitJson)(payload);
 }
 function resolveStrictArtifacts(options) {
     if (options.strictArtifacts === true)
@@ -119,6 +36,319 @@ function resolveRequireRuntimeGuard(options) {
     if (options.requireRuntimeGuard === false)
         return false;
     return process.env.NEURCODE_REMEDIATE_REQUIRE_RUNTIME_GUARD === '1';
+}
+function parsePositiveInt(raw) {
+    if (!raw)
+        return null;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0)
+        return null;
+    return parsed;
+}
+function resolveRequireApproval(options) {
+    if (options.requireApproval === true)
+        return true;
+    if (options.requireApproval === false)
+        return false;
+    return process.env.NEURCODE_REMEDIATE_REQUIRE_APPROVAL === '1';
+}
+function resolveMinApprovals(options) {
+    if (Number.isFinite(options.minApprovals)) {
+        return Math.max(1, Math.min(5, Math.floor(Number(options.minApprovals))));
+    }
+    const envValue = parsePositiveInt(process.env.NEURCODE_REMEDIATE_MIN_APPROVALS);
+    if (envValue != null) {
+        return Math.max(1, Math.min(5, envValue));
+    }
+    return 1;
+}
+function resolveRollbackOnRegression(options) {
+    if (options.rollbackOnRegression === true)
+        return true;
+    if (options.rollbackOnRegression === false)
+        return false;
+    if (process.env.NEURCODE_REMEDIATE_ROLLBACK_ON_REGRESSION === '0')
+        return false;
+    return true;
+}
+function resolveRequireRollbackSnapshot(options) {
+    if (options.requireRollbackSnapshot === true)
+        return true;
+    if (options.requireRollbackSnapshot === false)
+        return false;
+    if (process.env.NEURCODE_ENTERPRISE_MODE === '1')
+        return true;
+    return process.env.NEURCODE_REMEDIATE_REQUIRE_ROLLBACK_SNAPSHOT === '1';
+}
+function resolveSnapshotLimits(options) {
+    const maxFiles = Number.isFinite(options.snapshotMaxFiles)
+        ? Math.max(100, Math.floor(Number(options.snapshotMaxFiles)))
+        : (parsePositiveInt(process.env.NEURCODE_REMEDIATE_SNAPSHOT_MAX_FILES) || 5000);
+    const maxBytes = Number.isFinite(options.snapshotMaxBytes)
+        ? Math.max(5_000_000, Math.floor(Number(options.snapshotMaxBytes)))
+        : (parsePositiveInt(process.env.NEURCODE_REMEDIATE_SNAPSHOT_MAX_BYTES) || 128_000_000);
+    const maxFileBytes = Number.isFinite(options.snapshotMaxFileBytes)
+        ? Math.max(100_000, Math.floor(Number(options.snapshotMaxFileBytes)))
+        : (parsePositiveInt(process.env.NEURCODE_REMEDIATE_SNAPSHOT_MAX_FILE_BYTES) || 8_000_000);
+    return {
+        maxFiles,
+        maxBytes,
+        maxFileBytes,
+    };
+}
+function resolveApprovalCommitSha(projectRoot, explicitCommit) {
+    if (explicitCommit && explicitCommit.trim()) {
+        return explicitCommit.trim().toLowerCase();
+    }
+    const run = (0, child_process_1.spawnSync)('git', ['rev-parse', 'HEAD'], {
+        cwd: projectRoot,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (run.status !== 0) {
+        return null;
+    }
+    const sha = String(run.stdout || '').trim().toLowerCase();
+    return sha || null;
+}
+function resolveApprovalState(projectRoot, commitSha, minApprovals) {
+    if (!commitSha) {
+        return {
+            commitSha: null,
+            distinctApprovers: 0,
+            satisfied: false,
+            message: 'Unable to resolve HEAD commit for manual approval gating.',
+        };
+    }
+    const approvals = (0, manual_approvals_1.getManualApprovalsForCommit)(projectRoot, commitSha);
+    const distinctApprovers = (0, manual_approvals_1.countDistinctApprovers)(approvals);
+    const satisfied = distinctApprovers >= minApprovals;
+    const message = satisfied
+        ? `Manual approvals satisfied (${distinctApprovers}/${minApprovals}) for commit ${commitSha}.`
+        : `Manual approvals required (${distinctApprovers}/${minApprovals}) for commit ${commitSha}.`;
+    return {
+        commitSha,
+        distinctApprovers,
+        satisfied,
+        message,
+    };
+}
+function parseNulSeparated(raw) {
+    return raw
+        .split('\u0000')
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+}
+function runGitCapture(projectRoot, args) {
+    const run = (0, child_process_1.spawnSync)('git', args, {
+        cwd: projectRoot,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return {
+        ok: run.status === 0,
+        stdout: String(run.stdout || ''),
+        stderr: String(run.stderr || ''),
+    };
+}
+function listSnapshotPaths(projectRoot) {
+    const tracked = runGitCapture(projectRoot, ['ls-files', '-z']);
+    if (!tracked.ok) {
+        return {
+            paths: [],
+            error: `git ls-files failed: ${tracked.stderr.trim() || 'unknown error'}`,
+        };
+    }
+    const untracked = runGitCapture(projectRoot, ['ls-files', '--others', '--exclude-standard', '-z']);
+    if (!untracked.ok) {
+        return {
+            paths: [],
+            error: `git ls-files --others failed: ${untracked.stderr.trim() || 'unknown error'}`,
+        };
+    }
+    const unique = new Set();
+    for (const entry of [...parseNulSeparated(tracked.stdout), ...parseNulSeparated(untracked.stdout)]) {
+        const normalized = entry.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+        if (!normalized || normalized.startsWith('.git/'))
+            continue;
+        if (normalized.includes('\u0000'))
+            continue;
+        unique.add(normalized);
+    }
+    return {
+        paths: [...unique].sort((a, b) => a.localeCompare(b)),
+        error: null,
+    };
+}
+function withinProject(projectRoot, relativePath) {
+    if (!relativePath)
+        return false;
+    if (relativePath.startsWith('/'))
+        return false;
+    if (relativePath.startsWith('../'))
+        return false;
+    const normalized = relativePath.replace(/\\/g, '/');
+    if (normalized.includes('/../') || normalized === '..')
+        return false;
+    const absolute = (0, path_1.resolve)(projectRoot, relativePath);
+    return absolute === projectRoot || absolute.startsWith(`${projectRoot}${path_1.sep}`);
+}
+function createRollbackSnapshot(projectRoot, limits) {
+    const listed = listSnapshotPaths(projectRoot);
+    if (listed.error) {
+        return {
+            snapshot: null,
+            message: listed.error,
+        };
+    }
+    if (listed.paths.length > limits.maxFiles) {
+        return {
+            snapshot: null,
+            message: `rollback snapshot skipped: ${listed.paths.length} files exceeds maxFiles=${limits.maxFiles}`,
+        };
+    }
+    const snapshotId = `snapshot-${Date.now()}`;
+    const rootDir = (0, path_1.join)(projectRoot, '.neurcode', 'remediate', 'snapshots', snapshotId);
+    const filesDir = (0, path_1.join)(rootDir, 'files');
+    (0, fs_1.mkdirSync)(filesDir, { recursive: true });
+    const files = [];
+    let totalBytes = 0;
+    for (const relativePath of listed.paths) {
+        if (!withinProject(projectRoot, relativePath)) {
+            (0, fs_1.rmSync)(rootDir, { recursive: true, force: true });
+            return {
+                snapshot: null,
+                message: `rollback snapshot skipped unsafe path: ${relativePath}`,
+            };
+        }
+        const absolutePath = (0, path_1.join)(projectRoot, relativePath);
+        let stats;
+        try {
+            stats = (0, fs_1.statSync)(absolutePath);
+        }
+        catch {
+            continue;
+        }
+        if (!stats.isFile())
+            continue;
+        const fileSize = Number(stats.size) || 0;
+        if (fileSize > limits.maxFileBytes) {
+            (0, fs_1.rmSync)(rootDir, { recursive: true, force: true });
+            return {
+                snapshot: null,
+                message: `rollback snapshot skipped: ${relativePath} size ${fileSize} exceeds maxFileBytes=${limits.maxFileBytes}`,
+            };
+        }
+        totalBytes += fileSize;
+        if (totalBytes > limits.maxBytes) {
+            (0, fs_1.rmSync)(rootDir, { recursive: true, force: true });
+            return {
+                snapshot: null,
+                message: `rollback snapshot skipped: total bytes ${totalBytes} exceeds maxBytes=${limits.maxBytes}`,
+            };
+        }
+        const content = (0, fs_1.readFileSync)(absolutePath);
+        const snapshotFilePath = (0, path_1.join)(filesDir, relativePath);
+        (0, fs_1.mkdirSync)((0, path_1.dirname)(snapshotFilePath), { recursive: true });
+        (0, fs_1.writeFileSync)(snapshotFilePath, content);
+        files.push({
+            path: relativePath,
+            sha256: (0, crypto_1.createHash)('sha256').update(content).digest('hex'),
+            size: fileSize,
+        });
+    }
+    const manifestPath = (0, path_1.join)(rootDir, 'manifest.json');
+    (0, fs_1.writeFileSync)(manifestPath, JSON.stringify({
+        snapshotId,
+        createdAt: new Date().toISOString(),
+        projectRoot,
+        totalBytes,
+        fileCount: files.length,
+        limits,
+        files,
+    }, null, 2) + '\n', 'utf-8');
+    return {
+        snapshot: {
+            snapshotId,
+            rootDir,
+            filesDir,
+            files,
+            totalBytes,
+        },
+        message: `rollback snapshot created (${files.length} files, ${totalBytes} bytes)`,
+    };
+}
+function restoreRollbackSnapshot(projectRoot, snapshot) {
+    const listed = listSnapshotPaths(projectRoot);
+    if (listed.error) {
+        return {
+            restored: false,
+            message: `rollback restore failed: ${listed.error}`,
+        };
+    }
+    const snapshotPaths = new Set(snapshot.files.map((entry) => entry.path));
+    const snapshotRootRelative = snapshot.rootDir
+        .replace(projectRoot, '')
+        .replace(/^[\\/]+/, '')
+        .replace(/\\/g, '/');
+    let removedCount = 0;
+    for (const currentPath of listed.paths) {
+        if (currentPath.startsWith('.git/'))
+            continue;
+        if (snapshotRootRelative
+            && (currentPath === snapshotRootRelative || currentPath.startsWith(`${snapshotRootRelative}/`))) {
+            continue;
+        }
+        if (snapshotPaths.has(currentPath))
+            continue;
+        if (!withinProject(projectRoot, currentPath))
+            continue;
+        const absolutePath = (0, path_1.join)(projectRoot, currentPath);
+        try {
+            const stats = (0, fs_1.statSync)(absolutePath);
+            if (!stats.isFile())
+                continue;
+            (0, fs_1.rmSync)(absolutePath, { force: true });
+            removedCount += 1;
+        }
+        catch {
+            // Ignore best-effort cleanup failures.
+        }
+    }
+    let restoredCount = 0;
+    for (const entry of snapshot.files) {
+        if (!withinProject(projectRoot, entry.path)) {
+            return {
+                restored: false,
+                message: `rollback restore aborted due to unsafe snapshot path: ${entry.path}`,
+            };
+        }
+        const source = (0, path_1.join)(snapshot.filesDir, entry.path);
+        const destination = (0, path_1.join)(projectRoot, entry.path);
+        if (!(0, fs_1.existsSync)(source)) {
+            return {
+                restored: false,
+                message: `rollback restore failed: missing snapshot file ${entry.path}`,
+            };
+        }
+        (0, fs_1.mkdirSync)((0, path_1.dirname)(destination), { recursive: true });
+        (0, fs_1.copyFileSync)(source, destination);
+        restoredCount += 1;
+    }
+    return {
+        restored: true,
+        message: `rollback restored ${restoredCount} files and removed ${removedCount} generated files`,
+    };
+}
+function cleanupRollbackSnapshot(snapshot) {
+    if (!snapshot)
+        return;
+    try {
+        (0, fs_1.rmSync)(snapshot.rootDir, { recursive: true, force: true });
+    }
+    catch {
+        // Ignore cleanup errors.
+    }
 }
 function buildVerifyArgs(options, strictArtifacts, enforceChangeContract) {
     const args = ['verify'];
@@ -166,10 +396,10 @@ function isVerifyPass(snapshot) {
 function toVerifySnapshot(result) {
     return {
         exitCode: result.exitCode,
-        verdict: asString(result.payload, 'verdict'),
-        score: asNumber(result.payload, 'score'),
-        message: asString(result.payload, 'message'),
-        violations: asViolationsCount(result.payload),
+        verdict: (0, cli_json_1.asString)(result.payload, 'verdict'),
+        score: (0, cli_json_1.asNumber)(result.payload, 'score'),
+        message: (0, cli_json_1.asString)(result.payload, 'message'),
+        violations: (0, cli_json_1.asViolationsCount)(result.payload),
     };
 }
 function hasImproved(before, after) {
@@ -268,7 +498,7 @@ function extractChangeJustificationFromLog(projectRoot) {
     return null;
 }
 function shouldAttemptAiLogRepair(verifyRun) {
-    const payloadMessage = asString(verifyRun.payload, 'message') || '';
+    const payloadMessage = (0, cli_json_1.asString)(verifyRun.payload, 'message') || '';
     const combined = `${payloadMessage}\n${verifyRun.stdout}\n${verifyRun.stderr}`.toLowerCase();
     if (combined.includes('ai change-log integrity check failed')) {
         return true;
@@ -343,12 +573,18 @@ async function remediateCommand(options = {}) {
     const strictArtifacts = resolveStrictArtifacts(options);
     const enforceChangeContract = resolveEnforceChangeContract(options, strictArtifacts);
     const requireRuntimeGuard = resolveRequireRuntimeGuard(options);
+    const requireApproval = resolveRequireApproval(options);
+    const minApprovals = resolveMinApprovals(options);
+    const approvalCommit = resolveApprovalCommitSha(projectRoot, options.approvalCommit);
     const autoRepairAiLog = resolveAutoRepairAiLog(options);
+    const rollbackOnRegression = resolveRollbackOnRegression(options);
+    const requireRollbackSnapshot = resolveRequireRollbackSnapshot(options);
+    const snapshotLimits = resolveSnapshotLimits(options);
     const maxAttempts = Number.isFinite(options.maxFixAttempts) && Number(options.maxFixAttempts) >= 0
         ? Math.floor(Number(options.maxFixAttempts))
         : 2;
     try {
-        let baselineVerifyRun = await runCliJson(buildVerifyArgs(options, strictArtifacts, enforceChangeContract));
+        let baselineVerifyRun = await (0, cli_json_1.runCliJson)(buildVerifyArgs(options, strictArtifacts, enforceChangeContract));
         let currentSnapshot = toVerifySnapshot(baselineVerifyRun);
         let aiLogRepair = {
             attempted: false,
@@ -359,7 +595,7 @@ async function remediateCommand(options = {}) {
         if (autoRepairAiLog && !isVerifyPass(currentSnapshot) && shouldAttemptAiLogRepair(baselineVerifyRun)) {
             aiLogRepair = attemptAiLogIntegrityRepair(projectRoot);
             if (aiLogRepair.repaired) {
-                baselineVerifyRun = await runCliJson(buildVerifyArgs(options, strictArtifacts, enforceChangeContract));
+                baselineVerifyRun = await (0, cli_json_1.runCliJson)(buildVerifyArgs(options, strictArtifacts, enforceChangeContract));
                 currentSnapshot = toVerifySnapshot(baselineVerifyRun);
             }
         }
@@ -376,6 +612,18 @@ async function remediateCommand(options = {}) {
                     strictArtifacts,
                     enforceChangeContract,
                     requireRuntimeGuard,
+                },
+                governance: {
+                    requireApproval,
+                    minApprovals,
+                    approvalCommit,
+                    rollbackOnRegression,
+                    requireRollbackSnapshot,
+                    snapshotLimits: {
+                        maxFiles: snapshotLimits.maxFiles,
+                        maxBytes: snapshotLimits.maxBytes,
+                        maxFileBytes: snapshotLimits.maxFileBytes,
+                    },
                 },
                 baseline: currentSnapshot,
                 attempts,
@@ -411,6 +659,18 @@ async function remediateCommand(options = {}) {
                     enforceChangeContract,
                     requireRuntimeGuard,
                 },
+                governance: {
+                    requireApproval,
+                    minApprovals,
+                    approvalCommit,
+                    rollbackOnRegression,
+                    requireRollbackSnapshot,
+                    snapshotLimits: {
+                        maxFiles: snapshotLimits.maxFiles,
+                        maxBytes: snapshotLimits.maxBytes,
+                        maxFileBytes: snapshotLimits.maxFileBytes,
+                    },
+                },
                 baseline: currentSnapshot,
                 attempts,
                 finalVerify: currentSnapshot,
@@ -431,6 +691,14 @@ async function remediateCommand(options = {}) {
             const attemptSummary = {
                 attempt,
                 before: currentSnapshot,
+                approval: {
+                    required: requireApproval,
+                    satisfied: !requireApproval,
+                    commitSha: approvalCommit,
+                    minimumApprovals: minApprovals,
+                    distinctApprovers: 0,
+                    message: requireApproval ? 'Approval check pending.' : 'Approval gate disabled.',
+                },
                 runtimeGuard: {
                     executed: false,
                     pass: null,
@@ -448,29 +716,69 @@ async function remediateCommand(options = {}) {
                     score: null,
                     violations: null,
                 },
+                rollback: {
+                    snapshotCreated: false,
+                    snapshotId: null,
+                    restored: false,
+                    postRollbackVerify: null,
+                    message: rollbackOnRegression ? 'Rollback snapshot pending.' : 'Rollback disabled.',
+                },
                 stopReason: null,
             };
+            if (requireApproval) {
+                const approvalState = resolveApprovalState(projectRoot, approvalCommit, minApprovals);
+                attemptSummary.approval.commitSha = approvalState.commitSha;
+                attemptSummary.approval.distinctApprovers = approvalState.distinctApprovers;
+                attemptSummary.approval.satisfied = approvalState.satisfied;
+                attemptSummary.approval.message = approvalState.message;
+                if (!approvalState.satisfied) {
+                    attemptSummary.stopReason = 'approval_required';
+                    attempts.push(attemptSummary);
+                    stopReason = 'approval_required';
+                    break;
+                }
+            }
+            let rollbackSnapshot = null;
+            if (rollbackOnRegression) {
+                const snapshotResult = createRollbackSnapshot(projectRoot, snapshotLimits);
+                if (snapshotResult.snapshot) {
+                    rollbackSnapshot = snapshotResult.snapshot;
+                    attemptSummary.rollback.snapshotCreated = true;
+                    attemptSummary.rollback.snapshotId = rollbackSnapshot.snapshotId;
+                    attemptSummary.rollback.message = snapshotResult.message;
+                }
+                else {
+                    attemptSummary.rollback.message = snapshotResult.message;
+                    if (requireRollbackSnapshot) {
+                        attemptSummary.stopReason = 'rollback_snapshot_unavailable';
+                        attempts.push(attemptSummary);
+                        stopReason = 'rollback_snapshot_unavailable';
+                        break;
+                    }
+                }
+            }
             if (requireRuntimeGuard) {
                 attemptSummary.runtimeGuard.executed = true;
-                const guardRun = await runCliJson(['guard', 'check', '--head']);
+                const guardRun = await (0, cli_json_1.runCliJson)(['guard', 'check', '--head']);
                 const guardPass = guardRun.exitCode === 0;
                 attemptSummary.runtimeGuard.pass = guardPass;
                 attemptSummary.runtimeGuard.message =
-                    asString(guardRun.payload, 'message')
+                    (0, cli_json_1.asString)(guardRun.payload, 'message')
                         || (guardPass ? 'Runtime guard check passed.' : 'Runtime guard check failed.');
                 if (!guardPass) {
+                    cleanupRollbackSnapshot(rollbackSnapshot);
                     attemptSummary.stopReason = 'runtime_guard_blocked';
                     attempts.push(attemptSummary);
                     stopReason = 'runtime_guard_blocked';
                     break;
                 }
             }
-            const shipRun = await runCliJson(buildShipArgs(options));
+            const shipRun = await (0, cli_json_1.runCliJson)(buildShipArgs(options));
             attemptSummary.ship.executed = true;
             attemptSummary.ship.exitCode = shipRun.exitCode;
-            attemptSummary.ship.status = asString(shipRun.payload, 'status');
-            attemptSummary.ship.finalPlanId = asString(shipRun.payload, 'finalPlanId');
-            const afterVerifyRun = await runCliJson(buildVerifyArgs(options, strictArtifacts, enforceChangeContract));
+            attemptSummary.ship.status = (0, cli_json_1.asString)(shipRun.payload, 'status');
+            attemptSummary.ship.finalPlanId = (0, cli_json_1.asString)(shipRun.payload, 'finalPlanId');
+            const afterVerifyRun = await (0, cli_json_1.runCliJson)(buildVerifyArgs(options, strictArtifacts, enforceChangeContract));
             const afterSnapshot = toVerifySnapshot(afterVerifyRun);
             attemptSummary.after = afterSnapshot;
             attemptSummary.delta = {
@@ -480,8 +788,38 @@ async function remediateCommand(options = {}) {
                 violations: afterSnapshot.violations - currentSnapshot.violations,
             };
             attemptSummary.improved = hasImproved(currentSnapshot, afterSnapshot);
+            if (attemptSummary.improved === false && rollbackOnRegression) {
+                if (rollbackSnapshot) {
+                    const restoreResult = restoreRollbackSnapshot(projectRoot, rollbackSnapshot);
+                    attemptSummary.rollback.restored = restoreResult.restored;
+                    attemptSummary.rollback.message = restoreResult.message;
+                    if (!restoreResult.restored && requireRollbackSnapshot) {
+                        attemptSummary.stopReason = 'rollback_restore_failed';
+                        attempts.push(attemptSummary);
+                        stopReason = 'rollback_restore_failed';
+                        cleanupRollbackSnapshot(rollbackSnapshot);
+                        break;
+                    }
+                    if (restoreResult.restored) {
+                        const rollbackVerifyRun = await (0, cli_json_1.runCliJson)(buildVerifyArgs(options, strictArtifacts, enforceChangeContract));
+                        const rollbackSnapshotVerify = toVerifySnapshot(rollbackVerifyRun);
+                        attemptSummary.rollback.postRollbackVerify = rollbackSnapshotVerify;
+                        currentSnapshot = rollbackSnapshotVerify;
+                    }
+                    else {
+                        currentSnapshot = afterSnapshot;
+                    }
+                }
+                else {
+                    attemptSummary.rollback.message = 'Rollback requested but snapshot was not available for this attempt.';
+                    currentSnapshot = afterSnapshot;
+                }
+            }
+            else {
+                currentSnapshot = afterSnapshot;
+            }
+            cleanupRollbackSnapshot(rollbackSnapshot);
             attempts.push(attemptSummary);
-            currentSnapshot = afterSnapshot;
             if (isVerifyPass(afterSnapshot)) {
                 stopReason = 'verify_passed_after_remediation';
                 break;
@@ -506,6 +844,18 @@ async function remediateCommand(options = {}) {
                 strictArtifacts,
                 enforceChangeContract,
                 requireRuntimeGuard,
+            },
+            governance: {
+                requireApproval,
+                minApprovals,
+                approvalCommit,
+                rollbackOnRegression,
+                requireRollbackSnapshot,
+                snapshotLimits: {
+                    maxFiles: snapshotLimits.maxFiles,
+                    maxBytes: snapshotLimits.maxBytes,
+                    maxFileBytes: snapshotLimits.maxFileBytes,
+                },
             },
             baseline: toVerifySnapshot(baselineVerifyRun),
             attempts,
@@ -535,6 +885,9 @@ async function remediateCommand(options = {}) {
         console.log(chalk.dim(`Strict mode: artifacts=${strictArtifacts ? 'on' : 'off'}, `
             + `change-contract=${enforceChangeContract ? 'on' : 'off'}, `
             + `runtime-guard=${requireRuntimeGuard ? 'required' : 'optional'}`));
+        console.log(chalk.dim(`Governance: approval=${requireApproval ? `required(${minApprovals})` : 'optional'}, `
+            + `rollback=${rollbackOnRegression ? 'on' : 'off'}`
+            + `${rollbackOnRegression ? ` [maxFiles=${snapshotLimits.maxFiles}, maxBytes=${snapshotLimits.maxBytes}]` : ''}`));
         for (const attempt of output.attempts) {
             const after = attempt.after;
             const afterLabel = after
@@ -544,6 +897,23 @@ async function remediateCommand(options = {}) {
             if (attempt.runtimeGuard.executed) {
                 console.log(chalk.dim(`  runtime guard: ${attempt.runtimeGuard.pass ? 'pass' : 'block'}`
                     + `${attempt.runtimeGuard.message ? ` (${attempt.runtimeGuard.message})` : ''}`));
+            }
+            if (attempt.approval.required) {
+                console.log(chalk.dim(`  approvals: ${attempt.approval.satisfied ? 'satisfied' : 'blocked'} `
+                    + `(${attempt.approval.distinctApprovers}/${attempt.approval.minimumApprovals})`
+                    + `${attempt.approval.commitSha ? ` on ${attempt.approval.commitSha}` : ''}`));
+            }
+            if (attempt.rollback.snapshotCreated || attempt.rollback.restored || attempt.rollback.message) {
+                const rollbackPrefix = attempt.rollback.restored ? 'restored' : (attempt.rollback.snapshotCreated ? 'captured' : 'skipped');
+                console.log(chalk.dim(`  rollback: ${rollbackPrefix}`
+                    + `${attempt.rollback.snapshotId ? ` (${attempt.rollback.snapshotId})` : ''}`
+                    + `${attempt.rollback.message ? ` - ${attempt.rollback.message}` : ''}`));
+            }
+            if (attempt.rollback.postRollbackVerify) {
+                const rollbackVerify = attempt.rollback.postRollbackVerify;
+                console.log(chalk.dim(`  rollback verify: ${rollbackVerify.verdict || 'UNKNOWN'}`
+                    + `${rollbackVerify.score != null ? ` (score ${rollbackVerify.score})` : ''}`
+                    + `, violations: ${rollbackVerify.violations}`));
             }
             if (attempt.improved === false) {
                 console.log(chalk.yellow('  no measurable governance improvement; stopping remediation loop'));
@@ -578,6 +948,18 @@ async function remediateCommand(options = {}) {
                     strictArtifacts,
                     enforceChangeContract,
                     requireRuntimeGuard,
+                },
+                governance: {
+                    requireApproval,
+                    minApprovals,
+                    approvalCommit,
+                    rollbackOnRegression,
+                    requireRollbackSnapshot,
+                    snapshotLimits: {
+                        maxFiles: snapshotLimits.maxFiles,
+                        maxBytes: snapshotLimits.maxBytes,
+                        maxFileBytes: snapshotLimits.maxFileBytes,
+                    },
                 },
                 baseline: {
                     exitCode: 1,

@@ -597,8 +597,16 @@ program
     .option('--enforce-change-contract', 'Require change contract enforcement in verify stages')
     .option('--no-enforce-change-contract', 'Disable change contract enforcement in verify stages')
     .option('--require-runtime-guard', 'Require `neurcode guard check` to pass before each remediation attempt')
+    .option('--require-approval', 'Require manual approval quorum before each remediation attempt')
+    .option('--min-approvals <n>', 'Minimum distinct manual approvers required when --require-approval is enabled', (val) => parseInt(val, 10))
+    .option('--approval-commit <sha>', 'Commit SHA used for manual approval quorum checks (default: HEAD)')
     .option('--auto-repair-ai-log', 'Attempt deterministic AI change-log integrity repair before remediation (default)', true)
     .option('--no-auto-repair-ai-log', 'Disable automatic AI change-log integrity repair preflight')
+    .option('--disable-rollback-on-regression', 'Disable rollback restore when a remediation attempt does not improve verify')
+    .option('--require-rollback-snapshot', 'Fail remediation when rollback snapshot cannot be created')
+    .option('--snapshot-max-files <n>', 'Rollback snapshot max files (default: 5000)', (val) => parseInt(val, 10))
+    .option('--snapshot-max-bytes <n>', 'Rollback snapshot max total bytes (default: 128000000)', (val) => parseInt(val, 10))
+    .option('--snapshot-max-file-bytes <n>', 'Rollback snapshot max bytes per file (default: 8000000)', (val) => parseInt(val, 10))
     .option('--no-record', 'Disable cloud recording during verify/ship runs')
     .option('--skip-tests', 'Skip tests during remediation ship loop (default: true)')
     .option('--no-publish-card', 'Do not publish merge confidence card during remediation ship loop')
@@ -616,7 +624,15 @@ program
         strictArtifacts: options.strictArtifacts !== false,
         enforceChangeContract: options.enforceChangeContract !== false,
         requireRuntimeGuard: options.requireRuntimeGuard === true,
+        requireApproval: options.requireApproval === true ? true : undefined,
+        minApprovals: Number.isFinite(options.minApprovals) ? options.minApprovals : undefined,
+        approvalCommit: options.approvalCommit,
         autoRepairAiLog: options.autoRepairAiLog !== false,
+        rollbackOnRegression: options.disableRollbackOnRegression === true ? false : undefined,
+        requireRollbackSnapshot: options.requireRollbackSnapshot === true ? true : undefined,
+        snapshotMaxFiles: Number.isFinite(options.snapshotMaxFiles) ? options.snapshotMaxFiles : undefined,
+        snapshotMaxBytes: Number.isFinite(options.snapshotMaxBytes) ? options.snapshotMaxBytes : undefined,
+        snapshotMaxFileBytes: Number.isFinite(options.snapshotMaxFileBytes) ? options.snapshotMaxFileBytes : undefined,
         noRecord: options.record === false,
         skipTests: options.skipTests === true ? true : undefined,
         publishCard: options.publishCard !== false,

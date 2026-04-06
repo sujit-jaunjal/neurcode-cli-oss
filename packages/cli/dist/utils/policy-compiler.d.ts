@@ -12,8 +12,10 @@ export interface CompiledDeterministicRuleRecord {
     };
     pathIncludePatterns?: string[];
     pathExcludePatterns?: string[];
+    minMatchesPerFile?: number;
     maxMatchesPerFile?: number;
-    evaluationMode?: 'added_lines' | 'full_file';
+    evaluationMode?: 'added_lines' | 'full_file' | 'signature_delta';
+    evaluationScope?: 'file' | 'repo';
 }
 export interface CompiledPolicyArtifact {
     schemaVersion: 1;
