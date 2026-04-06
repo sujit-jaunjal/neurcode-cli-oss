@@ -627,6 +627,112 @@ function runtimeGuardViolationsToReport(summary) {
         message: item.message,
     }));
 }
+function asObjectRecord(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return null;
+    }
+    return value;
+}
+function asObjectArray(value) {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+    return value
+        .map((item) => asObjectRecord(item))
+        .filter((item) => item !== null);
+}
+function asBooleanFlag(value) {
+    return typeof value === 'boolean' ? value : null;
+}
+function asNumberValue(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+function asStringValue(value) {
+    return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+function buildDeterministicLayerSummary(payload) {
+    const verdict = asStringValue(payload.verdict) || 'UNKNOWN';
+    const mode = asStringValue(payload.mode) || 'unknown';
+    const policyOnly = payload.policyOnly === true;
+    const scopeGuardPassed = asBooleanFlag(payload.scopeGuardPassed);
+    const violations = asObjectArray(payload.violations);
+    const policyViolations = violations.filter((entry) => {
+        const rule = String(entry.rule || '').toLowerCase();
+        return (!rule.includes('scope_guard')
+            && !rule.includes('change_contract')
+            && !rule.includes('runtime_guard')
+            && !rule.includes('deterministic_artifacts_required')
+            && !rule.includes('signed_artifacts_required'));
+    });
+    const policyBlocking = policyViolations.filter((entry) => String(entry.severity || '').toLowerCase() === 'block');
+    const policyWarnings = policyViolations.filter((entry) => String(entry.severity || '').toLowerCase() === 'warn');
+    const changeContract = asObjectRecord(payload.changeContract);
+    const changeContractValid = asBooleanFlag(changeContract?.valid);
+    const changeContractEnforced = changeContract?.enforced === true;
+    const changeContractViolations = Array.isArray(changeContract?.violations)
+        ? (changeContract?.violations).length
+        : 0;
+    const explicitContractViolations = violations.filter((entry) => {
+        const rule = String(entry.rule || '').toLowerCase();
+        return rule.includes('scope_guard') || rule.includes('change_contract');
+    }).length;
+    const runtimeGuard = asObjectRecord(payload.runtimeGuard);
+    const runtimeGuardRequired = runtimeGuard?.required === true;
+    const runtimeGuardPass = asBooleanFlag(runtimeGuard?.pass);
+    const runtimeGuardViolations = Array.isArray(runtimeGuard?.violations)
+        ? (runtimeGuard?.violations).length
+        : violations.filter((entry) => String(entry.rule || '').toLowerCase().includes('runtime_guard')).length;
+    const policyCompilation = asObjectRecord(payload.policyCompilation);
+    const deterministicRuleCount = asNumberValue(policyCompilation?.deterministicRuleCount);
+    const unmatchedStatements = asNumberValue(policyCompilation?.unmatchedStatements);
+    let policyGateStatus = 'pass';
+    if (policyBlocking.length > 0) {
+        policyGateStatus = 'fail';
+    }
+    else if (policyWarnings.length > 0 || verdict === 'WARN') {
+        policyGateStatus = 'warn';
+    }
+    let contractGateStatus = 'not_applicable';
+    if (!policyOnly) {
+        contractGateStatus = 'pass';
+        if (changeContractEnforced
+            && (changeContractValid === false || changeContractViolations > 0 || explicitContractViolations > 0 || scopeGuardPassed === false)) {
+            contractGateStatus = 'fail';
+        }
+        else if (!changeContractEnforced && (changeContractViolations > 0 || explicitContractViolations > 0)) {
+            contractGateStatus = 'warn';
+        }
+    }
+    let runtimeGuardStatus = 'not_applicable';
+    if (runtimeGuardRequired) {
+        runtimeGuardStatus = runtimeGuardPass === false || runtimeGuardViolations > 0 ? 'fail' : 'pass';
+    }
+    else if (runtimeGuardViolations > 0) {
+        runtimeGuardStatus = 'fail';
+    }
+    return {
+        policyGate: {
+            status: policyGateStatus,
+            blockingViolations: policyBlocking.length,
+            warningViolations: policyWarnings.length,
+            deterministicRuleCount: deterministicRuleCount ?? null,
+            unmatchedStatements: unmatchedStatements ?? null,
+        },
+        contractGate: {
+            status: contractGateStatus,
+            enforced: changeContractEnforced,
+            valid: changeContractValid,
+            violationCount: changeContractViolations + explicitContractViolations,
+            mode,
+        },
+        runtimeGuardGate: {
+            status: runtimeGuardStatus,
+            required: runtimeGuardRequired,
+            pass: runtimeGuardPass,
+            violationCount: runtimeGuardViolations,
+        },
+    };
+}
 function toAiDebtSummary(evaluation) {
     return {
         mode: evaluation.mode,
@@ -884,8 +990,12 @@ async function recordVerificationIfRequested(options, config, payload) {
  */
 async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRoot, config, client, source, scopeTelemetry, projectId, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, compiledPolicyMetadata, changeContractSummary) {
     const emitPolicyOnlyJson = (payload) => {
-        console.log(JSON.stringify({
+        const enrichedPayload = {
             ...payload,
+            deterministicLayers: buildDeterministicLayerSummary(payload),
+        };
+        console.log(JSON.stringify({
+            ...enrichedPayload,
             ...(compiledPolicyMetadata ? { policyCompilation: compiledPolicyMetadata } : {}),
             changeContract: changeContractSummary,
             scope: scopeTelemetry,
@@ -1410,6 +1520,7 @@ async function verifyCommand(options) {
         const emitVerifyJson = (payload) => {
             const jsonPayload = {
                 ...payload,
+                deterministicLayers: buildDeterministicLayerSummary(payload),
                 scope: scopeTelemetry,
             };
             console.log(JSON.stringify(jsonPayload, null, 2));

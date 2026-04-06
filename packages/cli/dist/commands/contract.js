@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.contractCommand = contractCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
+const readline_1 = require("readline");
 const api_client_1 = require("../api-client");
 const config_1 = require("../config");
 const project_root_1 = require("../utils/project-root");
@@ -59,6 +60,19 @@ function parseAsJsonIfPossible(raw) {
 function normalizeProvider(provider) {
     return String(provider || 'generic').trim().toLowerCase();
 }
+function normalizeCandidateLimit(value) {
+    if (!Number.isFinite(value))
+        return 8;
+    const rounded = Math.trunc(value);
+    if (rounded < 1)
+        return 1;
+    if (rounded > 30)
+        return 30;
+    return rounded;
+}
+function isInteractiveTerminal() {
+    return process.stdin.isTTY && process.stdout.isTTY && process.env.CI !== 'true';
+}
 function listFilesRecursively(dirPath, maxDepth = 4, maxFiles = 240) {
     const files = [];
     const walk = (current, depth) => {
@@ -102,15 +116,7 @@ function isCandidatePlanFile(filePath) {
         || normalized.includes('contract')
         || normalized.includes('prompt'));
 }
-function fileRecencyScore(filePath) {
-    try {
-        return (0, fs_1.statSync)(filePath).mtimeMs || 0;
-    }
-    catch {
-        return 0;
-    }
-}
-function discoverAgentPlanFile(projectRoot, options) {
+function resolveAutoDetectRoots(projectRoot, options) {
     const provider = normalizeProvider(options.provider);
     const explicitPath = options.agentPath?.trim();
     const explicitRoots = explicitPath ? [(0, path_1.resolve)(projectRoot, explicitPath)] : [];
@@ -121,11 +127,18 @@ function discoverAgentPlanFile(projectRoot, options) {
         chatgpt: ['.chatgpt', '.openai', '.neurcode/import'],
         generic: ['.neurcode/import', '.claude/plans', '.cursor/plans', '.codex/plans'],
     };
+    if (explicitRoots.length > 0 && !(0, fs_1.existsSync)(explicitRoots[0])) {
+        throw new Error(`--agent-path does not exist: ${explicitRoots[0]}`);
+    }
     const defaultRoots = providerRoots[provider] || providerRoots.generic;
-    const roots = explicitRoots.length > 0
+    return explicitRoots.length > 0
         ? explicitRoots
         : defaultRoots.map((entry) => (0, path_1.resolve)(projectRoot, entry));
+}
+function discoverAgentPlanCandidates(projectRoot, options) {
+    const roots = resolveAutoDetectRoots(projectRoot, options);
     const candidates = [];
+    const dedupe = new Set();
     for (const root of roots) {
         if (!(0, fs_1.existsSync)(root)) {
             continue;
@@ -133,27 +146,91 @@ function discoverAgentPlanFile(projectRoot, options) {
         try {
             const stat = (0, fs_1.statSync)(root);
             if (stat.isFile()) {
-                if (isCandidatePlanFile(root)) {
-                    candidates.push(root);
+                if (isCandidatePlanFile(root) && !dedupe.has(root)) {
+                    dedupe.add(root);
+                    candidates.push({
+                        path: root,
+                        mtimeMs: stat.mtimeMs || 0,
+                        sizeBytes: stat.size || 0,
+                    });
                 }
                 continue;
             }
             const discovered = listFilesRecursively(root);
             for (const file of discovered) {
-                if (isCandidatePlanFile(file)) {
-                    candidates.push(file);
+                if (!isCandidatePlanFile(file) || dedupe.has(file)) {
+                    continue;
                 }
+                dedupe.add(file);
+                const fileStat = (0, fs_1.statSync)(file);
+                candidates.push({
+                    path: file,
+                    mtimeMs: fileStat.mtimeMs || 0,
+                    sizeBytes: fileStat.size || 0,
+                });
             }
         }
         catch {
             // Continue scanning remaining roots.
         }
     }
+    candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+    return candidates;
+}
+function formatAutoDetectCandidates(projectRoot, candidates) {
+    return candidates.map((candidate) => ({
+        path: candidate.path,
+        relativePath: (0, path_1.relative)(projectRoot, candidate.path) || candidate.path,
+        modifiedAt: new Date(candidate.mtimeMs).toISOString(),
+        sizeBytes: candidate.sizeBytes,
+    }));
+}
+function askQuestion(question) {
+    return new Promise((resolvePromise) => {
+        const rl = (0, readline_1.createInterface)({
+            input: process.stdin,
+            output: process.stdout,
+        });
+        rl.question(question, (answer) => {
+            rl.close();
+            resolvePromise(String(answer || '').trim());
+        });
+    });
+}
+async function confirmAutoDetectedCandidate(projectRoot, candidates) {
     if (candidates.length === 0) {
-        return null;
+        throw new Error('No plan candidates available for confirmation.');
     }
-    candidates.sort((left, right) => fileRecencyScore(right) - fileRecencyScore(left));
-    return candidates[0] || null;
+    console.log(chalk.bold.cyan('\n🧭 Auto-detected plan candidates'));
+    candidates.forEach((candidate, idx) => {
+        const rel = (0, path_1.relative)(projectRoot, candidate.path) || candidate.path;
+        const modified = new Date(candidate.mtimeMs).toLocaleString();
+        console.log(chalk.dim(`  ${idx + 1}. ${rel} (${modified}, ${candidate.sizeBytes} bytes)`));
+    });
+    console.log('');
+    const selectionAnswer = await askQuestion(`Select candidate [1-${candidates.length}] (default: 1, q to cancel): `);
+    if (/^q(?:uit)?$/i.test(selectionAnswer)) {
+        throw new Error('Auto-detect selection cancelled by user.');
+    }
+    let selectedRank = 1;
+    if (selectionAnswer) {
+        const parsed = Number.parseInt(selectionAnswer, 10);
+        if (!Number.isFinite(parsed) || parsed < 1 || parsed > candidates.length) {
+            throw new Error(`Invalid selection "${selectionAnswer}". Expected a value between 1 and ${candidates.length}.`);
+        }
+        selectedRank = parsed;
+    }
+    const selected = candidates[selectedRank - 1];
+    const selectedRel = (0, path_1.relative)(projectRoot, selected.path) || selected.path;
+    const confirmAnswer = await askQuestion(`Use "${selectedRel}" for contract import? [Y/n]: `);
+    if (confirmAnswer && !/^y(?:es)?$/i.test(confirmAnswer)) {
+        throw new Error('Auto-detect confirmation denied by user.');
+    }
+    return {
+        selected,
+        selectedRank,
+        confirmed: true,
+    };
 }
 async function resolveImportPayload(projectRoot, options) {
     if (options.text && options.text.trim()) {
@@ -183,21 +260,44 @@ async function resolveImportPayload(projectRoot, options) {
         };
     }
     if (options.autoDetect || (options.agentPath && options.agentPath.trim())) {
-        const detectedFile = discoverAgentPlanFile(projectRoot, options);
-        if (detectedFile) {
-            const raw = (0, fs_1.readFileSync)(detectedFile, 'utf-8');
+        const candidateLimit = normalizeCandidateLimit(options.maxCandidates);
+        const discovered = discoverAgentPlanCandidates(projectRoot, options);
+        if (discovered.length > 0) {
+            const topCandidates = discovered.slice(0, candidateLimit);
+            const shouldConfirm = options.confirm !== false && !options.json && isInteractiveTerminal();
+            let selected = topCandidates[0];
+            let selectedRank = 1;
+            let confirmed = !shouldConfirm;
+            if (shouldConfirm) {
+                const confirmation = await confirmAutoDetectedCandidate(projectRoot, topCandidates);
+                selected = confirmation.selected;
+                selectedRank = confirmation.selectedRank;
+                confirmed = confirmation.confirmed;
+            }
+            const raw = (0, fs_1.readFileSync)(selected.path, 'utf-8');
+            const autoDetectMetadata = {
+                provider: normalizeProvider(options.provider),
+                candidateCount: discovered.length,
+                selectedPath: selected.path,
+                selectedRank,
+                confirmRequired: shouldConfirm,
+                confirmed,
+                candidates: formatAutoDetectCandidates(projectRoot, topCandidates),
+            };
             const parsed = parseAsJsonIfPossible(raw);
             if (parsed !== null) {
                 return {
                     source: 'agent_auto',
                     planJson: parsed,
-                    sourcePath: detectedFile,
+                    sourcePath: selected.path,
+                    autoDetect: autoDetectMetadata,
                 };
             }
             return {
                 source: 'agent_auto',
                 planText: raw,
-                sourcePath: detectedFile,
+                sourcePath: selected.path,
+                autoDetect: autoDetectMetadata,
             };
         }
         if (options.autoDetect || (options.agentPath && options.agentPath.trim())) {
@@ -240,12 +340,46 @@ function contractCommand(program) {
         .option('--stdin', 'Read plan payload from stdin')
         .option('--auto-detect', 'Auto-detect latest plan artifact from local AI assistant directories')
         .option('--agent-path <path>', 'Optional file/dir override when using --auto-detect')
+        .option('--no-confirm', 'Skip interactive confirmation for auto-detected plan selection')
+        .option('--list-candidates', 'List auto-detected candidate plan files and exit without importing')
+        .option('--max-candidates <n>', 'Max auto-detect candidates to inspect/report (default: 8)', (value) => parseInt(value, 10))
         .option('--no-write-change-contract', 'Skip writing .neurcode/change-contract.json')
         .option('--json', 'Output machine-readable JSON')
         .action(async (options) => {
         const projectRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
         const startedAt = Date.now();
         try {
+            if (options.listCandidates) {
+                const candidateLimit = normalizeCandidateLimit(options.maxCandidates);
+                const discovered = discoverAgentPlanCandidates(projectRoot, options);
+                const candidates = formatAutoDetectCandidates(projectRoot, discovered.slice(0, candidateLimit));
+                const payload = {
+                    success: true,
+                    mode: 'candidate_list',
+                    provider: normalizeProvider(options.provider),
+                    candidateCount: discovered.length,
+                    candidates,
+                    message: discovered.length > 0
+                        ? 'Auto-detect candidates resolved.'
+                        : 'No auto-detect candidates found. Provide --input or use --agent-path.',
+                    timestamp: new Date().toISOString(),
+                };
+                if (options.json) {
+                    console.log(JSON.stringify(payload, null, 2));
+                }
+                else if (candidates.length === 0) {
+                    console.log(chalk.yellow('\n⚠️  No auto-detect plan candidates found.\n'));
+                }
+                else {
+                    console.log(chalk.bold.cyan('\n🧭 Auto-detect plan candidates\n'));
+                    candidates.forEach((candidate, idx) => {
+                        console.log(chalk.dim(`  ${idx + 1}. ${candidate.relativePath}`));
+                        console.log(chalk.dim(`     modified: ${candidate.modifiedAt} | size: ${candidate.sizeBytes} bytes`));
+                    });
+                    console.log('');
+                }
+                return;
+            }
             const config = (0, config_1.loadConfig)();
             if (!config.apiKey) {
                 config.apiKey = (0, config_1.requireApiKey)();
@@ -300,6 +434,7 @@ function contractCommand(program) {
                     parseMode: response.parseMode,
                     importedFiles: response.importedFiles,
                     sourcePath: payload.sourcePath || null,
+                    autoDetect: payload.autoDetect || null,
                     warnings: response.warnings || [],
                     changeContract: changeContractPayload,
                     message: response.message,
@@ -313,6 +448,13 @@ function contractCommand(program) {
                 console.log(chalk.dim('Import source: auto-detected agent artifact'));
                 if (payload.sourcePath) {
                     console.log(chalk.dim(`Detected file: ${payload.sourcePath}`));
+                }
+                if (payload.autoDetect) {
+                    console.log(chalk.dim(`Candidates scanned: ${payload.autoDetect.candidateCount} ` +
+                        `(showing top ${payload.autoDetect.candidates.length})`));
+                    if (payload.autoDetect.confirmRequired) {
+                        console.log(chalk.dim(`Selection confirmed: ${payload.autoDetect.confirmed ? 'yes' : 'no'}`));
+                    }
                 }
             }
             else if (payload.source === 'file' && payload.sourcePath) {
@@ -352,6 +494,7 @@ function contractCommand(program) {
                     parseMode: null,
                     importedFiles: 0,
                     sourcePath: null,
+                    autoDetect: null,
                     warnings: [],
                     changeContract: null,
                     message,
@@ -364,6 +507,8 @@ function contractCommand(program) {
             console.log(chalk.dim('Examples:'));
             console.log(chalk.dim('  neurcode contract import --provider claude --input ./plan.md'));
             console.log(chalk.dim('  neurcode contract import --provider claude --auto-detect'));
+            console.log(chalk.dim('  neurcode contract import --provider codex --auto-detect --list-candidates'));
+            console.log(chalk.dim('  neurcode contract import --provider codex --auto-detect --no-confirm'));
             console.log(chalk.dim('  cat plan.json | neurcode contract import --provider cursor --stdin\n'));
             process.exit(1);
         }
