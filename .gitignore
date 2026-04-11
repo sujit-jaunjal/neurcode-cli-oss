@@ -1,0 +1,14 @@
+# Dependency/install artifacts
+node_modules/
+packages/*/node_modules/
+.pnpm-store/
+pnpm-lock.yaml
+
+# Local runtime/sandbox artifacts
+.tmp/
+.neurcode/
+neurcode.db
+neurcode.policy.audit.log.jsonl
+
+# OS/editor artifacts
+.DS_Store
