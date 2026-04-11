@@ -1,6 +1,6 @@
 {
   "name": "@neurcode-ai/cli",
-  "version": "0.9.43",
+  "version": "0.9.44",
   "description": "Neurcode CLI - AI code governance and diff analysis",
   "bin": {
     "neurcode": "dist/index.js"
