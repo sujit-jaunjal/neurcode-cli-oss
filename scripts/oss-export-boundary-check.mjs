@@ -27,6 +27,12 @@ const TEXT_FILE_EXTENSIONS = new Set([
 
 const MAX_SCAN_FILE_BYTES = 5 * 1024 * 1024; // 5MB
 
+const SKIP_DIRECTORIES = new Set([
+  '.git',
+  'node_modules',
+  '.pnpm-store',
+]);
+
 const PROFILE_RULES = {
   cli: {
     required: [
@@ -114,6 +120,9 @@ function listFiles(rootDir) {
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
       const abs = join(rootDir, rel);
       if (entry.isDirectory()) {
+        if (SKIP_DIRECTORIES.has(entry.name)) {
+          continue;
+        }
         stack.push(rel);
         continue;
       }

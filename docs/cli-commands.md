@@ -168,12 +168,12 @@ neurcode --help
 neurcode <command> --help
 ```
 
-## Private Repo Guardrails (Workspace Scripts)
+## OSS Safety and Boundary Checks
 
 ```bash
-pnpm guardrails:install-hooks
-pnpm guardrails:check-hooks
-pnpm ci:main-push-policy
+pnpm oss:check
+pnpm oss:check:boundary
+pnpm cli:smoke
 ```
 
-If command behavior in this file ever diverges from runtime behavior, treat runtime (`packages/cli/src/index.ts`) as source of truth and update this document.
+If command behavior in this file ever diverges from runtime behavior, treat runtime (`packages/cli/dist/index.js`) as source of truth and update this document.

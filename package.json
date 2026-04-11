@@ -6,7 +6,9 @@
   "scripts": {
     "oss:check": "node scripts/oss-safety-check.mjs",
     "oss:check:boundary": "node scripts/oss-export-boundary-check.mjs . --profile=cli",
-    "cli:help": "node packages/cli/dist/index.js --help"
+    "cli:help": "node packages/cli/dist/index.js --help",
+    "cli:smoke": "node scripts/cli-smoke-check.mjs",
+    "ci:oss": "pnpm oss:check && pnpm oss:check:boundary && pnpm cli:help && pnpm cli:smoke"
   },
   "workspaces": [
     "packages/*"
