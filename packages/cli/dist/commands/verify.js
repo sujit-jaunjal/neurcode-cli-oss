@@ -64,6 +64,7 @@ const policy_audit_1 = require("../utils/policy-audit");
 const governance_1 = require("../utils/governance");
 const policy_compiler_1 = require("../utils/policy-compiler");
 const change_contract_1 = require("../utils/change-contract");
+const diff_symbols_1 = require("../utils/diff-symbols");
 const runtime_guard_1 = require("../utils/runtime-guard");
 const artifact_signature_1 = require("../utils/artifact-signature");
 const policy_1 = require("@neurcode-ai/policy");
@@ -2997,6 +2998,7 @@ async function verifyCommand(options) {
                 })),
             })),
         }));
+        const changedSymbols = (0, diff_symbols_1.extractDeclaredSymbolsFromDiff)(diffFiles);
         const compiledIntentProof = (0, governance_runtime_1.compileDeterministicConstraints)({
             intentConstraints: intentConstraintsForVerification,
             policyRules: deterministicPolicyRules,
@@ -3068,6 +3070,16 @@ async function verifyCommand(options) {
             ? (0, change_contract_1.evaluateChangeContract)(changeContractRead.contract, {
                 planId: finalPlanId,
                 changedFiles: changedFiles.map((file) => file.path),
+                changedFileEntries: changedFiles.map((file) => ({
+                    path: file.path,
+                    changeType: file.changeType,
+                })),
+                changedSymbols: changedSymbols.map((symbol) => ({
+                    name: symbol.name,
+                    type: symbol.type,
+                    action: symbol.action,
+                    file: symbol.file,
+                })),
                 policyLockFingerprint: (0, policy_packs_1.readPolicyLockFile)(projectRoot).lock?.effective.fingerprint || null,
                 compiledPolicyFingerprint: effectiveCompiledPolicy?.fingerprint || null,
             })

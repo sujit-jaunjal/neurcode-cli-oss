@@ -55,6 +55,7 @@ const change_contract_1 = require("../utils/change-contract");
 const policy_packs_1 = require("../utils/policy-packs");
 const policy_compiler_1 = require("../utils/policy-compiler");
 const artifact_signature_1 = require("../utils/artifact-signature");
+const plan_symbols_1 = require("../utils/plan-symbols");
 // Import chalk with fallback for plain strings if not available
 let chalk;
 try {
@@ -591,6 +592,24 @@ function parseBooleanFlag(raw, fallback) {
     }
     return fallback;
 }
+function resolveChangeContractOptionsFromEnv() {
+    return {
+        enforceExpectedFiles: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ENFORCE_EXPECTED_FILES, false),
+        enforceActionMatching: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ENFORCE_ACTION_MATCHING, true),
+        allowRenameForModify: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ALLOW_RENAME_FOR_MODIFY, true),
+        enforceExpectedSymbols: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ENFORCE_EXPECTED_SYMBOLS, false),
+        enforceSymbolActionMatching: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ENFORCE_SYMBOL_ACTION_MATCHING, false),
+    };
+}
+function mapPlanFilesForChangeContract(files) {
+    return files
+        .map((file) => ({
+        path: file.path,
+        action: file.action,
+        reason: file.reason,
+    }))
+        .filter((file) => typeof file.path === 'string' && file.path.trim().length > 0);
+}
 function parseConfidenceScoreThreshold(raw) {
     if (!raw)
         return null;
@@ -854,6 +873,9 @@ function emitCachedPlanHit(input) {
                 projectId: input.projectId || null,
                 intent: input.response.plan.summary || 'cached-plan',
                 expectedFiles,
+                planFiles: mapPlanFilesForChangeContract(input.response.plan.files),
+                expectedSymbols: (0, plan_symbols_1.mapPlanSymbolsForChangeContract)(input.response.plan),
+                options: resolveChangeContractOptionsFromEnv(),
                 policyLockFingerprint: lockRead.lock?.effective.fingerprint || null,
                 compiledPolicyFingerprint: compiledPolicyRead.artifact?.fingerprint || null,
             });
@@ -2284,6 +2306,9 @@ async function planCommand(intent, options) {
                     projectId: finalProjectId || null,
                     intent,
                     expectedFiles,
+                    planFiles: mapPlanFilesForChangeContract(response.plan.files),
+                    expectedSymbols: (0, plan_symbols_1.mapPlanSymbolsForChangeContract)(response.plan),
+                    options: resolveChangeContractOptionsFromEnv(),
                     policyLockFingerprint: lockRead.lock?.effective.fingerprint || null,
                     compiledPolicyFingerprint: compiledPolicyRead.artifact?.fingerprint || null,
                 });

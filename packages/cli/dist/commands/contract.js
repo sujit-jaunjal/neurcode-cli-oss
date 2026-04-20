@@ -12,6 +12,7 @@ const policy_packs_1 = require("../utils/policy-packs");
 const policy_compiler_1 = require("../utils/policy-compiler");
 const change_contract_1 = require("../utils/change-contract");
 const artifact_signature_1 = require("../utils/artifact-signature");
+const plan_symbols_1 = require("../utils/plan-symbols");
 let chalk;
 try {
     chalk = require('chalk');
@@ -59,6 +60,34 @@ function parseAsJsonIfPossible(raw) {
 }
 function normalizeProvider(provider) {
     return String(provider || 'generic').trim().toLowerCase();
+}
+function parseBooleanFlag(raw, fallback) {
+    if (!raw || !raw.trim())
+        return fallback;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on')
+        return true;
+    if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off')
+        return false;
+    return fallback;
+}
+function resolveChangeContractOptionsFromEnv() {
+    return {
+        enforceExpectedFiles: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ENFORCE_EXPECTED_FILES, false),
+        enforceActionMatching: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ENFORCE_ACTION_MATCHING, true),
+        allowRenameForModify: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ALLOW_RENAME_FOR_MODIFY, true),
+        enforceExpectedSymbols: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ENFORCE_EXPECTED_SYMBOLS, false),
+        enforceSymbolActionMatching: parseBooleanFlag(process.env.NEURCODE_CHANGE_CONTRACT_ENFORCE_SYMBOL_ACTION_MATCHING, false),
+    };
+}
+function mapPlanFilesForChangeContract(files) {
+    return files
+        .map((file) => ({
+        path: file.path,
+        action: file.action,
+        reason: file.reason,
+    }))
+        .filter((file) => typeof file.path === 'string' && file.path.trim().length > 0);
 }
 function normalizeCandidateLimit(value) {
     if (!Number.isFinite(value))
@@ -407,6 +436,9 @@ function contractCommand(program) {
                     projectId: options.projectId || null,
                     intent: options.intent || response.plan.summary || 'imported-plan',
                     expectedFiles,
+                    planFiles: mapPlanFilesForChangeContract(response.plan.files),
+                    expectedSymbols: (0, plan_symbols_1.mapPlanSymbolsForChangeContract)(response.plan),
+                    options: resolveChangeContractOptionsFromEnv(),
                     policyLockFingerprint: policyLock.lock?.effective.fingerprint || null,
                     compiledPolicyFingerprint: compiledPolicy.artifact?.fingerprint || null,
                 });
