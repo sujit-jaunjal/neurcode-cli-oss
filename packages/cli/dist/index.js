@@ -21,6 +21,7 @@ const refactor_1 = require("./commands/refactor");
 const security_1 = require("./commands/security");
 const ask_1 = require("./commands/ask");
 const plan_1 = require("./commands/plan");
+const plan_show_1 = require("./commands/plan-show");
 const plan_slo_1 = require("./commands/plan-slo");
 const repo_1 = require("./commands/repo");
 const apply_1 = require("./commands/apply");
@@ -28,6 +29,8 @@ const verify_1 = require("./commands/verify");
 const prompt_1 = require("./commands/prompt");
 const ship_1 = require("./commands/ship");
 const remediate_1 = require("./commands/remediate");
+const fix_1 = require("./commands/fix");
+const generate_1 = require("./commands/generate");
 const config_1 = require("./commands/config");
 const map_1 = require("./commands/map");
 const allow_1 = require("./commands/allow");
@@ -49,6 +52,7 @@ const guard_1 = require("./commands/guard");
 const bootstrap_1 = require("./commands/bootstrap");
 const messages_1 = require("./utils/messages");
 const config_2 = require("./config");
+const start_intent_1 = require("./commands/start-intent");
 // Read version from package.json
 let version = '0.1.2'; // fallback
 try {
@@ -61,52 +65,83 @@ catch (error) {
 }
 const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
-    '1) neurcode init',
-    '2) neurcode login',
-    '3) neurcode verify --plan-id <id> --enforce-change-contract',
-    '4) neurcode fix --plan-id <id> (optional)',
+    {
+        command: 'neurcode start "<intent>"',
+        description: 'Initialize what you are building',
+    },
+    {
+        command: 'neurcode generate "<task>"',
+        description: 'Generate governed code',
+    },
+    {
+        command: 'neurcode verify',
+        description: 'Check code against policies and plan',
+    },
+    {
+        command: 'neurcode fix',
+        description: 'Get actionable fixes',
+    },
 ];
-const ADVANCED_WORKFLOW_HINTS = [
-    'neurcode plan "Describe the change"',
-    'neurcode contract import --auto-detect --write-change-contract',
-    'neurcode prompt',
-    'neurcode ship "Goal" --max-fix-attempts 2',
-    'neurcode ask "<question>"',
-    'neurcode simulate --base origin/main',
-    'neurcode guard start && neurcode guard check --staged',
-    'neurcode compat --json',
-    'neurcode policy install soc2',
-    'neurcode audit evidence --no-include-events --out .neurcode/evidence.json',
-    'neurcode verify --plan-id <id> --async --verify-job-timeout-ms 600000',
-    'neurcode repo link ../backend --alias backend',
-    'neurcode plan-slo status --json',
-];
+const PRIMARY_COMMAND_NAMES = new Set(['start', 'generate', 'verify', 'fix']);
+function formatCoreWorkflowStep(step) {
+    return `  * ${step.command.padEnd(28)} ${step.description}`;
+}
+function buildAdvancedLegacyCommandsList(root) {
+    const advancedCommands = [];
+    for (const subcommand of root.commands) {
+        const commandName = subcommand.name();
+        if (commandName === 'help' || PRIMARY_COMMAND_NAMES.has(commandName)) {
+            continue;
+        }
+        advancedCommands.push(commandName);
+    }
+    return advancedCommands.sort((left, right) => left.localeCompare(right));
+}
+function buildAdvancedLegacyHints(root) {
+    return buildAdvancedLegacyCommandsList(root).map((commandName) => `neurcode ${commandName}`);
+}
+function configurePrimaryHelpView(root) {
+    const primaryOrder = ['start', 'generate', 'verify', 'fix'];
+    root.configureHelp({
+        visibleCommands: (command) => {
+            const filtered = command.commands.filter((subcommand) => {
+                const commandName = subcommand.name();
+                return commandName === 'help' || PRIMARY_COMMAND_NAMES.has(commandName);
+            });
+            return filtered.sort((left, right) => {
+                const leftIndex = primaryOrder.indexOf(left.name());
+                const rightIndex = primaryOrder.indexOf(right.name());
+                const leftRank = leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex;
+                const rightRank = rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex;
+                return leftRank - rightRank;
+            });
+        },
+    });
+}
 function printCoreWorkflowGuide() {
     console.log(chalk.bold.cyan('\n🚀 Neurcode Start\n'));
-    console.log(chalk.bold.white('Primary Flow (Plan-First Governance):'));
-    CORE_WORKFLOW_STEPS.forEach((step) => console.log(chalk.dim(`  ${step}`)));
+    console.log(chalk.bold.white('Core Workflow:'));
+    CORE_WORKFLOW_STEPS.forEach((step) => console.log(chalk.dim(formatCoreWorkflowStep(step))));
     console.log('');
-    console.log(chalk.bold.white('Advanced (When Needed):'));
-    ADVANCED_WORKFLOW_HINTS.forEach((step) => console.log(chalk.dim(`  • ${step}`)));
-    console.log('');
+    console.log(chalk.dim('Run `neurcode --help` to see advanced and legacy commands.\n'));
 }
-function renderHelpFooter() {
+function renderHelpFooter(advancedCommands) {
+    const advancedLines = advancedCommands.map((commandName) => `  * neurcode ${commandName}`);
     return [
         '',
-        'Core Workflow:',
-        ...CORE_WORKFLOW_STEPS.map((step) => `  ${step}`),
+        'Core Workflow',
+        ...CORE_WORKFLOW_STEPS.map((step) => formatCoreWorkflowStep(step)),
         '',
-        'Advanced Commands:',
-        ...ADVANCED_WORKFLOW_HINTS.map((step) => `  • ${step}`),
+        'Advanced / Legacy Commands',
+        ...(advancedLines.length > 0 ? advancedLines : ['  * (none)']),
         '',
-        'Run `neurcode start` for a guided onboarding flow.',
+        'Run `neurcode <command> --help` for command-specific details.',
     ].join('\n');
 }
 program
     .name('neurcode')
     .description('AI-powered code governance and diff analysis')
     .version(version);
-program.addHelpText('after', renderHelpFooter());
 // Show welcome banner before parsing (for help or unauthenticated users)
 async function showWelcomeIfNeeded() {
     if (!process.env.CI && process.stdout.isTTY) {
@@ -123,16 +158,28 @@ showWelcomeIfNeeded().catch(() => {
     // Ignore errors in welcome banner (non-critical)
 });
 program
-    .command('start')
-    .description('Show guided Neurcode flow (init -> login -> verify -> fix)')
+    .command('start [intent...]')
+    .description('Initialize what you are building')
     .option('--run-init', 'Run `neurcode init` immediately after showing the guide')
     .option('--json', 'Output machine-readable onboarding metadata')
-    .action(async (options) => {
+    .action(async (intentParts, options) => {
+    const intentText = Array.isArray(intentParts)
+        ? intentParts.join(' ')
+        : typeof intentParts === 'string'
+            ? intentParts
+            : '';
+    const trimmedIntent = intentText.trim();
+    if (trimmedIntent.length > 0) {
+        (0, start_intent_1.startIntentCommand)(trimmedIntent, {
+            json: options.json === true,
+        });
+        return;
+    }
     if (options.json) {
         console.log(JSON.stringify({
             command: 'start',
             coreWorkflow: CORE_WORKFLOW_STEPS,
-            advancedHints: ADVANCED_WORKFLOW_HINTS,
+            advancedHints: buildAdvancedLegacyHints(program),
             timestamp: new Date().toISOString(),
         }, null, 2));
         if (options.runInit === true) {
@@ -360,6 +407,13 @@ program
     .action(async (intent, options) => {
     // Handle multiple arguments (when user doesn't quote)
     const intentString = Array.isArray(intent) ? intent.join(' ') : intent;
+    const trimmedIntent = intentString.trim().toLowerCase();
+    if (trimmedIntent === 'show') {
+        (0, plan_show_1.planShowCommand)({
+            json: options.json === true,
+        });
+        return;
+    }
     if (Array.isArray(intent) && intent.length > 1) {
         console.log(chalk.yellow('Tip: Wrap your intent in quotes for better shell compatibility.'));
     }
@@ -647,39 +701,42 @@ program
     });
 });
 program
+    .command('generate')
+    .description('Generate governed code')
+    .argument('<prompt...>', 'User prompt to govern')
+    .option('--plan-id <id>', 'Plan ID override for scope context')
+    .option('--json', 'Output machine-readable JSON')
+    .action((promptParts, options) => {
+    const promptText = Array.isArray(promptParts) ? promptParts.join(' ') : String(promptParts || '');
+    (0, generate_1.generateCommand)(promptText, {
+        planId: options.planId,
+        json: options.json === true,
+    });
+});
+program
     .command('fix')
-    .description('Primary alias for remediation loop (verify -> fix -> verify)')
-    .option('--goal <text>', 'Goal text for remediation loop')
+    .description('Get actionable fixes')
     .option('--plan-id <id>', 'Plan ID for verify scope checks')
     .option('--project-id <id>', 'Project ID override')
-    .option('--max-fix-attempts <n>', 'Maximum remediation attempts (default: 2)', (val) => parseInt(val, 10))
     .option('--policy-only', 'Run in policy-only verification mode')
-    .option('--require-plan', 'Fail verify if plan context is missing')
-    .option('--strict-artifacts', 'Require deterministic compiled-policy/change-contract artifacts')
-    .option('--no-strict-artifacts', 'Disable strict deterministic artifact enforcement')
-    .option('--enforce-change-contract', 'Require change contract enforcement')
-    .option('--no-enforce-change-contract', 'Disable change contract enforcement')
-    .option('--require-runtime-guard', 'Require runtime guard checks before each remediation attempt')
-    .option('--no-record', 'Disable cloud recording during verify/ship runs')
+    .option('--staged', 'Only verify staged changes')
+    .option('--head', 'Verify changes against HEAD')
+    .option('--base <ref>', 'Verify changes against a specific base ref')
     .option('--json', 'Output machine-readable JSON')
-    .action((options) => {
-    (0, remediate_1.remediateCommand)({
-        goal: options.goal,
+    .action(async (options) => {
+    await (0, fix_1.fixCommand)({
         planId: options.planId,
         projectId: options.projectId,
-        maxFixAttempts: Number.isFinite(options.maxFixAttempts) ? options.maxFixAttempts : undefined,
         policyOnly: options.policyOnly === true,
-        requirePlan: options.requirePlan === true,
-        strictArtifacts: options.strictArtifacts !== false,
-        enforceChangeContract: options.enforceChangeContract !== false,
-        requireRuntimeGuard: options.requireRuntimeGuard === true,
-        noRecord: options.record === false,
+        staged: options.staged === true,
+        head: options.head === true,
+        base: options.base,
         json: options.json === true,
     });
 });
 program
     .command('verify')
-    .description('Verify plan adherence - Compare current changes against an Architect Plan')
+    .description('Check code against policies and plan')
     .option('--plan-id <id>', 'Plan ID to verify against (required unless --policy-only)')
     .option('--project-id <id>', 'Project ID')
     .option('--require-plan', 'Fail if no plan context exists instead of falling back to policy-only mode')
@@ -788,5 +845,8 @@ revertCmd
         force: options.force || false,
     });
 });
+configurePrimaryHelpView(program);
+const advancedLegacyCommands = buildAdvancedLegacyCommandsList(program);
+program.addHelpText('after', renderHelpFooter(advancedLegacyCommands));
 program.parse();
 //# sourceMappingURL=index.js.map

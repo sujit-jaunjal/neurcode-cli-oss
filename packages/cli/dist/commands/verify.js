@@ -55,6 +55,7 @@ const ignore_1 = require("../utils/ignore");
 const project_root_1 = require("../utils/project-root");
 const brain_context_1 = require("../utils/brain-context");
 const scope_telemetry_1 = require("../utils/scope-telemetry");
+const plan_sync_1 = require("../utils/plan-sync");
 const policy_packs_1 = require("../utils/policy-packs");
 const custom_policy_rules_1 = require("../utils/custom-policy-rules");
 const policy_exceptions_1 = require("../utils/policy-exceptions");
@@ -251,6 +252,15 @@ async function probeApiRuntimeCompatibility(apiUrl) {
  */
 const IGNORED_METADATA_FILE_PATTERN = /(^|\/)neurcode\.config\.json$/i;
 const IGNORED_DIRECTORIES = ['.git/', 'node_modules/'];
+const IGNORED_GOVERNANCE_ARTIFACT_PATTERNS = [
+    /(^|\/)neurcode\.policy\.compiled\.json$/i,
+    /(^|\/)neurcode\.policy\.audit\.log\.jsonl$/i,
+    /(^|\/)neurcode\.policy\.lock\.json$/i,
+    /(^|\/)neurcode\.policy\.governance\.json$/i,
+    /(^|\/)neurcode\.policy\.exceptions\.json$/i,
+    /(^|\/)neurcode\.policy\.json$/i,
+    /(^|\/)neurcode\.rules\.json$/i,
+];
 function isExcludedFile(filePath) {
     // Normalize path separators (handle both / and \)
     const normalizedPath = filePath.replace(/\\/g, '/');
@@ -261,6 +271,12 @@ function isExcludedFile(filePath) {
     // Ignore .neurcode internals at any nesting level (monorepo-safe)
     if (/(^|\/)\.neurcode\//.test(normalizedPath)) {
         return true;
+    }
+    // Ignore generated / governance artifacts written by Neurcode itself
+    for (const pattern of IGNORED_GOVERNANCE_ARTIFACT_PATTERNS) {
+        if (pattern.test(normalizedPath)) {
+            return true;
+        }
     }
     // Check if path starts with any excluded prefix
     const excludedPrefixes = [...IGNORED_DIRECTORIES];
@@ -657,6 +673,303 @@ function asNumberValue(value) {
 function asStringValue(value) {
     return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
+const EXPEDITE_FOLLOW_UP_CHECKLIST = [
+    'Add validation back',
+    'Move logic to proper layer',
+    'Remove temporary code',
+];
+function containsAnyToken(value, tokens) {
+    const normalized = value.toLowerCase();
+    return tokens.some((token) => normalized.includes(token));
+}
+function isSecurityOrAuthViolation(fileRaw, policyRaw, messageRaw) {
+    const combined = `${fileRaw} ${policyRaw} ${messageRaw}`.toLowerCase();
+    return containsAnyToken(combined, [
+        'auth',
+        'authentication',
+        'authorization',
+        'security',
+        'permission',
+        'access control',
+        'access_control',
+        'token',
+        'secret',
+        'credential',
+        'encryption',
+        'encrypt',
+        'decrypt',
+        'csrf',
+        'xss',
+        'sql injection',
+        'sqli',
+        'insecure',
+        'vulnerability',
+    ]);
+}
+function isCriticalScopeBreach(fileRaw, messageRaw) {
+    const combined = `${fileRaw} ${messageRaw}`.toLowerCase();
+    return containsAnyToken(combined, [
+        'auth',
+        'security',
+        'secret',
+        'token',
+        'credential',
+        'permission',
+        'infra/terraform',
+        'terraform',
+        'k8s',
+        'helm',
+        'migration',
+        'database/migration',
+        'policy',
+        'contract',
+    ]);
+}
+function resolveExpediteModeFromPayload(payload) {
+    const explicit = asBooleanFlag(payload.expediteMode);
+    if (explicit !== null) {
+        return explicit;
+    }
+    const message = asStringValue(payload.message) || '';
+    return containsAnyToken(message, ['hotfix', 'urgent', 'prod down', 'incident', 'expedite']);
+}
+function toVerifySeverity(value) {
+    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (normalized === 'critical' || normalized === 'block')
+        return 'critical';
+    if (normalized === 'high')
+        return 'high';
+    if (normalized === 'warn'
+        || normalized === 'warning'
+        || normalized === 'medium'
+        || normalized === 'low') {
+        return 'warning';
+    }
+    return 'info';
+}
+function toVerifyVerdict(value) {
+    const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
+    if (normalized === 'PASS' || normalized === 'WARN' || normalized === 'FAIL') {
+        return normalized;
+    }
+    return 'FAIL';
+}
+function normalizeScopeIssueMessage(rawMessage) {
+    const message = asStringValue(rawMessage);
+    return message || 'File modified outside intended scope';
+}
+function pushVerifyIssue(target, seen, key, value) {
+    if (seen.has(key))
+        return;
+    seen.add(key);
+    target.push(value);
+}
+function dedupeTriageItems(items) {
+    const seen = new Set();
+    const output = [];
+    for (const item of items) {
+        const key = `${item.source}|${item.file.toLowerCase()}|${item.policy.toLowerCase()}|${item.message.toLowerCase()}`;
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        output.push(item);
+    }
+    return output;
+}
+function toCanonicalVerifyOutput(payload) {
+    const verdict = toVerifyVerdict(payload.verdict);
+    const violations = [];
+    const warnings = [];
+    const scopeIssues = [];
+    const seenViolations = new Set();
+    const seenWarnings = new Set();
+    const seenScopeIssues = new Set();
+    const addScopeIssue = (fileRaw, messageRaw) => {
+        const file = asStringValue(fileRaw) || 'unknown';
+        const message = normalizeScopeIssueMessage(messageRaw);
+        const key = file.toLowerCase();
+        pushVerifyIssue(scopeIssues, seenScopeIssues, key, { file, message });
+    };
+    const addWarning = (fileRaw, messageRaw, policyRaw) => {
+        const file = asStringValue(fileRaw) || 'unknown';
+        const message = asStringValue(messageRaw) || 'Warning detected';
+        const policy = asStringValue(policyRaw) || 'warning';
+        const key = `${file.toLowerCase()}|${message.toLowerCase()}|${policy.toLowerCase()}`;
+        pushVerifyIssue(warnings, seenWarnings, key, { file, message, policy });
+    };
+    const addViolation = (fileRaw, messageRaw, policyRaw, severityRaw) => {
+        const file = asStringValue(fileRaw) || 'unknown';
+        const message = asStringValue(messageRaw) || 'Policy violation detected';
+        const policy = asStringValue(policyRaw) || 'unknown_policy';
+        const severity = toVerifySeverity(severityRaw);
+        const key = `${file.toLowerCase()}|${message.toLowerCase()}|${policy.toLowerCase()}|${severity}`;
+        pushVerifyIssue(violations, seenViolations, key, { file, message, policy, severity });
+    };
+    const rawScopeIssues = Array.isArray(payload.scopeIssues) ? payload.scopeIssues : [];
+    for (const item of rawScopeIssues) {
+        const record = asObjectRecord(item);
+        if (record) {
+            addScopeIssue(record.file, record.message);
+        }
+        else {
+            addScopeIssue(item, null);
+        }
+    }
+    const rawBloatFiles = Array.isArray(payload.bloatFiles) ? payload.bloatFiles : [];
+    for (const item of rawBloatFiles) {
+        addScopeIssue(item, null);
+    }
+    const rawWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+    for (const item of rawWarnings) {
+        const record = asObjectRecord(item);
+        if (record) {
+            addWarning(record.file, record.message, record.policy ?? record.rule);
+        }
+        else if (typeof item === 'string') {
+            addWarning('unknown', item, 'warning');
+        }
+    }
+    const rawViolations = Array.isArray(payload.violations) ? payload.violations : [];
+    for (const item of rawViolations) {
+        const record = asObjectRecord(item);
+        if (!record)
+            continue;
+        const file = record.file;
+        const message = record.message;
+        const policy = record.policy ?? record.rule;
+        const severity = toVerifySeverity(record.severity);
+        const combined = `${String(policy || '').toLowerCase()} ${String(message || '').toLowerCase()}`;
+        const isScopeIssue = combined.includes('scope_guard')
+            || combined.includes('scope')
+            || combined.includes('outside the plan')
+            || combined.includes('out of scope');
+        if (isScopeIssue) {
+            addScopeIssue(file, message);
+            continue;
+        }
+        if (severity === 'warning' || severity === 'info') {
+            addWarning(file, message, policy);
+            continue;
+        }
+        addViolation(file, message, policy, severity);
+    }
+    const payloadMessage = asStringValue(payload.message);
+    if (payloadMessage
+        && violations.length === 0
+        && warnings.length === 0
+        && scopeIssues.length === 0) {
+        addWarning('unknown', payloadMessage, 'verify_result');
+    }
+    const summaryRecord = asObjectRecord(payload.summary);
+    const fileSet = new Set();
+    for (const violation of violations)
+        fileSet.add(violation.file);
+    for (const warning of warnings)
+        fileSet.add(warning.file);
+    for (const scopeIssue of scopeIssues)
+        fileSet.add(scopeIssue.file);
+    const totalFilesChanged = (() => {
+        const fromSummary = summaryRecord ? asNumberValue(summaryRecord.totalFilesChanged) : null;
+        if (fromSummary !== null)
+            return Math.max(0, Math.floor(fromSummary));
+        const blastRadius = asObjectRecord(payload.blastRadius);
+        const fromBlastRadius = blastRadius ? asNumberValue(blastRadius.filesChanged) : null;
+        if (fromBlastRadius !== null)
+            return Math.max(0, Math.floor(fromBlastRadius));
+        return fileSet.size;
+    })();
+    const driftScoreRaw = asNumberValue(payload.driftScore);
+    const driftScore = driftScoreRaw === null
+        ? undefined
+        : Math.max(0, Math.min(100, Math.round(driftScoreRaw)));
+    const expediteModeUsed = resolveExpediteModeFromPayload(payload);
+    const scopeTriageItems = scopeIssues.map((item) => ({
+        file: item.file,
+        message: item.message,
+        policy: 'scope_guard',
+        severity: 'block',
+        source: 'scope',
+    }));
+    const violationTriageItems = violations.map((item) => ({
+        file: item.file,
+        message: item.message,
+        policy: item.policy,
+        severity: item.severity,
+        source: 'violation',
+    }));
+    const warningTriageItems = warnings.map((item) => ({
+        file: item.file,
+        message: item.message,
+        policy: item.policy,
+        severity: 'warning',
+        source: 'warning',
+    }));
+    const defaultBlockingItems = dedupeTriageItems([
+        ...scopeTriageItems,
+        ...violationTriageItems.filter((item) => item.severity === 'critical' || item.severity === 'high'),
+    ]);
+    const defaultAdvisoryItems = dedupeTriageItems([
+        ...warningTriageItems,
+        ...violationTriageItems.filter((item) => item.severity === 'warning' || item.severity === 'info'),
+    ]);
+    const expediteBlockingItems = dedupeTriageItems([
+        ...scopeTriageItems.filter((item) => isCriticalScopeBreach(item.file, item.message)),
+        ...violationTriageItems.filter((item) => isSecurityOrAuthViolation(item.file, item.policy, item.message)),
+        ...warningTriageItems
+            .filter((item) => isSecurityOrAuthViolation(item.file, item.policy, item.message))
+            .map((item) => ({
+            ...item,
+            source: 'violation',
+        })),
+    ]);
+    const expediteItems = dedupeTriageItems([
+        ...scopeTriageItems
+            .filter((item) => !isCriticalScopeBreach(item.file, item.message))
+            .map((item) => ({
+            ...item,
+            source: 'expedite',
+        })),
+        ...violationTriageItems
+            .filter((item) => !isSecurityOrAuthViolation(item.file, item.policy, item.message))
+            .map((item) => ({
+            ...item,
+            source: 'expedite',
+        })),
+        ...warningTriageItems
+            .filter((item) => !isSecurityOrAuthViolation(item.file, item.policy, item.message))
+            .map((item) => ({
+            ...item,
+            source: 'expedite',
+        })),
+    ]);
+    const blockingItems = expediteModeUsed ? expediteBlockingItems : defaultBlockingItems;
+    const advisoryItems = expediteModeUsed ? expediteItems : defaultAdvisoryItems;
+    return {
+        verdict,
+        summary: {
+            totalFilesChanged,
+            totalViolations: violations.length,
+            totalWarnings: warnings.length,
+            totalScopeIssues: scopeIssues.length,
+        },
+        violations,
+        warnings,
+        scopeIssues,
+        blockingCount: blockingItems.length,
+        advisoryCount: advisoryItems.length,
+        blockingItems,
+        advisoryItems,
+        expediteModeUsed,
+        expediteCount: expediteModeUsed ? expediteItems.length : 0,
+        expediteItems: expediteModeUsed ? expediteItems : [],
+        expediteFollowUpChecklist: expediteModeUsed ? [...EXPEDITE_FOLLOW_UP_CHECKLIST] : [],
+        ...(expediteModeUsed ? { expediteNote: 'Expedite Mode used' } : {}),
+        ...(typeof driftScore === 'number' ? { driftScore } : {}),
+    };
+}
+function emitCanonicalVerifyJson(payload) {
+    console.log(JSON.stringify(toCanonicalVerifyOutput(payload), null, 2));
+}
 function buildDeterministicLayerSummary(payload) {
     const verdict = asStringValue(payload.verdict) || 'UNKNOWN';
     const mode = asStringValue(payload.mode) || 'unknown';
@@ -825,6 +1138,13 @@ function isGitRepository(cwd) {
     catch {
         return false;
     }
+}
+function resolveVerifyExpediteMode(projectRoot) {
+    if (isEnabledFlag(process.env.NEURCODE_EXPEDITE_MODE) || isEnabledFlag(process.env.NEURCODE_MCP_EXPEDITE_MODE)) {
+        return true;
+    }
+    const branchName = (0, git_1.detectCurrentGitBranch)(projectRoot) || process.env.GITHUB_REF_NAME || '';
+    return containsAnyToken(branchName, ['hotfix', 'urgent', 'prod-down', 'prod_down', 'prod down', 'incident', 'expedite']);
 }
 function isSignedAiLogsRequired(orgGovernanceSettings) {
     const explicitRequirement = isEnabledFlag(process.env.NEURCODE_GOVERNANCE_REQUIRE_SIGNED_LOGS) ||
@@ -997,18 +1317,12 @@ async function recordVerificationIfRequested(options, config, payload) {
  * Execute policy-only verification (General Governance mode)
  * Returns the exit code to use
  */
-async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRoot, config, client, source, scopeTelemetry, projectId, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, compiledPolicyMetadata, changeContractSummary) {
+async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRoot, config, client, source, scopeTelemetry, projectId, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, expediteModeEnabled, compiledPolicyArtifact, compiledPolicyMetadata, changeContractSummary) {
     const emitPolicyOnlyJson = (payload) => {
-        const enrichedPayload = {
+        emitCanonicalVerifyJson({
             ...payload,
-            deterministicLayers: buildDeterministicLayerSummary(payload),
-        };
-        console.log(JSON.stringify({
-            ...enrichedPayload,
-            ...(compiledPolicyMetadata ? { policyCompilation: compiledPolicyMetadata } : {}),
-            changeContract: changeContractSummary,
-            scope: scopeTelemetry,
-        }, null, 2));
+            expediteMode: expediteModeEnabled,
+        });
     };
     const policyOnlyVerificationSource = 'policy_only';
     const recordPolicyOnlyVerification = async (payload) => recordVerificationIfRequested(options, config, {
@@ -1022,13 +1336,15 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     if (!options.json) {
         console.log(chalk.cyan('🛡️  General Governance mode (policy only, no plan linked)\n'));
     }
+    const diffFilesForPolicy = diffFiles.filter((f) => !ignoreFilter(f.path));
+    const expectedPolicyOnlyFiles = diffFilesForPolicy.map((file) => file.path);
     const signedLogsRequired = isSignedAiLogsRequired(orgGovernanceSettings);
     const governanceAnalysis = (0, governance_1.evaluateGovernance)({
         projectRoot,
         task: 'Policy-only verification',
-        expectedFiles: [],
-        diffFiles,
-        contextCandidates: diffFiles.map((file) => file.path),
+        expectedFiles: expectedPolicyOnlyFiles,
+        diffFiles: diffFilesForPolicy,
+        contextCandidates: expectedPolicyOnlyFiles,
         orgGovernance: orgGovernanceSettings,
         requireSignedAiLogs: signedLogsRequired,
         signingKey: aiLogSigningKey,
@@ -1333,13 +1649,52 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     if (!options.json && effectiveRules.policyPack && effectiveRules.policyPackRules.length > 0) {
         console.log(chalk.dim(`   Evaluating policy pack: ${effectiveRules.policyPack.packName} (${effectiveRules.policyPack.packId}@${effectiveRules.policyPack.version}, ${effectiveRules.policyPackRules.length} rule(s))`));
     }
-    const diffFilesForPolicy = diffFiles.filter((f) => {
-        const ignored = ignoreFilter(f.path);
-        return !ignored;
-    });
     const policyResult = (0, policy_engine_1.evaluateRules)(diffFilesForPolicy, effectiveRules.allRules);
     policyViolations = (policyResult.violations || []);
     policyViolations = policyViolations.filter((v) => !ignoreFilter(v.file));
+    const compiledDeterministicRules = compiledPolicyArtifact
+        ? (0, policy_compiler_1.hydrateCompiledPolicyRules)(compiledPolicyArtifact)
+        : [];
+    const compiledPolicyRuleStatements = compiledPolicyArtifact
+        ? [...compiledPolicyArtifact.statements.policyRules]
+        : [];
+    if (compiledDeterministicRules.length > 0 || compiledPolicyRuleStatements.length > 0) {
+        const fileContents = {};
+        for (const file of diffFilesForPolicy) {
+            const absolutePath = (0, path_1.join)(projectRoot, file.path);
+            if (!(0, fs_1.existsSync)(absolutePath)) {
+                continue;
+            }
+            try {
+                fileContents[file.path] = (0, fs_1.readFileSync)(absolutePath, 'utf-8');
+            }
+            catch {
+                // Best-effort: deterministic checks can still run against diff lines.
+            }
+        }
+        const deterministicEvaluation = (0, governance_runtime_1.evaluatePlanVerification)({
+            planFiles: diffFilesForPolicy.map((file) => ({
+                path: file.path,
+                action: 'MODIFY',
+            })),
+            changedFiles: diffFilesForPolicy,
+            policyRules: compiledPolicyRuleStatements.length > 0 ? compiledPolicyRuleStatements : undefined,
+            extraConstraintRules: compiledDeterministicRules.length > 0 ? compiledDeterministicRules : undefined,
+            fileContents,
+        });
+        if (deterministicEvaluation.constraintViolations.length > 0) {
+            const deterministicViolations = deterministicEvaluation.constraintViolations.map((message) => {
+                const matchedFile = diffFilesForPolicy.find((file) => message.includes(file.path))?.path || '.neurcode/policy-compiled';
+                return {
+                    file: matchedFile,
+                    rule: 'compiled_policy:deterministic_constraint',
+                    severity: 'block',
+                    message,
+                };
+            });
+            policyViolations.push(...deterministicViolations);
+        }
+    }
     const localPolicyGovernance = (0, policy_governance_1.readPolicyGovernanceConfig)(projectRoot);
     const governance = (0, policy_governance_1.mergePolicyGovernanceWithOrgOverrides)(localPolicyGovernance, orgGovernanceSettings?.policyGovernance);
     const auditIntegrity = (0, policy_audit_1.verifyPolicyAuditIntegrity)(projectRoot);
@@ -1526,14 +1881,15 @@ async function verifyCommand(options) {
     try {
         const rootResolution = (0, project_root_1.resolveNeurcodeProjectRootWithTrace)(process.cwd());
         const projectRoot = rootResolution.projectRoot;
+        const localPlanSync = (0, plan_sync_1.ensureLocalPlan)(projectRoot);
+        const localPlanExpectedFiles = [...localPlanSync.expectedFiles];
+        const expediteModeEnabled = resolveVerifyExpediteMode(projectRoot);
         const scopeTelemetry = (0, scope_telemetry_1.buildScopeTelemetryPayload)(rootResolution);
         const emitVerifyJson = (payload) => {
-            const jsonPayload = {
+            emitCanonicalVerifyJson({
                 ...payload,
-                deterministicLayers: buildDeterministicLayerSummary(payload),
-                scope: scopeTelemetry,
-            };
-            console.log(JSON.stringify(jsonPayload, null, 2));
+                expediteMode: expediteModeEnabled,
+            });
         };
         if (!isGitRepository(projectRoot)) {
             const message = 'Verify requires a git repository. Initialize git (`git init`) or run this command inside an existing git project.';
@@ -2013,34 +2369,44 @@ async function verifyCommand(options) {
             });
             process.exit(2);
         }
-        // Determine which diff to capture (staged + unstaged for full current work)
+        // Determine which diff to capture.
         let diffText;
+        let diffContextLabel = '';
         if (options.staged) {
             diffText = (0, child_process_1.execSync)('git diff --cached', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
+            diffContextLabel = 'staged changes';
         }
         else if (options.base) {
             diffText = (0, git_1.getDiffFromBase)(options.base);
+            diffContextLabel = `working tree vs ${options.base}`;
         }
         else if (options.head) {
             diffText = (0, child_process_1.execSync)('git diff HEAD', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
+            diffContextLabel = 'working tree vs HEAD';
         }
         else {
-            // Default: combine staged + unstaged to capture all current work
-            try {
-                const stagedDiff = (0, child_process_1.execSync)('git diff --cached', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
-                const unstagedDiff = (0, child_process_1.execSync)('git diff', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
-                diffText = stagedDiff + (stagedDiff && unstagedDiff ? '\n' : '') + unstagedDiff;
+            // Default: resolve a PR-like base context first (origin/main or origin/master).
+            // Fallback to staged diff when base context cannot be resolved.
+            const defaultContext = (0, git_1.resolveDefaultDiffContext)(projectRoot);
+            if (defaultContext.mode === 'base' && defaultContext.baseRef) {
+                diffText = (0, git_1.getDiffFromBase)(defaultContext.baseRef);
+                diffContextLabel = defaultContext.currentBranch
+                    ? `${defaultContext.currentBranch} vs ${defaultContext.baseRef}`
+                    : `working tree vs ${defaultContext.baseRef}`;
             }
-            catch {
-                // Fallback to HEAD if git commands fail
-                diffText = (0, child_process_1.execSync)('git diff HEAD', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
+            else {
+                diffText = (0, child_process_1.execSync)('git diff --cached', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
+                diffContextLabel = 'staged changes (fallback)';
             }
+        }
+        if (!options.json && diffContextLabel) {
+            console.log(chalk.dim(`   Diff context: ${diffContextLabel}`));
         }
         const untrackedDiffFiles = getUntrackedDiffFiles(projectRoot);
         if (!diffText.trim() && untrackedDiffFiles.length === 0) {
             if (!options.json) {
-                console.log(chalk.yellow('⚠️  No changes detected'));
-                console.log(chalk.dim('   Make sure you have staged or unstaged changes to verify'));
+                console.log(chalk.yellow('⚠️  No changes detected in current diff context.'));
+                console.log(chalk.dim('   Tip: Ensure changes are staged or run against a base branch.'));
             }
             else {
                 emitVerifyJson({
@@ -2053,7 +2419,7 @@ async function verifyCommand(options) {
                     bloatFiles: [],
                     plannedFilesModified: 0,
                     totalPlannedFiles: 0,
-                    message: 'No changes detected',
+                    message: 'No changes detected in current diff context.',
                     scopeGuardPassed: false,
                 });
             }
@@ -2083,7 +2449,8 @@ async function verifyCommand(options) {
         const summary = (0, diff_parser_1.getDiffSummary)(diffFiles);
         if (diffFiles.length === 0) {
             if (!options.json) {
-                console.log(chalk.yellow('⚠️  No file changes detected in diff'));
+                console.log(chalk.yellow('⚠️  No changes detected in current diff context.'));
+                console.log(chalk.dim('   Tip: Ensure changes are staged or run against a base branch.'));
             }
             else {
                 emitVerifyJson({
@@ -2096,7 +2463,7 @@ async function verifyCommand(options) {
                     bloatFiles: [],
                     plannedFilesModified: 0,
                     totalPlannedFiles: 0,
-                    message: 'No file changes detected in diff',
+                    message: 'No changes detected in current diff context.',
                     scopeGuardPassed: false,
                 });
             }
@@ -2318,7 +2685,7 @@ async function verifyCommand(options) {
             process.exit(2);
         }
         if (!options.json) {
-            console.log(chalk.cyan('\n📊 Analyzing changes against plan...'));
+            console.log(chalk.cyan('\n📊 Analyzing change set...'));
             console.log(chalk.dim(`   Found ${summary.totalFiles} file(s) changed`));
             console.log(chalk.dim(`   ${summary.totalAdded} lines added, ${summary.totalRemoved} lines removed\n`));
             if (options.demo) {
@@ -2326,7 +2693,7 @@ async function verifyCommand(options) {
             }
         }
         const runPolicyOnlyModeAndExit = async (source) => {
-            const exitCode = await executePolicyOnlyMode(options, diffFiles, shouldIgnore, projectRoot, config, client, source, scopeTelemetry, projectId || undefined, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, compiledPolicyMetadata, changeContractSummary);
+            const exitCode = await executePolicyOnlyMode(options, diffFiles, shouldIgnore, projectRoot, config, client, source, scopeTelemetry, projectId || undefined, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, expediteModeEnabled, compiledPolicyRead.artifact, compiledPolicyMetadata, changeContractSummary);
             const changedFiles = diffFiles.map((f) => f.path);
             const verdict = exitCode === 2 ? 'FAIL' : exitCode === 1 ? 'WARN' : 'PASS';
             recordVerifyEvent(verdict, `policy_only_source=${source};exit=${exitCode}`, changedFiles);
@@ -2341,6 +2708,7 @@ async function verifyCommand(options) {
         const requirePlan = options.requirePlan === true
             || process.env.NEURCODE_VERIFY_REQUIRE_PLAN === '1'
             || strictArtifactMode;
+        let useLocalPlanSync = false;
         // Get planId: Priority 1: options flag, Priority 2: state file (.neurcode/config.json), Priority 3: legacy config
         let planId = options.planId;
         if (!planId) {
@@ -2371,6 +2739,19 @@ async function verifyCommand(options) {
                         console.log(chalk.yellow(`   ⚠️  Consider running 'neurcode plan' to update state file`));
                     }
                 }
+            }
+        }
+        if (planId === 'local-plan-sync' && localPlanExpectedFiles.length > 0) {
+            useLocalPlanSync = true;
+            if (!options.json) {
+                console.log(chalk.dim(`   Using Plan Sync from .neurcode/plan.json (${localPlanExpectedFiles.length} expected file(s))`));
+            }
+        }
+        if (!planId && localPlanExpectedFiles.length > 0) {
+            planId = 'local-plan-sync';
+            useLocalPlanSync = true;
+            if (!options.json) {
+                console.log(chalk.dim(`   Using Plan Sync from .neurcode/plan.json (${localPlanExpectedFiles.length} expected file(s))`));
             }
         }
         // If no planId found, either enforce strict requirement or fall back to policy-only mode.
@@ -2527,37 +2908,60 @@ async function verifyCommand(options) {
         }
         // Track if scope guard passed - this takes priority over AI grading
         let scopeGuardPassed = false;
+        let scopeGuardExpediteBypass = false;
         let governanceResult = null;
         let planFilesForVerification = [];
         let intentConstraintsForVerification;
         try {
             // Step A: Get Modified Files (already have from diffFiles)
             const modifiedFiles = diffFiles.map(f => f.path);
-            // Step B: Fetch Plan and Session Data
-            const planData = await client.getPlan(finalPlanId);
-            // Extract original intent from plan (for constraint checking)
-            const originalIntent = planData.intent || '';
-            const planTitle = typeof planData.content.title === 'string'
-                ? planData.content.title?.trim()
-                : '';
-            const planSummary = typeof planData.content.summary === 'string' ? planData.content.summary.trim() : '';
-            const governanceTask = planTitle || planSummary || originalIntent || 'Plan verification';
-            // Get approved files from plan (only files with action CREATE or MODIFY)
-            const planFiles = planData.content.files
-                .filter(f => f.action === 'CREATE' || f.action === 'MODIFY')
-                .map(f => f.path);
-            planFilesForVerification = [...planFiles];
+            // Step B: Resolve plan scope from remote plan or local Plan Sync.
+            let originalIntent = '';
+            let governanceTask = 'Plan verification';
+            let planFiles = [];
+            let planDependencies = [];
+            let remotePlanSessionId = null;
+            if (useLocalPlanSync) {
+                const localIntent = (localPlanSync.intent || '').trim();
+                const localConstraintText = localPlanSync.constraints.length > 0
+                    ? localPlanSync.constraints.join('; ')
+                    : '';
+                planFiles = [...localPlanExpectedFiles];
+                originalIntent = localIntent || localConstraintText;
+                governanceTask = localIntent
+                    ? `Local Plan Sync: ${localIntent}`
+                    : 'Local Plan Sync verification';
+                if (!options.json) {
+                    console.log(chalk.dim(`   Plan Sync scope loaded: ${planFiles.length} file(s)`));
+                }
+            }
+            else {
+                const planData = await client.getPlan(finalPlanId);
+                // Extract original intent from plan (for constraint checking)
+                originalIntent = planData.intent || '';
+                const planTitle = typeof planData.content.title === 'string'
+                    ? planData.content.title?.trim()
+                    : '';
+                const planSummary = typeof planData.content.summary === 'string' ? planData.content.summary.trim() : '';
+                governanceTask = planTitle || planSummary || originalIntent || 'Plan verification';
+                // Get approved files from plan (only files with action CREATE or MODIFY)
+                planFiles = planData.content.files
+                    .filter((f) => f.action === 'CREATE' || f.action === 'MODIFY')
+                    .map((f) => f.path);
+                planDependencies = Array.isArray(planData.content.dependencies)
+                    ? planData.content.dependencies.filter((item) => typeof item === 'string')
+                    : [];
+                remotePlanSessionId = planData.sessionId || null;
+            }
+            planFilesForVerification = [...new Set([...planFiles, ...localPlanExpectedFiles])];
             intentConstraintsForVerification = originalIntent || undefined;
-            const planDependencies = Array.isArray(planData.content.dependencies)
-                ? planData.content.dependencies.filter((item) => typeof item === 'string')
-                : [];
             governanceResult = (0, governance_1.evaluateGovernance)({
                 projectRoot,
                 task: governanceTask,
-                expectedFiles: planFiles,
+                expectedFiles: planFilesForVerification,
                 expectedDependencies: planDependencies,
                 diffFiles,
-                contextCandidates: planFiles,
+                contextCandidates: planFilesForVerification,
                 orgGovernance: orgGovernanceSettings,
                 requireSignedAiLogs: signedLogsRequired,
                 signingKey: aiLogSigningKey,
@@ -2570,8 +2974,8 @@ async function verifyCommand(options) {
             // This is the session_id string needed to fetch the session
             let sessionIdString = (0, state_1.getSessionId)() || configData.sessionId || configData.lastSessionId || null;
             // Fallback: Use sessionId from plan if not in config
-            if (!sessionIdString && planData.sessionId) {
-                sessionIdString = planData.sessionId;
+            if (!sessionIdString && remotePlanSessionId) {
+                sessionIdString = remotePlanSessionId;
                 if ((process.env.DEBUG || process.env.VERBOSE) && !options.json) {
                     console.log(chalk.dim(`   Using sessionId from plan: ${sessionIdString.substring(0, 8)}...`));
                 }
@@ -2605,17 +3009,24 @@ async function verifyCommand(options) {
                 }
             }
             // Step C: The Intersection Logic
-            const approvedSet = new Set([...planFiles, ...allowedFiles]);
+            const approvedSet = new Set([...planFilesForVerification, ...allowedFiles]);
             const violations = modifiedFiles.filter(f => !approvedSet.has(f));
             const filteredViolations = violations.filter((p) => !shouldIgnore(p));
             // Step D: The Block (only report scope violations for non-ignored files)
             if (filteredViolations.length > 0) {
+                const criticalScopeViolations = expediteModeEnabled
+                    ? filteredViolations.filter((file) => isCriticalScopeBreach(file, 'File modified outside the plan'))
+                    : filteredViolations;
+                const expediteScopeViolations = expediteModeEnabled
+                    ? filteredViolations.filter((file) => !criticalScopeViolations.includes(file))
+                    : [];
+                const shouldBlockForScope = !expediteModeEnabled || criticalScopeViolations.length > 0;
                 const aiDebtSummaryForScope = toAiDebtSummary((0, ai_debt_budget_1.evaluateAiDebtBudget)({
                     diffFiles,
                     bloatCount: filteredViolations.length,
                     config: aiDebtConfig,
                 }));
-                recordVerifyEvent('FAIL', `scope_violation=${filteredViolations.length}`, modifiedFiles, finalPlanId);
+                recordVerifyEvent(shouldBlockForScope ? 'FAIL' : 'WARN', `${shouldBlockForScope ? 'scope_violation' : 'scope_expedite'}=${filteredViolations.length}`, modifiedFiles, finalPlanId);
                 const scopeViolationItems = filteredViolations.map((file) => ({
                     file,
                     rule: 'scope_guard',
@@ -2627,8 +3038,10 @@ async function verifyCommand(options) {
                     ...scopeViolationItems,
                     ...aiDebtViolationItems,
                 ];
-                const scopeViolationMessage = `Scope violation: ${filteredViolations.length} file(s) modified outside the plan`;
-                if (options.json) {
+                const scopeViolationMessage = shouldBlockForScope
+                    ? `Scope violation: ${criticalScopeViolations.length} critical file(s) modified outside the plan`
+                    : `Expedite scope warning: ${expediteScopeViolations.length} non-critical file(s) modified outside the plan`;
+                if (shouldBlockForScope && options.json) {
                     // Output JSON for scope violation BEFORE exit. Must include violations for GitHub Action annotations.
                     const jsonOutput = {
                         grade: 'F',
@@ -2639,12 +3052,13 @@ async function verifyCommand(options) {
                         bloatCount: filteredViolations.length,
                         bloatFiles: filteredViolations,
                         plannedFilesModified: 0,
-                        totalPlannedFiles: planFiles.length,
+                        totalPlannedFiles: planFilesForVerification.length,
                         message: scopeViolationMessage,
                         scopeGuardPassed: false,
                         mode: 'plan_enforced',
                         policyOnly: false,
                         aiDebt: aiDebtSummaryForScope,
+                        ...(expediteModeEnabled ? { expediteMode: true } : {}),
                         ...(governanceResult
                             ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
                                 changeContract: changeContractSummary,
@@ -2677,18 +3091,25 @@ async function verifyCommand(options) {
                     });
                     process.exit(1);
                 }
-                else {
+                else if (shouldBlockForScope) {
                     // Human-readable output only when NOT in json mode
                     console.log(chalk.red('\n⛔ SCOPE VIOLATION'));
                     console.log(chalk.red('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
                     console.log(chalk.red('The following files were modified but are not in the plan:'));
                     console.log('');
-                    filteredViolations.forEach(file => {
+                    criticalScopeViolations.forEach(file => {
                         console.log(chalk.red(`   • ${file}`));
                     });
+                    if (expediteModeEnabled && expediteScopeViolations.length > 0) {
+                        console.log('');
+                        console.log(chalk.yellow('Non-critical scope files (can be followed up under expedite mode):'));
+                        expediteScopeViolations.forEach((file) => {
+                            console.log(chalk.yellow(`   • ${file}`));
+                        });
+                    }
                     console.log('');
                     console.log(chalk.yellow('To unblock these files, run:'));
-                    filteredViolations.forEach(file => {
+                    criticalScopeViolations.forEach(file => {
                         console.log(chalk.dim(`   neurcode allow ${file}`));
                     });
                     if (aiDebtSummaryForScope.mode !== 'off') {
@@ -2735,11 +3156,30 @@ async function verifyCommand(options) {
                     });
                     process.exit(1);
                 }
+                else {
+                    scopeGuardExpediteBypass = true;
+                    if (!options.json) {
+                        console.log(chalk.yellow('\n⚠️  Expedite scope relaxation applied (non-critical scope only).'));
+                        expediteScopeViolations.forEach((file) => {
+                            console.log(chalk.yellow(`   • ${file}`));
+                        });
+                        console.log(chalk.dim('   Follow-up checklist:'));
+                        EXPEDITE_FOLLOW_UP_CHECKLIST.forEach((item) => {
+                            console.log(chalk.dim(`   - ${item}`));
+                        });
+                        console.log(chalk.dim('   Note: Expedite Mode used\n'));
+                    }
+                }
             }
             // Scope guard passed - all files are approved or allowed
             scopeGuardPassed = true;
             if (!options.json) {
-                console.log(chalk.green('✅ All modified files are approved or allowed'));
+                if (scopeGuardExpediteBypass) {
+                    console.log(chalk.green('✅ Scope guard passed with expedite relaxation for non-critical scope changes'));
+                }
+                else {
+                    console.log(chalk.green('✅ All modified files are approved or allowed'));
+                }
                 console.log('');
             }
         }
@@ -2823,7 +3263,7 @@ async function verifyCommand(options) {
                 const lockViolationItems = toPolicyLockViolations(policyLockEvaluation.mismatches);
                 recordVerifyEvent('FAIL', 'policy_lock_mismatch', diffFiles.map((f) => f.path), finalPlanId);
                 if (options.json) {
-                    console.log(JSON.stringify({
+                    emitVerifyJson({
                         grade: 'F',
                         score: 0,
                         verdict: 'FAIL',
@@ -2851,7 +3291,7 @@ async function verifyCommand(options) {
                             path: policyLockEvaluation.lockPath,
                             mismatches: policyLockEvaluation.mismatches,
                         },
-                    }, null, 2));
+                    });
                 }
                 else {
                     console.log(chalk.red('\n❌ Policy lock baseline mismatch'));
@@ -3270,35 +3710,20 @@ async function verifyCommand(options) {
                 displayChangeContractDrift(changeContractSummary, { advisory: true });
             }
         }
-        // Call verify API
+        // Call verify API (or deterministic local evaluation for Plan Sync scope mode)
         if (!options.json) {
-            console.log(chalk.dim('   Sending to Neurcode API...\n'));
-            if (options.asyncMode) {
-                console.log(chalk.dim('   Queue-backed verification enabled (async job mode).'));
+            if (useLocalPlanSync) {
+                console.log(chalk.dim('   Using local Plan Sync deterministic verification (no API plan lookup).\n'));
+            }
+            else {
+                console.log(chalk.dim('   Sending to Neurcode API...\n'));
+                if (options.asyncMode) {
+                    console.log(chalk.dim('   Queue-backed verification enabled (async job mode).'));
+                }
             }
         }
         try {
-            let verifySource = 'api';
-            let verifyResult;
-            try {
-                verifyResult = await client.verifyPlan(finalPlanId, diffStats, changedFiles, projectId, intentConstraintsForVerification, deterministicPolicyRules, 'api', compiledPolicyMetadata, {
-                    async: options.asyncMode === true,
-                    pollIntervalMs: Number.isFinite(options.verifyJobPollMs) ? options.verifyJobPollMs : undefined,
-                    timeoutMs: Number.isFinite(options.verifyJobTimeoutMs) ? options.verifyJobTimeoutMs : undefined,
-                    idempotencyKey: options.verifyIdempotencyKey,
-                    maxAttempts: Number.isFinite(options.verifyJobMaxAttempts) ? options.verifyJobMaxAttempts : undefined,
-                });
-            }
-            catch (verifyApiError) {
-                if (planFilesForVerification.length === 0) {
-                    throw verifyApiError;
-                }
-                verifySource = 'local_fallback';
-                if (!options.json) {
-                    const fallbackReason = verifyApiError instanceof Error ? verifyApiError.message : String(verifyApiError);
-                    console.log(chalk.yellow('⚠️  Verify API unavailable, using local deterministic fallback.'));
-                    console.log(chalk.dim(`   Reason: ${fallbackReason}`));
-                }
+            const runLocalDeterministicVerification = () => {
                 const localFileContents = {};
                 for (const file of changedFiles) {
                     const absolutePath = (0, path_1.join)(projectRoot, file.path);
@@ -3324,7 +3749,7 @@ async function verifyCommand(options) {
                     extraConstraintRules: hydratedCompiledPolicyRules.length > 0 ? hydratedCompiledPolicyRules : undefined,
                     fileContents: localFileContents,
                 });
-                verifyResult = {
+                return {
                     verificationId: `local-fallback-${Date.now()}`,
                     adherenceScore: localEvaluation.adherenceScore,
                     bloatCount: localEvaluation.bloatCount,
@@ -3335,6 +3760,35 @@ async function verifyCommand(options) {
                     diffSummary: localEvaluation.diffSummary,
                     message: localEvaluation.message,
                 };
+            };
+            let verifySource = 'api';
+            let verifyResult;
+            if (useLocalPlanSync) {
+                verifySource = 'local_fallback';
+                verifyResult = runLocalDeterministicVerification();
+            }
+            else {
+                try {
+                    verifyResult = await client.verifyPlan(finalPlanId, diffStats, changedFiles, projectId, intentConstraintsForVerification, deterministicPolicyRules, 'api', compiledPolicyMetadata, {
+                        async: options.asyncMode === true,
+                        pollIntervalMs: Number.isFinite(options.verifyJobPollMs) ? options.verifyJobPollMs : undefined,
+                        timeoutMs: Number.isFinite(options.verifyJobTimeoutMs) ? options.verifyJobTimeoutMs : undefined,
+                        idempotencyKey: options.verifyIdempotencyKey,
+                        maxAttempts: Number.isFinite(options.verifyJobMaxAttempts) ? options.verifyJobMaxAttempts : undefined,
+                    });
+                }
+                catch (verifyApiError) {
+                    if (planFilesForVerification.length === 0) {
+                        throw verifyApiError;
+                    }
+                    verifySource = 'local_fallback';
+                    if (!options.json) {
+                        const fallbackReason = verifyApiError instanceof Error ? verifyApiError.message : String(verifyApiError);
+                        console.log(chalk.yellow('⚠️  Verify API unavailable, using local deterministic fallback.'));
+                        console.log(chalk.dim(`   Reason: ${fallbackReason}`));
+                    }
+                    verifyResult = runLocalDeterministicVerification();
+                }
             }
             const aiDebtEvaluation = (0, ai_debt_budget_1.evaluateAiDebtBudget)({
                 diffFiles,
@@ -3530,7 +3984,7 @@ async function verifyCommand(options) {
                     message: effectiveMessage,
                     bloatFiles: displayBloatFiles,
                     bloatCount: displayBloatFiles.length,
-                }, policyViolations);
+                }, policyViolations, expediteModeEnabled);
                 if (governanceResult) {
                     displayGovernanceInsights(governanceResult, { explain: options.explain });
                 }
@@ -3682,6 +4136,10 @@ async function verifyCommand(options) {
                 });
             }
             else {
+                console.error(chalk.red('\n❌ Verification failed before completion.'));
+                if (diffFiles.length > 0) {
+                    console.log(chalk.dim(`   Partial context captured: ${diffFiles.length} changed file(s) in diff.`));
+                }
                 if (error instanceof Error) {
                     if (error.message.includes('404') || error.message.includes('not found')) {
                         console.error(chalk.red(`❌ Error: Plan not found`));
@@ -3702,27 +4160,24 @@ async function verifyCommand(options) {
     catch (error) {
         if (options.json) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.log(JSON.stringify({
-                grade: 'F',
-                score: 0,
+            emitCanonicalVerifyJson({
                 verdict: 'FAIL',
-                violations: [],
-                adherenceScore: 0,
-                bloatCount: 0,
-                bloatFiles: [],
-                plannedFilesModified: 0,
-                totalPlannedFiles: 0,
-                message: `Unexpected error: ${errorMessage}`,
-                scopeGuardPassed: false,
-                scope: {
-                    scanRoot: process.cwd(),
-                    startDir: process.cwd(),
-                    gitRoot: null,
-                    linkedRepoOverrideUsed: false,
-                    linkedRepos: [],
-                    blockedOverride: null,
+                summary: {
+                    totalFilesChanged: 0,
+                    totalViolations: 0,
+                    totalWarnings: 1,
+                    totalScopeIssues: 0,
                 },
-            }, null, 2));
+                violations: [],
+                warnings: [
+                    {
+                        file: 'unknown',
+                        message: `Unexpected error: ${errorMessage}`,
+                        policy: 'verify_runtime',
+                    },
+                ],
+                scopeIssues: [],
+            });
         }
         else {
             console.error(chalk.red('\n❌ Unexpected error:'));
@@ -4059,7 +4514,7 @@ function displayChangeContractDrift(summary, options = { advisory: false }) {
 /**
  * Display verification results in a formatted report card
  */
-function displayVerifyResults(result, policyViolations) {
+function displayVerifyResults(result, policyViolations, expediteModeUsed = false) {
     const verdictLabel = result.verdict === 'PASS'
         ? chalk.green('PASS ✅')
         : result.verdict === 'WARN'
@@ -4068,42 +4523,110 @@ function displayVerifyResults(result, policyViolations) {
     const plannedText = `${result.plannedFilesModified}/${result.totalPlannedFiles}`;
     console.log(`\n${verdictLabel}`);
     console.log(chalk.dim(`Plan adherence: ${plannedText} files (${result.adherenceScore}%)`));
-    const maxItems = 20;
-    if (result.bloatCount > 0) {
-        console.log(chalk.red('\nOut-of-scope changes:'));
-        result.bloatFiles.slice(0, maxItems).forEach((file) => {
-            console.log(`  - ${file}`);
+    const maxBlockingItems = 20;
+    const maxAdvisoryItems = 8;
+    const maxExpediteItems = 12;
+    const policyItems = policyViolations || [];
+    const isBlockingSeverity = (severityRaw) => {
+        const normalized = String(severityRaw || '').toLowerCase();
+        return normalized === 'block' || normalized === 'critical' || normalized === 'high';
+    };
+    const scopeItems = result.bloatFiles.map((file) => ({
+        file,
+        message: 'File modified outside intended scope',
+        policy: 'scope_guard',
+    }));
+    const policyTriageItems = policyItems.map((item) => ({
+        file: item.file,
+        message: item.message || item.rule,
+        policy: item.rule || 'policy_violation',
+        severity: item.severity,
+    }));
+    let blockingItems = [
+        ...scopeItems.map((item) => ({
+            file: item.file,
+            message: item.message,
+        })),
+        ...policyTriageItems
+            .filter((item) => isBlockingSeverity(item.severity))
+            .map((item) => ({
+            file: item.file,
+            message: item.message,
+        })),
+    ];
+    let advisoryItems = policyTriageItems
+        .filter((item) => !isBlockingSeverity(item.severity))
+        .map((item) => ({
+        file: item.file,
+        message: item.message,
+    }));
+    let expediteItems = [];
+    if (expediteModeUsed) {
+        blockingItems = [
+            ...scopeItems
+                .filter((item) => isCriticalScopeBreach(item.file, item.message))
+                .map((item) => ({ file: item.file, message: item.message })),
+            ...policyTriageItems
+                .filter((item) => isSecurityOrAuthViolation(item.file, item.policy, item.message))
+                .map((item) => ({ file: item.file, message: item.message })),
+        ];
+        expediteItems = [
+            ...scopeItems
+                .filter((item) => !isCriticalScopeBreach(item.file, item.message))
+                .map((item) => ({ file: item.file, message: item.message })),
+            ...policyTriageItems
+                .filter((item) => !isSecurityOrAuthViolation(item.file, item.policy, item.message))
+                .map((item) => ({ file: item.file, message: item.message })),
+        ];
+        advisoryItems = [];
+    }
+    if (blockingItems.length > 0) {
+        console.log(chalk.red(`\nBLOCKING (${blockingItems.length})`));
+        blockingItems.slice(0, maxBlockingItems).forEach((item) => {
+            console.log(`  - ${item.file}: ${item.message}`);
         });
-        if (result.bloatFiles.length > maxItems) {
-            console.log(chalk.dim(`  - ... ${result.bloatFiles.length - maxItems} more`));
+        if (blockingItems.length > maxBlockingItems) {
+            console.log(chalk.dim(`  - ... ${blockingItems.length - maxBlockingItems} more`));
         }
     }
-    if (policyViolations && policyViolations.length > 0) {
-        const blocking = policyViolations.filter((item) => item.severity === 'block');
-        const warnings = policyViolations.filter((item) => item.severity !== 'block');
-        if (blocking.length > 0) {
-            console.log(chalk.red('\nBlocking policy violations:'));
-            blocking.slice(0, maxItems).forEach((item) => {
-                console.log(`  - ${item.file}: ${item.message || item.rule}`);
-            });
-            if (blocking.length > maxItems) {
-                console.log(chalk.dim(`  - ... ${blocking.length - maxItems} more`));
-            }
-        }
-        if (warnings.length > 0) {
-            console.log(chalk.yellow('\nPolicy warnings:'));
-            warnings.slice(0, maxItems).forEach((item) => {
-                console.log(`  - ${item.file}: ${item.message || item.rule}`);
-            });
-            if (warnings.length > maxItems) {
-                console.log(chalk.dim(`  - ... ${warnings.length - maxItems} more`));
-            }
+    if (advisoryItems.length > 0) {
+        console.log(chalk.yellow(`\nADVISORY (${advisoryItems.length})`));
+        advisoryItems.slice(0, maxAdvisoryItems).forEach((item) => {
+            console.log(`  - ${item.file}: ${item.message}`);
+        });
+        if (advisoryItems.length > maxAdvisoryItems) {
+            console.log(chalk.dim(`  - ... ${advisoryItems.length - maxAdvisoryItems} more (summarized)`));
         }
     }
-    if (result.bloatCount === 0 && (!policyViolations || policyViolations.length === 0)) {
+    if (expediteModeUsed && expediteItems.length > 0) {
+        console.log(chalk.yellow(`\nEXPEDITE (requires follow-up) (${expediteItems.length})`));
+        expediteItems.slice(0, maxExpediteItems).forEach((item) => {
+            console.log(`  - ${item.file}: ${item.message}`);
+        });
+        if (expediteItems.length > maxExpediteItems) {
+            console.log(chalk.dim(`  - ... ${expediteItems.length - maxExpediteItems} more (summarized)`));
+        }
+        console.log(chalk.dim('  Follow-up checklist:'));
+        EXPEDITE_FOLLOW_UP_CHECKLIST.forEach((checkItem) => {
+            console.log(chalk.dim(`  - ${checkItem}`));
+        });
+        console.log(chalk.dim('  Note: Expedite Mode used'));
+    }
+    if (blockingItems.length === 0 && advisoryItems.length === 0 && expediteItems.length === 0) {
         console.log(chalk.green('\nNo drift detected.'));
     }
-    console.log(chalk.dim(`\nSummary: ${result.message}\n`));
+    const filesTouched = new Set([
+        ...blockingItems.map((item) => item.file),
+        ...advisoryItems.map((item) => item.file),
+        ...expediteItems.map((item) => item.file),
+    ]).size;
+    if (expediteModeUsed) {
+        console.log(chalk.dim(`\nSummary: ${blockingItems.length} blocking issues, ${expediteItems.length} expedite issues across ${filesTouched} files`));
+    }
+    else {
+        console.log(chalk.dim(`\nSummary: ${blockingItems.length} blocking issues, ${advisoryItems.length} advisory issues across ${filesTouched} files`));
+    }
+    console.log(chalk.dim(`Details: ${result.message}\n`));
 }
 function printFirstRunAdvisoryMessage(demoMode) {
     console.log(chalk.cyan('\nNeurcode first-run advisory mode'));
