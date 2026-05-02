@@ -847,6 +847,16 @@ function toCanonicalVerifyOutput(payload) {
             addScopeIssue(file, message);
             continue;
         }
+        // Artifact presence/signature checks are advisory — they must never block a PR.
+        // Real governance signal (policy violations, scope drift) should not be obscured
+        // by infrastructure setup state.
+        const policyStr = String(policy || '').toLowerCase();
+        const isArtifactCheck = policyStr === 'deterministic_artifacts_required'
+            || policyStr === 'signed_artifacts_required';
+        if (isArtifactCheck) {
+            addWarning(file, message, policy);
+            continue;
+        }
         if (severity === 'warning' || severity === 'info') {
             addWarning(file, message, policy);
             continue;
@@ -1649,6 +1659,9 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     if (!options.json && effectiveRules.policyPack && effectiveRules.policyPackRules.length > 0) {
         console.log(chalk.dim(`   Evaluating policy pack: ${effectiveRules.policyPack.packName} (${effectiveRules.policyPack.packId}@${effectiveRules.policyPack.version}, ${effectiveRules.policyPackRules.length} rule(s))`));
     }
+    else if (!options.json && !effectiveRules.policyPack) {
+        console.log(chalk.dim('   No policy pack installed — run `neurcode policy install <pack>` to add governance rules'));
+    }
     const policyResult = (0, policy_engine_1.evaluateRules)(diffFilesForPolicy, effectiveRules.allRules);
     policyViolations = (policyResult.violations || []);
     policyViolations = policyViolations.filter((v) => !ignoreFilter(v.file));
@@ -1930,10 +1943,10 @@ async function verifyCommand(options) {
         const explicitStrictArtifactMode = options.strictArtifacts === true ||
             isEnabledFlag(process.env.NEURCODE_VERIFY_STRICT_ARTIFACTS) ||
             isEnabledFlag(process.env.NEURCODE_ENTERPRISE_MODE);
-        const ciEnterpriseDefaultStrict = process.env.CI === 'true'
-            && !isEnabledFlag(process.env.NEURCODE_VERIFY_ALLOW_NON_STRICT_CI)
-            && Boolean(options.apiKey || process.env.NEURCODE_API_KEY);
-        const strictArtifactMode = explicitStrictArtifactMode || ciEnterpriseDefaultStrict;
+        // Strict artifact mode is only engaged when explicitly requested.
+        // Auto-enabling it in CI based on API key presence masked real violations
+        // by blocking early on missing artifacts before policy checks could run.
+        const strictArtifactMode = explicitStrictArtifactMode;
         const runtimeGuardArtifactPath = (0, runtime_guard_1.resolveRuntimeGuardPath)(projectRoot, options.runtimeGuard);
         const autoRuntimeGuardInStrict = strictArtifactMode
             && (0, fs_1.existsSync)(runtimeGuardArtifactPath)
@@ -1999,38 +2012,57 @@ async function verifyCommand(options) {
                 ]
                 : [],
         };
+        // Artifact presence warnings (advisory — missing artifacts fall back to runtime compilation).
+        // These must never cause an early exit; real governance signal should always be evaluated.
+        const artifactPresenceWarnings = [];
         if (strictArtifactMode) {
-            const strictErrors = [];
             if (!compiledPolicyRead.artifact) {
-                strictErrors.push(compiledPolicyRead.error
+                artifactPresenceWarnings.push(compiledPolicyRead.error
                     ? `Compiled policy artifact invalid (${compiledPolicyRead.error})`
                     : `Compiled policy artifact missing (${compiledPolicyRead.path})`);
             }
             if (!changeContractRead.contract) {
-                strictErrors.push(changeContractRead.error
+                artifactPresenceWarnings.push(changeContractRead.error
                     ? `Change contract artifact invalid (${changeContractRead.error})`
                     : `Change contract artifact missing (${changeContractRead.path})`);
             }
-            if (compiledPolicySignatureStatus
-                && !compiledPolicySignatureStatus.valid
-                && (requireSignedArtifacts || compiledPolicySignatureStatus.present)) {
-                strictErrors.push(`Compiled policy artifact signature validation failed (${compiledPolicySignatureStatus.issues.join('; ') || 'unknown issue'})`);
+            if (!options.json && artifactPresenceWarnings.length > 0) {
+                console.log(chalk.yellow('\n⚠️  Deterministic artifact(s) unavailable — falling back to runtime compilation'));
+                artifactPresenceWarnings.forEach((entry) => {
+                    console.log(chalk.yellow(`   • ${entry}`));
+                });
+                console.log(chalk.dim('   Governance will continue using runtime compilation. Artifact checks are advisory.\n'));
             }
-            if (changeContractSignatureStatus
-                && !changeContractSignatureStatus.valid
-                && (requireSignedArtifacts || changeContractSignatureStatus.present)) {
-                strictErrors.push(`Change contract artifact signature validation failed (${changeContractSignatureStatus.issues.join('; ') || 'unknown issue'})`);
+        }
+        // Signature blocking distinguishes two cases:
+        // - Artifact has a signature that is INVALID (present=true, valid=false): this is a tamper
+        //   indicator and blocks when requireSignedArtifacts is set.
+        // - Artifact has NO signature (present=false): this is an unsigned artifact; advisory only,
+        //   never blocks — an unsigned artifact cannot be "tampered", only "not signed yet".
+        if (strictArtifactMode) {
+            const signatureBlockErrors = [];
+            if (requireSignedArtifacts
+                && compiledPolicySignatureStatus
+                && compiledPolicySignatureStatus.present
+                && !compiledPolicySignatureStatus.valid) {
+                signatureBlockErrors.push(`Compiled policy artifact signature validation failed (${compiledPolicySignatureStatus.issues.join('; ') || 'unknown issue'})`);
             }
-            if (strictErrors.length > 0) {
-                const message = `Strict artifact mode requires deterministic compiled-policy + change-contract artifacts.\n- ${strictErrors.join('\n- ')}`;
+            if (requireSignedArtifacts
+                && changeContractSignatureStatus
+                && changeContractSignatureStatus.present
+                && !changeContractSignatureStatus.valid) {
+                signatureBlockErrors.push(`Change contract artifact signature validation failed (${changeContractSignatureStatus.issues.join('; ') || 'unknown issue'})`);
+            }
+            if (signatureBlockErrors.length > 0) {
+                const message = `Signed artifact enforcement failed — tampered or invalid signatures detected.\n- ${signatureBlockErrors.join('\n- ')}`;
                 if (options.json) {
                     emitVerifyJson({
                         grade: 'F',
                         score: 0,
                         verdict: 'FAIL',
-                        violations: strictErrors.map((entry) => ({
+                        violations: signatureBlockErrors.map((entry) => ({
                             file: entry.toLowerCase().includes('compiled policy') ? compiledPolicyRead.path : changeContractRead.path,
-                            rule: 'deterministic_artifacts_required',
+                            rule: 'signed_artifacts_required',
                             severity: 'block',
                             message: entry,
                         })),
@@ -2041,32 +2073,34 @@ async function verifyCommand(options) {
                         totalPlannedFiles: 0,
                         message,
                         scopeGuardPassed: false,
-                        mode: 'strict_artifacts_required',
+                        mode: 'signed_artifacts_required',
                         policyOnly: options.policyOnly === true,
                         changeContract: changeContractSummary,
                         ...(compiledPolicyMetadata ? { policyCompilation: compiledPolicyMetadata } : {}),
                     });
                 }
                 else {
-                    (0, scope_telemetry_1.printScopeTelemetry)(chalk, scopeTelemetry, {
-                        includeBlockedWarning: true,
-                    });
-                    console.log(chalk.red('\n⛔ Deterministic Artifact Requirements Failed'));
-                    strictErrors.forEach((entry) => {
+                    (0, scope_telemetry_1.printScopeTelemetry)(chalk, scopeTelemetry, { includeBlockedWarning: true });
+                    console.log(chalk.red('\n⛔ Signed Artifact Validation Failed'));
+                    signatureBlockErrors.forEach((entry) => {
                         console.log(chalk.red(`   • ${entry}`));
                     });
-                    console.log(chalk.dim('\nSet --compiled-policy and --change-contract with valid artifacts before verify.'));
-                    if (requireSignedArtifacts) {
-                        console.log(chalk.dim('Enable signing keys via NEURCODE_GOVERNANCE_SIGNING_KEY or NEURCODE_GOVERNANCE_SIGNING_KEYS to generate signed artifacts.\n'));
-                    }
-                    else {
-                        console.log('');
-                    }
+                    console.log(chalk.dim('\nRegenerate artifacts with valid signing keys: NEURCODE_GOVERNANCE_SIGNING_KEY or NEURCODE_GOVERNANCE_SIGNING_KEYS.\n'));
                 }
                 process.exit(2);
             }
+            // Advisory notice when artifact has a signature but signing is not required in this context.
+            if (!options.json) {
+                if (compiledPolicySignatureStatus && !compiledPolicySignatureStatus.valid && !requireSignedArtifacts) {
+                    console.log(chalk.yellow(`   ⚠️  Compiled policy signature could not be verified (${compiledPolicySignatureStatus.issues.join('; ') || 'key unavailable'}) — advisory only`));
+                }
+                if (changeContractSignatureStatus && !changeContractSignatureStatus.valid && !requireSignedArtifacts) {
+                    console.log(chalk.yellow(`   ⚠️  Change contract signature could not be verified (${changeContractSignatureStatus.issues.join('; ') || 'key unavailable'}) — advisory only`));
+                }
+            }
         }
         if (!strictArtifactMode && requireSignedArtifacts) {
+            // Non-strict mode with signing required: same signature gate applies.
             const signatureErrors = [];
             if (compiledPolicyRead.artifact && compiledPolicySignatureStatus && !compiledPolicySignatureStatus.valid) {
                 signatureErrors.push(`Compiled policy artifact signature validation failed (${compiledPolicySignatureStatus.issues.join('; ') || 'unknown issue'})`);
@@ -2101,13 +2135,9 @@ async function verifyCommand(options) {
                     });
                 }
                 else {
-                    (0, scope_telemetry_1.printScopeTelemetry)(chalk, scopeTelemetry, {
-                        includeBlockedWarning: true,
-                    });
+                    (0, scope_telemetry_1.printScopeTelemetry)(chalk, scopeTelemetry, { includeBlockedWarning: true });
                     console.log(chalk.red('\n⛔ Signed Artifact Requirements Failed'));
-                    signatureErrors.forEach((entry) => {
-                        console.log(chalk.red(`   • ${entry}`));
-                    });
+                    signatureErrors.forEach((entry) => console.log(chalk.red(`   • ${entry}`)));
                     console.log(chalk.dim('\nEnable signing keys via NEURCODE_GOVERNANCE_SIGNING_KEY or NEURCODE_GOVERNANCE_SIGNING_KEYS and regenerate artifacts.\n'));
                 }
                 process.exit(2);
@@ -2144,9 +2174,6 @@ async function verifyCommand(options) {
                 else if (changeContractSignatureStatus.present || requireSignedArtifacts) {
                     console.log(chalk.yellow(`   Change contract signature: invalid (${changeContractSignatureStatus.issues.join('; ') || 'unknown issue'})`));
                 }
-            }
-            if (ciEnterpriseDefaultStrict && !explicitStrictArtifactMode) {
-                console.log(chalk.dim('   CI enterprise mode detected: strict deterministic artifact enforcement is auto-enabled (set NEURCODE_VERIFY_ALLOW_NON_STRICT_CI=1 to opt out).'));
             }
             if (autoRuntimeGuardInStrict && !options.requireRuntimeGuard && !isEnabledFlag(process.env.NEURCODE_VERIFY_REQUIRE_RUNTIME_GUARD)) {
                 console.log(chalk.dim(`   Strict mode detected runtime guard artifact: auto-enforcing runtime guard (${runtimeGuardArtifactPath}).`));
@@ -3523,6 +3550,9 @@ async function verifyCommand(options) {
         if (!options.json && effectiveRules.policyPack && effectiveRules.policyPackRules.length > 0) {
             console.log(chalk.dim(`   Evaluating policy pack: ${effectiveRules.policyPack.packName} (${effectiveRules.policyPack.packId}@${effectiveRules.policyPack.version}, ${effectiveRules.policyPackRules.length} rule(s))`));
         }
+        else if (!options.json && !effectiveRules.policyPack) {
+            console.log(chalk.dim('   No policy pack installed — run `neurcode policy install <pack>` to add governance rules'));
+        }
         // Prepare diff stats and changed files for API
         const diffStats = {
             totalAdded: summary.totalAdded,
@@ -4515,14 +4545,14 @@ function displayChangeContractDrift(summary, options = { advisory: false }) {
  * Display verification results in a formatted report card
  */
 function displayVerifyResults(result, policyViolations, expediteModeUsed = false) {
-    const verdictLabel = result.verdict === 'PASS'
-        ? chalk.green('PASS ✅')
+    // ── Header ────────────────────────────────────────────────────────────────
+    const headerLabel = result.verdict === 'PASS'
+        ? chalk.bold.green('\n✅ VERIFICATION PASSED')
         : result.verdict === 'WARN'
-            ? chalk.yellow('WARN ⚠️')
-            : chalk.red('FAIL ❌');
-    const plannedText = `${result.plannedFilesModified}/${result.totalPlannedFiles}`;
-    console.log(`\n${verdictLabel}`);
-    console.log(chalk.dim(`Plan adherence: ${plannedText} files (${result.adherenceScore}%)`));
+            ? chalk.bold.yellow('\n⚠️  VERIFICATION PASSED WITH WARNINGS')
+            : chalk.bold.red('\n❌ VERIFICATION FAILED');
+    console.log(headerLabel);
+    // ── Triage items ──────────────────────────────────────────────────────────
     const maxBlockingItems = 20;
     const maxAdvisoryItems = 8;
     const maxExpediteItems = 12;
@@ -4580,6 +4610,31 @@ function displayVerifyResults(result, policyViolations, expediteModeUsed = false
         ];
         advisoryItems = [];
     }
+    // ── Counts ────────────────────────────────────────────────────────────────
+    console.log(blockingItems.length > 0
+        ? chalk.red(`Blocking Issues: ${blockingItems.length}`)
+        : chalk.dim('Blocking Issues: 0'));
+    if (expediteModeUsed) {
+        console.log(chalk.yellow(`Expedite Issues: ${expediteItems.length}`));
+    }
+    else {
+        console.log(advisoryItems.length > 0
+            ? chalk.yellow(`Advisory Issues: ${advisoryItems.length}`)
+            : chalk.dim('Advisory Issues: 0'));
+    }
+    console.log(chalk.dim(`Plan adherence: ${result.plannedFilesModified}/${result.totalPlannedFiles} files (${result.adherenceScore}%)`));
+    // ── Top issues ────────────────────────────────────────────────────────────
+    const topIssues = [
+        ...blockingItems,
+        ...(expediteModeUsed ? expediteItems : advisoryItems),
+    ].slice(0, 2);
+    if (topIssues.length > 0) {
+        console.log(chalk.bold('\nTop Issues:'));
+        topIssues.forEach((item, i) => {
+            console.log(`  ${i + 1}. ${item.message} → ${chalk.cyan(item.file)}`);
+        });
+    }
+    // ── Detailed lists ────────────────────────────────────────────────────────
     if (blockingItems.length > 0) {
         console.log(chalk.red(`\nBLOCKING (${blockingItems.length})`));
         blockingItems.slice(0, maxBlockingItems).forEach((item) => {
@@ -4613,20 +4668,15 @@ function displayVerifyResults(result, policyViolations, expediteModeUsed = false
         console.log(chalk.dim('  Note: Expedite Mode used'));
     }
     if (blockingItems.length === 0 && advisoryItems.length === 0 && expediteItems.length === 0) {
-        console.log(chalk.green('\nNo drift detected.'));
+        console.log(chalk.green('\nNo issues detected.'));
     }
-    const filesTouched = new Set([
-        ...blockingItems.map((item) => item.file),
-        ...advisoryItems.map((item) => item.file),
-        ...expediteItems.map((item) => item.file),
-    ]).size;
-    if (expediteModeUsed) {
-        console.log(chalk.dim(`\nSummary: ${blockingItems.length} blocking issues, ${expediteItems.length} expedite issues across ${filesTouched} files`));
+    // ── Next step ─────────────────────────────────────────────────────────────
+    if (blockingItems.length > 0 || advisoryItems.length > 0 || expediteItems.length > 0) {
+        console.log(chalk.bold('\nNext step:'));
+        console.log(`  ${chalk.cyan('neurcode fix')}`);
+        console.log(chalk.dim('  or: neurcode fix --apply-safe  (auto-apply high-confidence patches)'));
     }
-    else {
-        console.log(chalk.dim(`\nSummary: ${blockingItems.length} blocking issues, ${advisoryItems.length} advisory issues across ${filesTouched} files`));
-    }
-    console.log(chalk.dim(`Details: ${result.message}\n`));
+    console.log(chalk.dim(`\nDetails: ${result.message}\n`));
 }
 function printFirstRunAdvisoryMessage(demoMode) {
     console.log(chalk.cyan('\nNeurcode first-run advisory mode'));

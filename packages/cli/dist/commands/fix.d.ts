@@ -6,6 +6,7 @@ interface FixOptions {
     head?: boolean;
     base?: string;
     json?: boolean;
+    applySafe?: boolean;
 }
 export declare function fixCommand(options: FixOptions): Promise<void>;
 export {};

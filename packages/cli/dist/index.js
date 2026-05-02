@@ -53,6 +53,7 @@ const bootstrap_1 = require("./commands/bootstrap");
 const messages_1 = require("./utils/messages");
 const config_2 = require("./config");
 const start_intent_1 = require("./commands/start-intent");
+const patch_apply_1 = require("./commands/patch-apply");
 // Read version from package.json
 let version = '0.1.2'; // fallback
 try {
@@ -714,6 +715,17 @@ program
     });
 });
 program
+    .command('patch')
+    .description('Apply a deterministic fix patch to a file (from neurcode fix suggestions)')
+    .requiredOption('--file <path>', 'Path to the file to patch')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, patch_apply_1.patchApplyCommand)({
+        file: options.file,
+        json: options.json === true,
+    });
+});
+program
     .command('fix')
     .description('Get actionable fixes')
     .option('--plan-id <id>', 'Plan ID for verify scope checks')
@@ -722,6 +734,7 @@ program
     .option('--staged', 'Only verify staged changes')
     .option('--head', 'Verify changes against HEAD')
     .option('--base <ref>', 'Verify changes against a specific base ref')
+    .option('--apply-safe', 'Auto-apply high-confidence, deterministic patches and re-run verify')
     .option('--json', 'Output machine-readable JSON')
     .action(async (options) => {
     await (0, fix_1.fixCommand)({
@@ -731,6 +744,7 @@ program
         staged: options.staged === true,
         head: options.head === true,
         base: options.base,
+        applySafe: options.applySafe === true,
         json: options.json === true,
     });
 });

@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateCommand = generateCommand;
 const project_root_1 = require("../utils/project-root");
 const plan_sync_1 = require("../utils/plan-sync");
+const context_engine_1 = require("../context-engine");
 const cli_json_1 = require("../utils/cli-json");
 const proximity_1 = require("../mcp/proximity");
 const context_injector_1 = require("../mcp/context-injector");
@@ -70,8 +71,11 @@ function generateCommand(userPrompt, options = {}) {
         policies,
         projectContext,
     });
+    const contextAnalysis = (0, context_engine_1.analyzeContext)(projectRoot, normalizedPrompt);
+    const contextSuggestedFiles = contextAnalysis.suggestedFiles.filter((f) => !plan.expectedFiles.some((e) => normalizeRepoPath(e).toLowerCase() === normalizeRepoPath(f).toLowerCase()));
+    const mergedExpectedFiles = [...plan.expectedFiles, ...contextSuggestedFiles];
     const requestedFiles = (0, proximity_1.extractRequestedFilePathsFromPrompt)(normalizedPrompt, 3);
-    const allowedSet = new Set(plan.expectedFiles.map((file) => normalizeRepoPath(file).toLowerCase()));
+    const allowedSet = new Set(mergedExpectedFiles.map((file) => normalizeRepoPath(file).toLowerCase()));
     const requestedOutOfScopeFiles = requestedFiles.filter((file) => !allowedSet.has(normalizeRepoPath(file).toLowerCase()));
     const strictScopeMode = isStrictScopeModeEnabled(normalizedPrompt);
     const planSyncUpdate = (!strictScopeMode && requestedOutOfScopeFiles.length > 0)
@@ -96,6 +100,10 @@ function generateCommand(userPrompt, options = {}) {
                     updated: planSyncUpdated,
                     addedFiles: planSyncAddedFiles,
                 },
+                contextEngine: {
+                    suggestedFiles: contextAnalysis.suggestedFiles,
+                    confidence: contextAnalysis.confidence,
+                },
             },
             message: 'Governed prompt generated (no LLM call executed).',
         });
@@ -111,6 +119,13 @@ function generateCommand(userPrompt, options = {}) {
         else {
             console.log(chalk.dim('\nPlan Sync refreshed .neurcode/plan.json (files already present).'));
         }
+    }
+    if (contextAnalysis.suggestedFiles.length > 0) {
+        console.log(chalk.bold('\nSuggested files based on your codebase:'));
+        contextAnalysis.suggestedFiles.forEach((file) => {
+            console.log(`  * ${file}`);
+        });
+        console.log(chalk.dim(`Confidence: ${contextAnalysis.confidence}`));
     }
     console.log(chalk.dim('\nGoverned prompt prepared locally. No LLM call executed.\n'));
 }

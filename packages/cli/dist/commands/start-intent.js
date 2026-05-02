@@ -4,6 +4,7 @@ exports.startIntentCommand = startIntentCommand;
 const cli_json_1 = require("../utils/cli-json");
 const project_root_1 = require("../utils/project-root");
 const plan_sync_1 = require("../utils/plan-sync");
+const context_engine_1 = require("../context-engine");
 const chalk = (0, cli_json_1.loadChalk)();
 function startIntentCommand(intentInput, options = {}) {
     const intent = intentInput.trim();
@@ -23,6 +24,9 @@ function startIntentCommand(intentInput, options = {}) {
     }
     const projectRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
     const initialized = (0, plan_sync_1.initializeLocalPlanFromIntent)(projectRoot, intent);
+    const contextAnalysis = (0, context_engine_1.analyzeContext)(projectRoot, intent);
+    const contextFiles = contextAnalysis.suggestedFiles.filter((f) => !initialized.expectedFiles.includes(f));
+    const allExpectedFiles = [...initialized.expectedFiles, ...contextFiles];
     if (options.json) {
         const nextSteps = [
             'Run `neurcode generate "<what you want to implement>"`',
@@ -33,11 +37,15 @@ function startIntentCommand(intentInput, options = {}) {
             success: true,
             intent: initialized.intent,
             detectedSignals: initialized.detectedSignals,
-            expectedFiles: initialized.expectedFiles,
+            expectedFiles: allExpectedFiles,
             constraints: initialized.constraints,
             planPath: initialized.path,
             createdAt: initialized.createdAt,
             lastUpdated: initialized.lastUpdated,
+            contextEngine: {
+                suggestedFiles: contextAnalysis.suggestedFiles,
+                confidence: contextAnalysis.confidence,
+            },
             nextSteps,
             message: 'Neurcode intent-based plan initialized.',
         }, null, 2));
@@ -52,9 +60,16 @@ function startIntentCommand(intentInput, options = {}) {
         console.log('Detected areas: general');
     }
     console.log(chalk.bold('\nInitial expected files:'));
-    initialized.expectedFiles.forEach((file) => {
+    allExpectedFiles.forEach((file) => {
         console.log(`  - ${file}`);
     });
+    if (contextAnalysis.suggestedFiles.length > 0) {
+        console.log(chalk.bold('\nSuggested files based on your codebase:'));
+        contextAnalysis.suggestedFiles.forEach((file) => {
+            console.log(`  * ${file}`);
+        });
+        console.log(chalk.dim(`Confidence: ${contextAnalysis.confidence}`));
+    }
     console.log(chalk.dim(`\nPlan saved: ${initialized.path}`));
     console.log(chalk.green('✅ Plan initialized. Plan Sync will keep expected files updated.'));
     console.log(chalk.bold('\nNext steps:'));
