@@ -1,53 +1,69 @@
 # Core Workflow
 
-Neurcode is designed around one default workflow:
+Neurcode is designed around one deterministic loop:
 
-`start -> generate -> verify -> fix`
+`start → verify → fix → patch → verify`
 
 ## Workflow Diagram
 
-`Intent -> Generate -> Verify -> Fix -> Repeat`
+`Intent → Verify → Fix → Patch → Verify again`
 
-## Step 1: Start
+## Step 1: Start (declare intent)
 
 ```bash
 neurcode start "Add JWT authentication with role checks"
 ```
 
-Use this to declare intent and initialize local plan context.
+Declare what you are building. Initializes `.neurcode/plan.json` with intent, expected file scope, and detected constraints. Run once per feature or meaningful change unit.
 
-## Step 2: Generate
-
-```bash
-neurcode generate "Implement JWT middleware for protected routes"
-```
-
-Use this to produce a governed prompt with policy and scope context attached.
-
-## Step 3: Verify
+## Step 2: Verify
 
 ```bash
 neurcode verify
 ```
 
-Use this to check policy violations, warnings, and scope drift in the current diff context.
+Evaluate the current git diff against policy rules and plan scope. Returns structured findings: blocking violations, advisory warnings, and scope drift.
 
-## Step 4: Fix
+## Step 3: Fix
 
 ```bash
 neurcode fix
 ```
 
-Use this to get prioritized, file-level remediation guidance.
+Convert verify findings into prioritized, file-level remediation guidance. Each suggestion includes a root cause, explanation, and — where possible — a safe deterministic patch.
+
+## Step 4: Patch
+
+```bash
+neurcode patch --file <path>
+```
+
+Apply a deterministic fix to a specific file from `neurcode fix` suggestions. Safe patches are idempotent and do not rewrite surrounding context.
+
+## Step 5: Verify again
+
+```bash
+neurcode verify
+```
+
+Re-run verify to confirm the patches resolved all findings. Repeat from Step 3 for any remaining issues.
 
 ## Daily Usage Pattern
 
-1. Start once per feature intent.
-2. Generate when defining implementation tasks.
-3. Verify after meaningful code changes.
-4. Fix issues, then re-run verify.
+1. `neurcode start` once per intent / feature.
+2. Code your changes.
+3. `neurcode verify` → `neurcode fix` → `neurcode patch` as a tight loop.
+4. Final `neurcode verify` before committing or opening a PR.
+
+## Dashboard Integration
+
+Run `neurcode daemon` to start a local HTTP bridge on `http://localhost:4321`. This allows the Neurcode dashboard to trigger `fix` and `patch` actions directly without leaving the browser.
+
+```bash
+neurcode daemon
+```
 
 ## Output You Should Trust
 
-- `verify` and `fix` should align on counts and files.
-- CI should post the same governance direction in PR comments.
+- `verify` and `fix` findings align on file counts and violation references.
+- CI posts the same governance verdict in PR comments when `--record` is passed to `verify`.

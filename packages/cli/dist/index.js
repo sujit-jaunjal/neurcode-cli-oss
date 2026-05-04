@@ -54,6 +54,7 @@ const messages_1 = require("./utils/messages");
 const config_2 = require("./config");
 const start_intent_1 = require("./commands/start-intent");
 const patch_apply_1 = require("./commands/patch-apply");
+const server_1 = require("./daemon/server");
 // Read version from package.json
 let version = '0.1.2'; // fallback
 try {
@@ -68,11 +69,7 @@ const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
     {
         command: 'neurcode start "<intent>"',
-        description: 'Initialize what you are building',
-    },
-    {
-        command: 'neurcode generate "<task>"',
-        description: 'Generate governed code',
+        description: 'Declare intent and initialize plan context',
     },
     {
         command: 'neurcode verify',
@@ -80,10 +77,18 @@ const CORE_WORKFLOW_STEPS = [
     },
     {
         command: 'neurcode fix',
-        description: 'Get actionable fixes',
+        description: 'Get prioritized, file-level remediation guidance',
+    },
+    {
+        command: 'neurcode patch --file <path>',
+        description: 'Apply a deterministic fix to a specific file',
+    },
+    {
+        command: 'neurcode verify',
+        description: 'Confirm patches resolve all findings',
     },
 ];
-const PRIMARY_COMMAND_NAMES = new Set(['start', 'generate', 'verify', 'fix']);
+const PRIMARY_COMMAND_NAMES = new Set(['start', 'verify', 'fix', 'patch', 'daemon']);
 function formatCoreWorkflowStep(step) {
     return `  * ${step.command.padEnd(28)} ${step.description}`;
 }
@@ -858,6 +863,13 @@ revertCmd
         backup: options.backup || false,
         force: options.force || false,
     });
+});
+// ── Daemon ────────────────────────────────────────────────────────────────────
+program
+    .command('daemon')
+    .description('Start a local HTTP bridge so the dashboard can trigger CLI actions (http://localhost:4321)')
+    .action(() => {
+    (0, server_1.startDaemon)();
 });
 configurePrimaryHelpView(program);
 const advancedLegacyCommands = buildAdvancedLegacyCommandsList(program);

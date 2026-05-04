@@ -56,6 +56,7 @@ const project_root_1 = require("../utils/project-root");
 const brain_context_1 = require("../utils/brain-context");
 const scope_telemetry_1 = require("../utils/scope-telemetry");
 const plan_sync_1 = require("../utils/plan-sync");
+const intent_engine_1 = require("../intent-engine");
 const policy_packs_1 = require("../utils/policy-packs");
 const custom_policy_rules_1 = require("../utils/custom-policy-rules");
 const policy_exceptions_1 = require("../utils/policy-exceptions");
@@ -952,9 +953,79 @@ function toCanonicalVerifyOutput(payload) {
             source: 'expedite',
         })),
     ]);
-    const blockingItems = expediteModeUsed ? expediteBlockingItems : defaultBlockingItems;
-    const advisoryItems = expediteModeUsed ? expediteItems : defaultAdvisoryItems;
+    // ── Intent issues and summary from engine ───────────────────────────────
+    const rawIntentIssues = Array.isArray(payload.intentIssues) ? payload.intentIssues : [];
+    const intentDomains = Array.isArray(payload.intentDomains) ? payload.intentDomains : [];
+    const intentSummary = (payload.intentSummary ?? null);
+    const rawFlowIssues = Array.isArray(payload.flowIssues) ? payload.flowIssues : [];
+    const rawRegressions = Array.isArray(payload.regressions) ? payload.regressions : [];
+    // High-severity intent issues become blocking; medium become advisory.
+    const intentBlockingTriageItems = rawIntentIssues
+        .filter((i) => i.severity === 'high')
+        .map((i) => ({
+        file: (i.files?.[0]) ?? 'intent-analysis',
+        message: i.message,
+        policy: i.rule,
+        severity: 'high',
+        source: 'violation',
+    }));
+    const intentAdvisoryTriageItems = rawIntentIssues
+        .filter((i) => i.severity === 'medium')
+        .map((i) => ({
+        file: (i.files?.[0]) ?? 'intent-analysis',
+        message: i.message,
+        policy: i.rule,
+        severity: 'warning',
+        source: 'warning',
+    }));
+    // V5: flow issues — high → blocking, medium → advisory
+    const flowBlockingTriageItems = rawFlowIssues
+        .filter((i) => i.severity === 'high')
+        .map((i) => ({
+        file: (i.files?.[0]) ?? 'flow-analysis',
+        message: i.message,
+        policy: i.rule,
+        severity: 'high',
+        source: 'violation',
+    }));
+    const flowAdvisoryTriageItems = rawFlowIssues
+        .filter((i) => i.severity === 'medium')
+        .map((i) => ({
+        file: (i.files?.[0]) ?? 'flow-analysis',
+        message: i.message,
+        policy: i.rule,
+        severity: 'warning',
+        source: 'warning',
+    }));
+    let blockingItems = expediteModeUsed ? expediteBlockingItems : defaultBlockingItems;
+    let advisoryItems = expediteModeUsed ? expediteItems : defaultAdvisoryItems;
+    if (intentBlockingTriageItems.length > 0) {
+        blockingItems = dedupeTriageItems([...blockingItems, ...intentBlockingTriageItems]);
+    }
+    if (intentAdvisoryTriageItems.length > 0) {
+        advisoryItems = dedupeTriageItems([...advisoryItems, ...intentAdvisoryTriageItems]);
+    }
+    if (flowBlockingTriageItems.length > 0) {
+        blockingItems = dedupeTriageItems([...blockingItems, ...flowBlockingTriageItems]);
+    }
+    if (flowAdvisoryTriageItems.length > 0) {
+        advisoryItems = dedupeTriageItems([...advisoryItems, ...flowAdvisoryTriageItems]);
+    }
+    // V6: regressions — always blocking
+    const regressionBlockingTriageItems = rawRegressions.map((r) => ({
+        file: 'regression-analysis',
+        message: r.message,
+        policy: r.rule,
+        severity: 'high',
+        source: 'violation',
+    }));
+    if (regressionBlockingTriageItems.length > 0) {
+        blockingItems = dedupeTriageItems([...regressionBlockingTriageItems, ...blockingItems]);
+    }
+    const grade = verdict === 'PASS' ? 'A' : verdict === 'WARN' ? 'C' : 'F';
     return {
+        grade,
+        score: violations.length === 0 && warnings.length === 0 && scopeIssues.length === 0 ? 100 : 0,
         verdict,
         summary: {
             totalFilesChanged,
@@ -969,6 +1040,11 @@ function toCanonicalVerifyOutput(payload) {
         advisoryCount: advisoryItems.length,
         blockingItems,
         advisoryItems,
+        intentIssues: rawIntentIssues,
+        intentDomains,
+        intentSummary,
+        flowIssues: rawFlowIssues,
+        regressions: rawRegressions,
         expediteModeUsed,
         expediteCount: expediteModeUsed ? expediteItems.length : 0,
         expediteItems: expediteModeUsed ? expediteItems : [],
@@ -1090,20 +1166,32 @@ function toAiDebtSummary(evaluation) {
             observed: item.observed,
             budget: item.budget,
             message: item.message,
+            ...(item.files && item.files.length > 0 ? { files: item.files } : {}),
         })),
     };
 }
+const ARCH_VIOLATION_CODES = new Set(['db_in_ui', 'missing_validation']);
 function toAiDebtReportViolations(summary) {
     if (summary.mode === 'off' || summary.violations.length === 0) {
         return [];
     }
-    const severity = summary.mode === 'enforce' ? 'block' : 'warn';
-    return summary.violations.map((item) => ({
-        rule: `ai_debt:${item.code}`,
-        file: '.neurcode/ai-debt-budget.json',
-        severity,
-        message: item.message,
-    }));
+    const defaultSeverity = summary.mode === 'enforce' ? 'block' : 'warn';
+    const result = [];
+    for (const item of summary.violations) {
+        // Architectural violations are always advisory (warn) — heuristic detection, not a hard block
+        const severity = ARCH_VIOLATION_CODES.has(item.code) ? 'warn' : defaultSeverity;
+        const rule = ARCH_VIOLATION_CODES.has(item.code) ? item.code : `ai_debt:${item.code}`;
+        const files = item.files && item.files.length > 0 ? item.files : null;
+        if (files) {
+            for (const file of files) {
+                result.push({ rule, file, severity, message: item.message });
+            }
+        }
+        else {
+            result.push({ rule, file: '.neurcode/ai-debt-budget.json', severity, message: item.message });
+        }
+    }
+    return result;
 }
 function parseSigningKeyRing(raw) {
     if (!raw || !raw.trim()) {
@@ -1902,6 +1990,14 @@ async function verifyCommand(options) {
             emitCanonicalVerifyJson({
                 ...payload,
                 expediteMode: expediteModeEnabled,
+                // Intent engine results injected so every code-path gets them.
+                intentIssues: payload.intentIssues ?? intentEngineIssues,
+                intentDomains: payload.intentDomains ?? intentEngineDomains,
+                intentSummary: payload.intentSummary ?? intentEngineSummary,
+                // V5: flow issues injected alongside intent issues
+                flowIssues: payload.flowIssues ?? intentEngineFlowIssues,
+                // V6: regressions always injected
+                regressions: payload.regressions ?? intentEngineRegressions,
             });
         };
         if (!isGitRepository(projectRoot)) {
@@ -2939,6 +3035,11 @@ async function verifyCommand(options) {
         let governanceResult = null;
         let planFilesForVerification = [];
         let intentConstraintsForVerification;
+        let intentEngineIssues = [];
+        let intentEngineDomains = [];
+        let intentEngineSummary = null;
+        let intentEngineFlowIssues = [];
+        let intentEngineRegressions = [];
         try {
             // Step A: Get Modified Files (already have from diffFiles)
             const modifiedFiles = diffFiles.map(f => f.path);
@@ -2982,6 +3083,23 @@ async function verifyCommand(options) {
             }
             planFilesForVerification = [...new Set([...planFiles, ...localPlanExpectedFiles])];
             intentConstraintsForVerification = originalIntent || undefined;
+            // ── Intent-Aware Engine ─────────────────────────────────────────────
+            // Run once we have both diffFiles and the resolved intent text.
+            // Stored in outer scope so all emitCanonicalVerifyJson call sites can
+            // include the result in their payloads without repeating the computation.
+            if (intentConstraintsForVerification && diffFiles.length > 0) {
+                try {
+                    const engineResult = (0, intent_engine_1.runIntentEngine)(intentConstraintsForVerification, diffFiles, projectRoot);
+                    intentEngineIssues = engineResult.intentIssues;
+                    intentEngineDomains = engineResult.checkedDomains;
+                    intentEngineSummary = engineResult.intentSummary;
+                    intentEngineFlowIssues = engineResult.flowIssues;
+                    intentEngineRegressions = engineResult.regressions;
+                }
+                catch {
+                    // Non-fatal: intent engine errors must never break verification
+                }
+            }
             governanceResult = (0, governance_1.evaluateGovernance)({
                 projectRoot,
                 task: governanceTask,
@@ -3085,6 +3203,9 @@ async function verifyCommand(options) {
                         mode: 'plan_enforced',
                         policyOnly: false,
                         aiDebt: aiDebtSummaryForScope,
+                        intentIssues: intentEngineIssues,
+                        intentDomains: intentEngineDomains,
+                        intentSummary: intentEngineSummary,
                         ...(expediteModeEnabled ? { expediteMode: true } : {}),
                         ...(governanceResult
                             ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
@@ -3159,6 +3280,42 @@ async function verifyCommand(options) {
                     }
                     if (governanceResult) {
                         displayGovernanceInsights(governanceResult, { explain: options.explain });
+                    }
+                    // ── Intent Status in scope-violation path ──────────────────────
+                    if (intentEngineSummary) {
+                        const s = intentEngineSummary;
+                        const domainLabel = s.domain.charAt(0).toUpperCase() + s.domain.slice(1);
+                        const confColor = s.confidence === 'HIGH' ? chalk.green : s.confidence === 'MEDIUM' ? chalk.yellow : chalk.red;
+                        const wCovPct = s.weightedCoverage != null ? Math.round(s.weightedCoverage * 100) : s.coveragePct;
+                        const filled = Math.round((wCovPct / 100) * 20);
+                        const bar = chalk.cyan('█'.repeat(filled)) + chalk.dim('░'.repeat(20 - filled));
+                        const sysStatus = s.status;
+                        const statusLabel = sysStatus === 'CRITICAL' ? chalk.bold.red('[CRITICAL]') : sysStatus === 'AT RISK' ? chalk.bold.yellow('[AT RISK]') : chalk.bold.green('[SECURE]');
+                        console.log(chalk.bold('\n━━━ INTENT STATUS ━━━━━━━━━━━━━━━━━━━━━━'));
+                        console.log(`  ${statusLabel} ${chalk.bold(`${domainLabel} Implementation:`)} ${bar} ${chalk.bold(`${wCovPct}%`)} (weighted)`);
+                        console.log(`  Confidence: ${confColor(s.confidence)}`);
+                        const critMissing = s.criticalMissing ?? [];
+                        const otherMissing = s.missing.filter((k) => !critMissing.includes(k));
+                        if (critMissing.length > 0) {
+                            console.log(`  ${chalk.bold.red('Critical missing:')}`);
+                            critMissing.forEach((k) => { const label = k.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '); console.log(chalk.red(`    ✗ ${label}`)); });
+                        }
+                        if (otherMissing.length > 0) {
+                            console.log(`  ${chalk.bold.yellow('Missing:')}`);
+                            otherMissing.forEach((k) => { const label = k.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '); console.log(chalk.yellow(`    • ${label}`)); });
+                        }
+                        if (critMissing.length === 0 && otherMissing.length === 0) {
+                            console.log(`  Missing: ${chalk.green('none — all components detected')}`);
+                        }
+                        console.log(chalk.bold('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+                    }
+                    if (intentEngineRegressions.length > 0) {
+                        console.log(chalk.bold.red('\n━━━ REGRESSION ANALYSIS ━━━━━━━━━━━━━━━━━'));
+                        intentEngineRegressions.forEach((reg) => {
+                            const icon = reg.type === 'coverage-regression' ? '📉' : reg.type === 'critical-regression' ? '🔴' : reg.type === 'flow-regression' ? '⛓' : '⚠';
+                            console.log(`  ${chalk.red('[REGRESSION]')} ${icon} ${reg.message}`);
+                        });
+                        console.log(chalk.bold.red('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
                     }
                     console.log('');
                     await recordVerificationIfRequested(options, config, {
@@ -4014,7 +4171,7 @@ async function verifyCommand(options) {
                     message: effectiveMessage,
                     bloatFiles: displayBloatFiles,
                     bloatCount: displayBloatFiles.length,
-                }, policyViolations, expediteModeEnabled);
+                }, policyViolations, expediteModeEnabled, intentEngineIssues, intentEngineSummary, intentEngineFlowIssues, intentEngineRegressions);
                 if (governanceResult) {
                     displayGovernanceInsights(governanceResult, { explain: options.explain });
                 }
@@ -4544,7 +4701,7 @@ function displayChangeContractDrift(summary, options = { advisory: false }) {
 /**
  * Display verification results in a formatted report card
  */
-function displayVerifyResults(result, policyViolations, expediteModeUsed = false) {
+function displayVerifyResults(result, policyViolations, expediteModeUsed = false, intentIssuesForDisplay = [], intentSummaryForDisplay = null, flowIssuesForDisplay = [], regressionsForDisplay = []) {
     // ── Header ────────────────────────────────────────────────────────────────
     const headerLabel = result.verdict === 'PASS'
         ? chalk.bold.green('\n✅ VERIFICATION PASSED')
@@ -4552,6 +4709,60 @@ function displayVerifyResults(result, policyViolations, expediteModeUsed = false
             ? chalk.bold.yellow('\n⚠️  VERIFICATION PASSED WITH WARNINGS')
             : chalk.bold.red('\n❌ VERIFICATION FAILED');
     console.log(headerLabel);
+    // ── Intent Status block ──────────────────────────────────────────────────
+    if (intentSummaryForDisplay) {
+        const s = intentSummaryForDisplay;
+        const domainLabel = s.domain.charAt(0).toUpperCase() + s.domain.slice(1);
+        const confColor = s.confidence === 'HIGH'
+            ? chalk.green
+            : s.confidence === 'MEDIUM'
+                ? chalk.yellow
+                : chalk.red;
+        // V4: weighted coverage bar
+        const wCovPct = s.weightedCoverage != null
+            ? Math.round(s.weightedCoverage * 100)
+            : s.coveragePct;
+        const barWidth = 20;
+        const filled = Math.round((wCovPct / 100) * barWidth);
+        const bar = chalk.cyan('█'.repeat(filled)) + chalk.dim('░'.repeat(barWidth - filled));
+        // V4: system status label
+        const sysStatus = s.status;
+        const statusLabel = sysStatus === 'CRITICAL'
+            ? chalk.bold.red('[CRITICAL]')
+            : sysStatus === 'AT RISK'
+                ? chalk.bold.yellow('[AT RISK]')
+                : chalk.bold.green('[SECURE]');
+        console.log(chalk.bold('\n━━━ INTENT STATUS ━━━━━━━━━━━━━━━━━━━━━━'));
+        console.log(`  ${statusLabel} ${chalk.bold(`${domainLabel} Implementation:`)} ${bar} ${chalk.bold(`${wCovPct}%`)} (weighted)`);
+        console.log(`  Confidence: ${confColor(s.confidence)}`);
+        if (s.foundList.length > 0) {
+            const foundLabels = s.foundList
+                .map((k) => k.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '))
+                .slice(0, 4);
+            console.log(`  Found:   ${chalk.green(foundLabels.join(', '))}${s.foundList.length > 4 ? chalk.dim(` +${s.foundList.length - 4} more`) : ''}`);
+        }
+        // V4: show critical missing and non-critical missing separately
+        const critMissing = s.criticalMissing ?? [];
+        const otherMissing = s.missing.filter((k) => !critMissing.includes(k));
+        if (critMissing.length > 0) {
+            console.log(`  ${chalk.bold.red('Critical missing:')}`);
+            critMissing.forEach((k) => {
+                const label = k.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                console.log(chalk.red(`    ✗ ${label}`));
+            });
+        }
+        if (otherMissing.length > 0) {
+            console.log(`  ${chalk.bold.yellow('Missing:')}`);
+            otherMissing.forEach((k) => {
+                const label = k.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                console.log(chalk.yellow(`    • ${label}`));
+            });
+        }
+        if (critMissing.length === 0 && otherMissing.length === 0) {
+            console.log(`  Missing: ${chalk.green('none — all components detected')}`);
+        }
+        console.log(chalk.bold('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+    }
     // ── Triage items ──────────────────────────────────────────────────────────
     const maxBlockingItems = 20;
     const maxAdvisoryItems = 8;
@@ -4667,11 +4878,51 @@ function displayVerifyResults(result, policyViolations, expediteModeUsed = false
         });
         console.log(chalk.dim('  Note: Expedite Mode used'));
     }
-    if (blockingItems.length === 0 && advisoryItems.length === 0 && expediteItems.length === 0) {
+    // ── Intent issues ─────────────────────────────────────────────────────────
+    if (intentIssuesForDisplay.length > 0) {
+        console.log(chalk.magenta(`\nINTENT ISSUES (${intentIssuesForDisplay.length})`));
+        intentIssuesForDisplay.forEach((issue) => {
+            const label = issue.severity === 'high' ? chalk.red('[HIGH]') : chalk.yellow('[MEDIUM]');
+            const typeLabel = issue.type === 'missing' ? 'Missing' : issue.type === 'misplaced' ? 'Misplaced' : 'Partial';
+            console.log(`  ${label} ${typeLabel}: ${issue.message}`);
+        });
+    }
+    // ── Flow Validation ───────────────────────────────────────────────────────
+    if (flowIssuesForDisplay.length > 0) {
+        console.log(chalk.bold('\n━━━ FLOW VALIDATION ━━━━━━━━━━━━━━━━━━━━━'));
+        flowIssuesForDisplay.forEach((issue) => {
+            const label = issue.severity === 'high' ? chalk.red('[HIGH]') : chalk.yellow('[MEDIUM]');
+            const typeIcon = issue.type === 'missing-flow' ? '⛓' : issue.type === 'misplaced-flow' ? '⚠' : '⊘';
+            console.log(`  ${label} ${typeIcon} ${issue.message}`);
+            if (issue.files && issue.files.length > 0) {
+                const display = issue.files.slice(0, 3);
+                console.log(chalk.dim(`      → ${display.join(', ')}${issue.files.length > 3 ? ` +${issue.files.length - 3} more` : ''}`));
+            }
+        });
+        console.log(chalk.bold('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+    }
+    // ── Regression Analysis ───────────────────────────────────────────────────
+    if (regressionsForDisplay.length > 0) {
+        console.log(chalk.bold.red('\n━━━ REGRESSION ANALYSIS ━━━━━━━━━━━━━━━━━'));
+        regressionsForDisplay.forEach((reg) => {
+            const icon = reg.type === 'coverage-regression' ? '📉' :
+                reg.type === 'critical-regression' ? '🔴' :
+                    reg.type === 'flow-regression' ? '⛓' : '⚠';
+            console.log(`  ${chalk.red('[REGRESSION]')} ${icon} ${reg.message}`);
+        });
+        console.log(chalk.bold.red('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+    }
+    const hasAnyIssue = blockingItems.length > 0 ||
+        advisoryItems.length > 0 ||
+        expediteItems.length > 0 ||
+        intentIssuesForDisplay.length > 0 ||
+        flowIssuesForDisplay.length > 0 ||
+        regressionsForDisplay.length > 0;
+    if (!hasAnyIssue) {
         console.log(chalk.green('\nNo issues detected.'));
     }
     // ── Next step ─────────────────────────────────────────────────────────────
-    if (blockingItems.length > 0 || advisoryItems.length > 0 || expediteItems.length > 0) {
+    if (hasAnyIssue) {
         console.log(chalk.bold('\nNext step:'));
         console.log(`  ${chalk.cyan('neurcode fix')}`);
         console.log(chalk.dim('  or: neurcode fix --apply-safe  (auto-apply high-confidence patches)'));

@@ -7,6 +7,13 @@ const path_1 = require("path");
 const TODO_FIXME_PATTERN = /\b(?:TODO|FIXME)\b/i;
 const CONSOLE_LOG_PATTERN = /\bconsole\.log\s*\(/;
 const ANY_TYPE_PATTERN = /(:\s*any\b|<\s*any\s*>|\bArray<any>\b|\bPromise<any>\b)/i;
+// Architectural pattern detection
+const DB_IMPORT_PATTERN = /import\s+.*from\s+['"][^'"]*\/(db|database|prisma|knex|sequelize|drizzle)[^'"]*['"]/i;
+const DB_CALL_PATTERN = /\b(db|prisma|knex|sequelize|drizzle|pool|client)\s*\.\s*(query|execute|findMany|findOne|findFirst|findUnique|create|update|delete|upsert|raw|select|insert)\s*\(/;
+const UI_PATH_PATTERN = /(\/|^)(components?|pages?|views?|screens?|containers?|app|ui)[/\\]|\.tsx$/i;
+const VALIDATION_PATTERN = /\b(zod|joi|yup|valibot|ajv|class-validator|express-validator|validate|sanitize|schema\.parse|\.validate\()\b/i;
+const REQ_BODY_PATTERN = /\breq\.body\b/;
+const API_PATH_PATTERN = /(\/|^)(routes?|controllers?|handlers?|api|endpoints?)[/\\]/i;
 const DEFAULT_THRESHOLDS = {
     maxAddedTodoFixme: 0,
     maxAddedConsoleLogs: 0,
@@ -125,11 +132,20 @@ function buildMetrics(diffFiles, bloatCount, thresholds) {
     let addedConsoleLogs = 0;
     let addedAnyTypes = 0;
     let largeFilesTouched = 0;
+    const todoFixmeFiles = [];
+    const consoleLogFiles = [];
+    const anyTypeFiles = [];
+    const largeFiles = [];
     for (const file of diffFiles) {
+        const filePath = file.path || 'unknown';
         const fileDelta = Math.max(0, Number(file.addedLines || 0)) + Math.max(0, Number(file.removedLines || 0));
         if (fileDelta >= thresholds.largeFileDeltaLines) {
             largeFilesTouched += 1;
+            largeFiles.push(filePath);
         }
+        let fileTodo = false;
+        let fileConsole = false;
+        let fileAny = false;
         for (const hunk of file.hunks || []) {
             for (const line of hunk.lines || []) {
                 if (line.type !== 'added') {
@@ -138,15 +154,24 @@ function buildMetrics(diffFiles, bloatCount, thresholds) {
                 const content = String(line.content || '');
                 if (TODO_FIXME_PATTERN.test(content)) {
                     addedTodoFixme += 1;
+                    fileTodo = true;
                 }
                 if (CONSOLE_LOG_PATTERN.test(content)) {
                     addedConsoleLogs += 1;
+                    fileConsole = true;
                 }
                 if (ANY_TYPE_PATTERN.test(content)) {
                     addedAnyTypes += 1;
+                    fileAny = true;
                 }
             }
         }
+        if (fileTodo)
+            todoFixmeFiles.push(filePath);
+        if (fileConsole)
+            consoleLogFiles.push(filePath);
+        if (fileAny)
+            anyTypeFiles.push(filePath);
     }
     return {
         addedTodoFixme,
@@ -154,6 +179,10 @@ function buildMetrics(diffFiles, bloatCount, thresholds) {
         addedAnyTypes,
         largeFilesTouched,
         bloatFiles: Math.max(0, Math.floor(bloatCount)),
+        todoFixmeFiles,
+        consoleLogFiles,
+        anyTypeFiles,
+        largeFiles,
     };
 }
 function buildViolations(metrics, thresholds) {
@@ -165,6 +194,7 @@ function buildViolations(metrics, thresholds) {
             observed: metrics.addedTodoFixme,
             budget: thresholds.maxAddedTodoFixme,
             message: `Added TODO/FIXME markers (${metrics.addedTodoFixme}) exceed budget (${thresholds.maxAddedTodoFixme}).`,
+            files: metrics.todoFixmeFiles,
         });
     }
     if (metrics.addedConsoleLogs > thresholds.maxAddedConsoleLogs) {
@@ -174,6 +204,7 @@ function buildViolations(metrics, thresholds) {
             observed: metrics.addedConsoleLogs,
             budget: thresholds.maxAddedConsoleLogs,
             message: `Added console.log statements (${metrics.addedConsoleLogs}) exceed budget (${thresholds.maxAddedConsoleLogs}).`,
+            files: metrics.consoleLogFiles,
         });
     }
     if (metrics.addedAnyTypes > thresholds.maxAddedAnyTypes) {
@@ -183,6 +214,7 @@ function buildViolations(metrics, thresholds) {
             observed: metrics.addedAnyTypes,
             budget: thresholds.maxAddedAnyTypes,
             message: `Added TypeScript any usages (${metrics.addedAnyTypes}) exceed budget (${thresholds.maxAddedAnyTypes}).`,
+            files: metrics.anyTypeFiles,
         });
     }
     if (metrics.largeFilesTouched > thresholds.maxLargeFilesTouched) {
@@ -193,6 +225,7 @@ function buildViolations(metrics, thresholds) {
             budget: thresholds.maxLargeFilesTouched,
             message: `Large file churn (${metrics.largeFilesTouched} file(s) >= ${thresholds.largeFileDeltaLines} lines) ` +
                 `exceeds budget (${thresholds.maxLargeFilesTouched}).`,
+            files: metrics.largeFiles,
         });
     }
     if (metrics.bloatFiles > thresholds.maxBloatFiles) {
@@ -219,22 +252,70 @@ function computeScore(metrics, thresholds) {
         overBloat * 18;
     return Math.max(0, Math.min(100, 100 - weightedPenalty));
 }
+function detectArchitecturalViolations(diffFiles) {
+    const dbInUiFiles = [];
+    const missingValidationFiles = [];
+    for (const file of diffFiles) {
+        const filePath = String(file.path || '');
+        const addedLines = (file.hunks || [])
+            .flatMap((h) => h.lines || [])
+            .filter((l) => l.type === 'added')
+            .map((l) => String(l.content || ''));
+        const addedText = addedLines.join('\n');
+        // db_in_ui: UI component file that imports from or directly calls DB
+        if (UI_PATH_PATTERN.test(filePath)) {
+            if (DB_IMPORT_PATTERN.test(addedText) || DB_CALL_PATTERN.test(addedText)) {
+                dbInUiFiles.push(filePath);
+            }
+        }
+        // missing_validation: API handler file that reads req.body without any validation library
+        if (API_PATH_PATTERN.test(filePath) || filePath.endsWith('.ts') || filePath.endsWith('.js')) {
+            if (REQ_BODY_PATTERN.test(addedText) && !VALIDATION_PATTERN.test(addedText)) {
+                missingValidationFiles.push(filePath);
+            }
+        }
+    }
+    const violations = [];
+    if (dbInUiFiles.length > 0) {
+        violations.push({
+            code: 'db_in_ui',
+            metric: 'architectural',
+            observed: dbInUiFiles.length,
+            budget: 0,
+            message: `Direct database access in UI component (${dbInUiFiles.length} file${dbInUiFiles.length > 1 ? 's' : ''}). DB calls belong in the service/repository layer.`,
+            files: [...new Set(dbInUiFiles)],
+        });
+    }
+    if (missingValidationFiles.length > 0) {
+        violations.push({
+            code: 'missing_validation',
+            metric: 'architectural',
+            observed: missingValidationFiles.length,
+            budget: 0,
+            message: `API handler reads req.body without input validation (${missingValidationFiles.length} file${missingValidationFiles.length > 1 ? 's' : ''}). All inputs must be validated at the API boundary.`,
+            files: [...new Set(missingValidationFiles)],
+        });
+    }
+    return violations;
+}
 function evaluateAiDebtBudget(input) {
     const metrics = buildMetrics(input.diffFiles, input.bloatCount, input.config.thresholds);
     const violations = buildViolations(metrics, input.config.thresholds);
+    const archViolations = detectArchitecturalViolations(input.diffFiles);
     const score = computeScore(metrics, input.config.thresholds);
+    const allViolations = [...violations, ...archViolations];
     const pass = input.config.mode === 'off'
         ? true
         : input.config.mode === 'advisory'
             ? true
-            : violations.length === 0;
+            : allViolations.length === 0;
     return {
         mode: input.config.mode,
         pass,
         score,
         metrics,
         thresholds: input.config.thresholds,
-        violations,
+        violations: allViolations,
         source: input.config.source,
     };
 }

@@ -16,11 +16,12 @@ export interface AiDebtMetrics {
     bloatFiles: number;
 }
 export interface AiDebtViolation {
-    code: 'added_todo_fixme' | 'added_console_logs' | 'added_any_types' | 'large_files_touched' | 'bloat_files';
-    metric: keyof AiDebtMetrics;
+    code: 'added_todo_fixme' | 'added_console_logs' | 'added_any_types' | 'large_files_touched' | 'bloat_files' | 'db_in_ui' | 'missing_validation';
+    metric: keyof AiDebtMetrics | 'architectural';
     observed: number;
     budget: number;
     message: string;
+    files?: string[];
 }
 export interface AiDebtBudgetConfig {
     mode: AiDebtMode;

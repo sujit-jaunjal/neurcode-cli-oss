@@ -4,13 +4,251 @@ exports.fixCommand = fixCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
 const cli_json_1 = require("../utils/cli-json");
-const contracts_1 = require("@neurcode-ai/contracts");
 const context_engine_1 = require("../context-engine");
 const patch_engine_1 = require("../patch-engine");
 const chalk = (0, cli_json_1.loadChalk)();
 const MAX_SUGGESTIONS = 10;
 // Minimum context-engine score for a target file to be trusted.
 const MIN_TARGET_SCORE = 3;
+// ---------------------------------------------------------------------------
+// Intent issue → FixSuggestion conversion
+// ---------------------------------------------------------------------------
+const INTENT_ISSUE_ACTIONS = {
+    'intent:missing-input-validation': 'Add input validation using zod/joi/yup at the API boundary — validate req.body before processing',
+    'intent:missing-role-checks': 'Add role-based access checks — use middleware or inline checks (req.user.role === "admin") before sensitive operations',
+    'intent:missing-token-expiry': 'Set token expiry in jwt.sign() and implement refresh-token rotation — e.g., expiresIn: "15m"',
+    'intent:missing-api-validation': 'Add a validation schema for all route handlers that read req.body — use zod.parse() or equivalent',
+    'intent:missing-error-handling': 'Wrap async handlers in try/catch and return structured error responses — use next(error) for Express',
+    'intent:missing-payment-idempotency': 'Add idempotency key handling to payment operations — store and check keys before processing charges',
+    'intent:missing-webhook-verification': 'Verify webhook signatures before processing — use stripe.webhooks.constructEvent() or equivalent',
+    'intent:db-in-ui': 'Extract the database call into a service/repository module — UI components must not import DB clients directly',
+    'intent:auth-logic-in-ui': 'Move JWT signing/verification and bcrypt calls into the API/service layer — UI components must not perform cryptographic operations',
+    'intent:partial-auth-no-token': 'Complete the auth flow by adding token issuance — call jwt.sign() with user payload after successful credential validation',
+};
+function intentIssuesToFixSuggestions(intentIssues) {
+    return intentIssues.map((issue) => {
+        const suggestedAction = INTENT_ISSUE_ACTIONS[issue.rule]
+            ?? `Resolve intent gap: ${issue.message}`;
+        const priority = issue.severity === 'high' ? 'CRITICAL' : 'WARNING';
+        const file = issue.files?.[0] ?? 'intent-analysis';
+        return {
+            file,
+            issue: issue.message,
+            policy: issue.rule,
+            suggestedAction,
+            confidence: 'medium',
+            source: 'warning',
+            priority,
+            ...(issue.files && issue.files.length > 1 ? { reason: `Also affects: ${issue.files.slice(1).join(', ')}` } : {}),
+        };
+    });
+}
+// ---------------------------------------------------------------------------
+// Flow issue → FixSuggestion conversion (V5)
+// ---------------------------------------------------------------------------
+const FLOW_ISSUE_ACTIONS = {
+    'flow:token-not-validated-in-middleware': {
+        action: 'Add jwt.verify() call in an auth middleware to validate tokens on every protected request',
+        targetHint: 'middleware/auth.ts',
+    },
+    'flow:middleware-not-applied-to-routes': {
+        action: 'Wire authMiddleware into route definitions with router.use(authMiddleware) before protected handlers',
+        targetHint: 'routes/index.ts',
+    },
+    'flow:auth-in-ui-layer': {
+        action: 'Move JWT signing/verification and bcrypt calls into the API or service layer — UI components must not perform cryptographic operations',
+        targetHint: 'services/auth.service.ts',
+    },
+    'flow:validation-before-handler': {
+        action: 'Apply a validation middleware (e.g. validateBody(schema)) as the first argument before your route handler',
+        targetHint: 'middleware/validate.ts',
+    },
+    'flow:service-not-separated': {
+        action: 'Extract DB calls from the route handler into a dedicated service or repository module and import it',
+        targetHint: 'services/',
+    },
+    'flow:webhook-handler-without-verification': {
+        action: 'Verify webhook signature before processing — call stripe.webhooks.constructEvent() or use createHmac() on the raw body',
+        targetHint: 'routes/webhook.ts',
+    },
+    'flow:payment-no-idempotency-gate': {
+        action: 'Add idempotency key handling before executing the charge — check for existing transaction with the same key before calling stripe.paymentIntents.create()',
+        targetHint: 'services/payment.service.ts',
+    },
+    'flow:file-stored-without-type-check': {
+        action: 'Validate MIME type before storing — use fileFilter in multer config or check mimetype against an allowlist before writing to disk/S3',
+        targetHint: 'middleware/upload.ts',
+    },
+};
+function flowIssuesToFixSuggestions(flowIssues, diffFilePaths) {
+    return flowIssues.map((issue) => {
+        const guidance = FLOW_ISSUE_ACTIONS[issue.rule];
+        const priority = issue.severity === 'high' ? 'CRITICAL' : 'WARNING';
+        // Target: first known file from the issue, then fallback to diff paths or hint
+        const knownFile = issue.files?.[0];
+        const hintBasename = guidance?.targetHint ?? '';
+        const targetFile = knownFile ??
+            diffFilePaths.find((p) => hintBasename && p.includes(hintBasename.replace(/\//g, ''))) ??
+            diffFilePaths[0] ??
+            hintBasename;
+        const suggestedAction = guidance
+            ? `${guidance.action}`
+            : `Resolve flow gap: ${issue.message}`;
+        return {
+            file: targetFile,
+            issue: issue.message,
+            policy: issue.rule,
+            suggestedAction,
+            confidence: 'medium',
+            source: 'warning',
+            priority,
+            ...(issue.files && issue.files.length > 1
+                ? { reason: `Also affects: ${issue.files.slice(1, 4).join(', ')}${issue.files.length > 4 ? ' ...' : ''}` }
+                : {}),
+        };
+    });
+}
+// ---------------------------------------------------------------------------
+// Regression → FixSuggestion conversion (V6)
+// ---------------------------------------------------------------------------
+function regressionToFixSuggestions(regressions, diffFilePaths) {
+    return regressions.map((reg) => {
+        // Extract the component name from the rule, if present
+        // e.g. "regression:component:token-expiry" → "token-expiry"
+        const ruleSegments = reg.rule.split(':');
+        const componentKey = ruleSegments.length >= 3 ? ruleSegments.slice(2).join(':') : '';
+        const label = componentKey
+            ? componentKey.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+            : '';
+        // Best-effort file target: prefer a file in the diff that matches the component
+        const targetFile = (componentKey && diffFilePaths.find((p) => p.includes(componentKey.replace(/-/g, '')))) ??
+            (componentKey && diffFilePaths.find((p) => new RegExp(componentKey.split('-')[0], 'i').test(p))) ??
+            diffFilePaths[0] ??
+            'regression-analysis';
+        const suggestedAction = reg.type === 'component-regression'
+            ? `Restore ${label || componentKey} implementation — check recent commits for accidental removal`
+            : reg.type === 'critical-regression'
+                ? `Immediately restore ${label || componentKey} — this is a security-critical component that must not be absent`
+                : reg.type === 'flow-regression'
+                    ? `Fix the newly introduced flow gap: ${reg.message.replace('New flow issue introduced: ', '')}`
+                    : `Restore system coverage — identify and re-implement the components removed in recent changes`;
+        return {
+            file: targetFile,
+            issue: reg.message,
+            policy: reg.rule,
+            suggestedAction,
+            confidence: 'medium',
+            source: 'violation',
+            priority: 'CRITICAL',
+        };
+    });
+}
+// ---------------------------------------------------------------------------
+// Coverage gap → FixSuggestion conversion
+// ---------------------------------------------------------------------------
+// Per-component guidance for missing components discovered via coverage analysis.
+const COMPONENT_ACTIONS = {
+    'input-validation': {
+        action: 'Add input validation at the API boundary',
+        hint: 'Use zod.parse(), joi.validate(), or express-validator on req.body before processing',
+    },
+    'token-generation': {
+        action: 'Implement token generation',
+        hint: 'Call jwt.sign(payload, secret, { expiresIn: "15m" }) after successful authentication',
+    },
+    'token-expiry': {
+        action: 'Add token expiry and refresh-token logic',
+        hint: 'Set expiresIn in jwt.sign() and implement a /refresh endpoint that issues new access tokens',
+    },
+    'role-check': {
+        action: 'Implement role-based access checks',
+        hint: 'Add a checkRole() middleware or inline req.user.role guard before sensitive endpoints',
+    },
+    'middleware-protection': {
+        action: 'Add auth middleware to protected routes',
+        hint: 'Apply verifyToken middleware to all routes that require authentication',
+    },
+    'password-hashing': {
+        action: 'Hash passwords before storage',
+        hint: 'Use bcrypt.hash(password, 12) on registration and bcrypt.compare() on login',
+    },
+    'error-handling': {
+        action: 'Add consistent error handling to API handlers',
+        hint: 'Wrap async handlers in try/catch and call next(error) or return structured error responses',
+    },
+    'service-layer-separation': {
+        action: 'Extract business logic into a service layer',
+        hint: 'Create a *Service class or module and import it in route handlers — do not put DB queries in controllers',
+    },
+    'auth-middleware': {
+        action: 'Wire auth middleware to the router',
+        hint: 'Use router.use(authMiddleware) or pass the middleware as a route-level guard',
+    },
+    'response-schema': {
+        action: 'Define and enforce a response schema',
+        hint: 'Use a zod/joi schema or a response DTO class to ensure consistent API response shape',
+    },
+    'idempotency': {
+        action: 'Add idempotency key handling to payment operations',
+        hint: 'Accept an idempotency key header, store it, and reject duplicate requests',
+    },
+    'webhook-verification': {
+        action: 'Verify webhook signatures before processing',
+        hint: 'Use stripe.webhooks.constructEvent() or an HMAC check on the raw request body',
+    },
+    'secure-data-handling': {
+        action: 'Ensure sensitive payment data is not logged or stored in plain text',
+        hint: 'Mask PAN digits, never log card numbers, and use tokenisation where possible',
+    },
+    'transaction-handling': {
+        action: 'Wrap multi-step DB operations in transactions',
+        hint: 'Use prisma.$transaction() or BEGIN/COMMIT to keep multi-step writes atomic',
+    },
+    'migration-safety': {
+        action: 'Add migration rollback support',
+        hint: 'Ensure every migration has a corresponding down() function',
+    },
+    'connection-pooling': {
+        action: 'Configure a connection pool',
+        hint: 'Set pool.min / pool.max in your DB client config to avoid connection exhaustion',
+    },
+    'input-sanitization': {
+        action: 'Sanitize user input before processing',
+        hint: 'Use DOMPurify, sanitize-html, or a validation library to strip unsafe content',
+    },
+};
+function coverageGapsToFixSuggestions(summary, diffFilePaths) {
+    if (summary.missing.length === 0)
+        return [];
+    // Find the most relevant file for the domain (e.g. src/api/auth.ts for auth)
+    const domainRe = new RegExp(`\\b${summary.domain}\\b`, 'i');
+    const bestFile = diffFilePaths.find((p) => domainRe.test(p)) ??
+        diffFilePaths.find((p) => /\/(api|routes?|handler|controller)/i.test(p)) ??
+        diffFilePaths[0] ??
+        `src/${summary.domain}/index.ts`;
+    // V4: critical missing components come first, marked CRITICAL priority
+    const criticalMissingSet = new Set(summary.criticalMissing ?? []);
+    const criticalKeys = summary.missing.filter((k) => criticalMissingSet.has(k));
+    const otherKeys = summary.missing.filter((k) => !criticalMissingSet.has(k));
+    const orderedKeys = [...criticalKeys, ...otherKeys];
+    return orderedKeys.map((key) => {
+        const isCriticalKey = criticalMissingSet.has(key);
+        const guidance = COMPONENT_ACTIONS[key];
+        const label = key.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        const suggestedAction = guidance
+            ? `${guidance.action} — ${guidance.hint}`
+            : `Implement ${label} for the ${summary.domain} domain`;
+        return {
+            file: bestFile,
+            issue: `${isCriticalKey ? '[CRITICAL] ' : ''}${label} not detected in ${summary.domain} implementation (coverage: ${summary.coveragePct}%)`,
+            policy: `intent:coverage:${key}`,
+            suggestedAction,
+            confidence: 'medium',
+            source: 'warning',
+            priority: (isCriticalKey ? 'CRITICAL' : 'WARNING'),
+        };
+    });
+}
 // ---------------------------------------------------------------------------
 // Reason templates (req 4) — policy-keyed, no runtime string assembly
 // ---------------------------------------------------------------------------
@@ -567,11 +805,11 @@ async function runAutoFix(suggestions, verifyArgs, json) {
         const reRun = await (0, cli_json_1.runCliJson)(verifyArgs, { cwd: process.cwd() });
         if (reRun.payload) {
             try {
-                const reOutput = (0, contracts_1.parseVerifyOutput)(reRun.payload, 'neurcode-auto-fix-verify');
+                const reOutput = reRun.payload;
                 verifyAfter = {
                     exitCode: reRun.exitCode,
                     verdict: reOutput.verdict,
-                    violations: reOutput.violations.length,
+                    violations: Array.isArray(reOutput.violations) ? reOutput.violations.length : 0,
                 };
             }
             catch {
@@ -662,32 +900,7 @@ async function fixCommand(options) {
             }
             process.exit(1);
         }
-        let verifyOutput;
-        try {
-            verifyOutput = (0, contracts_1.parseVerifyOutput)(payload, 'neurcode-fix-verify-output');
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : 'Invalid verify payload';
-            if (options.json) {
-                emitFixJson({
-                    success: false,
-                    message: `Verify output does not match contract: ${message}`,
-                    timestamp: new Date().toISOString(),
-                    verifyExitCode: verifyRun.exitCode,
-                    verdict: null,
-                    violations: 0,
-                    scopeIssues: 0,
-                    suggestions: [],
-                });
-            }
-            else {
-                console.log(chalk.bold('\nNeurcode Fix Plan (Prioritized)'));
-                console.log(chalk.dim('Based on latest Neurcode verify results\n'));
-                console.log(chalk.red(`Verify output does not match contract: ${message}\n`));
-            }
-            process.exit(1);
-            return;
-        }
+        const verifyOutput = payload;
         // Scan project once; scoring and patch generation reuse this data.
         let graph = null;
         let fileContents = {};
@@ -704,6 +917,64 @@ async function fixCommand(options) {
         let suggestions = buildSuggestions(verifyOutput, graph);
         suggestions = appendExpediteSuggestions(suggestions, expediteItems);
         enrichSuggestionsWithPatches(suggestions, fileContents);
+        // ── Intent-aware suggestions ──────────────────────────────────────────
+        // 1. Convert intent issues (missing/misplaced/partial) to fix suggestions.
+        const rawIntentIssues = Array.isArray(payload.intentIssues)
+            ? payload.intentIssues
+            : [];
+        if (rawIntentIssues.length > 0) {
+            const intentSuggestions = intentIssuesToFixSuggestions(rawIntentIssues);
+            suggestions = [...suggestions, ...intentSuggestions];
+        }
+        // 2. Coverage-gap suggestions — one suggestion per missing component.
+        // These are distinct from issue-based suggestions: they tell the developer
+        // exactly which implementation components are still absent.
+        const rawIntentSummary = payload.intentSummary;
+        if (rawIntentSummary && rawIntentSummary.missing.length > 0) {
+            const diffPaths = [
+                ...(Array.isArray(verifyOutput.violations) ? verifyOutput.violations.map((v) => v.file).filter(Boolean) : []),
+                ...(Array.isArray(verifyOutput.warnings) ? verifyOutput.warnings.map((w) => w.file).filter(Boolean) : []),
+                ...(Array.isArray(verifyOutput.scopeIssues) ? verifyOutput.scopeIssues.map((s) => s.file).filter(Boolean) : []),
+            ].filter((f) => f && f !== 'unknown' && !f.startsWith('.neurcode'));
+            const uniquePaths = [...new Set(diffPaths)];
+            const coverageSuggestions = coverageGapsToFixSuggestions(rawIntentSummary, uniquePaths);
+            // Only add coverage suggestions that aren't already covered by intent issue suggestions
+            const existingPolicies = new Set(suggestions.map((s) => s.policy));
+            const newCoverageSuggestions = coverageSuggestions.filter((s) => !existingPolicies.has(s.policy));
+            suggestions = [...suggestions, ...newCoverageSuggestions];
+        }
+        // 3. V6: Regression suggestions — always top-priority (structural degradation).
+        const rawRegressions = Array.isArray(payload.regressions)
+            ? payload.regressions
+            : [];
+        if (rawRegressions.length > 0) {
+            const regressionDiffPaths = [
+                ...(Array.isArray(verifyOutput.violations) ? verifyOutput.violations.map((v) => v.file).filter(Boolean) : []),
+            ].filter((f) => f && f !== 'unknown' && !f.startsWith('.neurcode'));
+            const uniqueRegressionPaths = [...new Set(regressionDiffPaths)];
+            const regressionSuggestions = regressionToFixSuggestions(rawRegressions, uniqueRegressionPaths);
+            // Regressions are prepended before everything else
+            const existingRegressionPolicies = new Set(suggestions.map((s) => s.policy));
+            const newRegressionSuggestions = regressionSuggestions.filter((s) => !existingRegressionPolicies.has(s.policy));
+            suggestions = [...newRegressionSuggestions, ...suggestions];
+        }
+        // 4. V5: Flow issue suggestions — wiring and connectivity gaps.
+        const rawFlowIssues = Array.isArray(payload.flowIssues)
+            ? payload.flowIssues
+            : [];
+        if (rawFlowIssues.length > 0) {
+            const flowDiffPaths = [
+                ...(Array.isArray(verifyOutput.violations) ? verifyOutput.violations.map((v) => v.file).filter(Boolean) : []),
+                ...(Array.isArray(verifyOutput.scopeIssues) ? verifyOutput.scopeIssues.map((s) => s.file).filter(Boolean) : []),
+            ].filter((f) => f && f !== 'unknown' && !f.startsWith('.neurcode'));
+            const uniqueFlowPaths = [...new Set(flowDiffPaths)];
+            const flowSuggestions = flowIssuesToFixSuggestions(rawFlowIssues, uniqueFlowPaths);
+            // Deduplicate: don't re-add if a coverage/intent suggestion already covers the same rule
+            const existingFlowPolicies = new Set(suggestions.map((s) => s.policy));
+            const newFlowSuggestions = flowSuggestions.filter((s) => !existingFlowPolicies.has(s.policy));
+            // Flow suggestions go first (they are structural) before coverage gaps
+            suggestions = [...newFlowSuggestions, ...suggestions];
+        }
         if (verifyRun.exitCode !== 0 && suggestions.length === 0) {
             suggestions = [
                 {
@@ -725,13 +996,18 @@ async function fixCommand(options) {
             return;
         }
         if (!options.json) {
+            const intentNote = rawIntentIssues.length > 0 ? `, ${rawIntentIssues.length} intent issues` : '';
+            const flowNote = rawFlowIssues.length > 0 ? `, ${rawFlowIssues.length} flow issues` : '';
+            const regressionNote = rawRegressions.length > 0 ? `, ${rawRegressions.length} regressions` : '';
             console.log(`Fix using verify payload: ${verifyOutput.violations.length} violations, ` +
-                `${verifyOutput.warnings.length} warnings, ${verifyOutput.scopeIssues.length} scope issues`);
+                `${verifyOutput.warnings.length} warnings, ${verifyOutput.scopeIssues.length} scope issues${intentNote}${flowNote}${regressionNote}`);
         }
         const verifyFailed = verifyRun.exitCode !== 0;
+        const flowSuffix = rawFlowIssues.length > 0 ? `, ${rawFlowIssues.length} flow issues` : '';
+        const intentSuffix = rawIntentIssues.length > 0 ? `, ${rawIntentIssues.length} intent issues` : '';
         const verifyMessage = verifyFailed
             ? `${verifyOutput.summary.totalViolations} violations, ${verifyOutput.summary.totalWarnings} warnings, ` +
-                `${verifyOutput.summary.totalScopeIssues} scope issues`
+                `${verifyOutput.summary.totalScopeIssues} scope issues${intentSuffix}${flowSuffix}`
             : '';
         const verifyMessageWithMode = expediteModeUsed
             ? `${verifyMessage}${verifyMessage ? ' | ' : ''}Expedite Mode used`
