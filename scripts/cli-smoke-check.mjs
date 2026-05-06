@@ -39,13 +39,13 @@ function assert(condition, message) {
 function run() {
   const rootHelp = runCli(['--help']);
   const requiredCommands = [
-    'check [options]',
-    'plan [options] <intent...>',
-    'prompt [options] [plan-id]',
+    'start [options] [intent...]',
+    'generate [options] [prompt...]',
     'verify [options]',
-    'policy',
-    'contract',
-    'ship [options] <goal...>',
+    'fix [options]',
+    'patch [options]',
+    'export [options]',
+    'daemon',
   ];
   for (const command of requiredCommands) {
     assertContains(rootHelp, command, 'root help output');
