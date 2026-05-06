@@ -6,6 +6,8 @@
 interface VerifyOptions {
     planId?: string;
     projectId?: string;
+    /** CI-safe deterministic mode: policy-only + non-interactive + no cloud/runtime-state assumptions. */
+    ci?: boolean;
     staged?: boolean;
     head?: boolean;
     base?: string;
@@ -39,6 +41,10 @@ interface VerifyOptions {
     explain?: boolean;
     /** Print extra explanatory output for demos/onboarding. */
     demo?: boolean;
+    /** Generate deterministic verification evidence artifact. */
+    evidence?: boolean;
+    /** Optional evidence artifact directory (default: .neurcode/evidence). */
+    evidenceDir?: string;
     /** Use queue-backed async verification mode on the API. */
     asyncMode?: boolean;
     /** Poll interval for async verification job status. */
@@ -50,6 +56,6 @@ interface VerifyOptions {
     /** Max backend retry attempts for queue-backed verify jobs. */
     verifyJobMaxAttempts?: number;
 }
-export declare function verifyCommand(options: VerifyOptions): Promise<void>;
+export declare function verifyCommand(options: VerifyOptions): Promise<undefined>;
 export {};
 //# sourceMappingURL=verify.d.ts.map

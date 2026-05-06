@@ -71,6 +71,7 @@ const runtime_guard_1 = require("../utils/runtime-guard");
 const artifact_signature_1 = require("../utils/artifact-signature");
 const policy_1 = require("@neurcode-ai/policy");
 const ai_debt_budget_1 = require("../utils/ai-debt-budget");
+const verification_evidence_1 = require("../utils/verification-evidence");
 // Import chalk with fallback
 let chalk;
 try {
@@ -1023,7 +1024,7 @@ function toCanonicalVerifyOutput(payload) {
         blockingItems = dedupeTriageItems([...regressionBlockingTriageItems, ...blockingItems]);
     }
     const grade = verdict === 'PASS' ? 'A' : verdict === 'WARN' ? 'C' : 'F';
-    return {
+    const canonical = {
         grade,
         score: violations.length === 0 && warnings.length === 0 && scopeIssues.length === 0 ? 100 : 0,
         verdict,
@@ -1052,9 +1053,55 @@ function toCanonicalVerifyOutput(payload) {
         ...(expediteModeUsed ? { expediteNote: 'Expedite Mode used' } : {}),
         ...(typeof driftScore === 'number' ? { driftScore } : {}),
     };
+    // Preserve actionable metadata from rich verify payloads so downstream
+    // consumers (Action, CI contracts, dashboards) keep structured context.
+    const passthroughKeys = [
+        'message',
+        'mode',
+        'ciMode',
+        'policyOnly',
+        'policyOnlySource',
+        'policySources',
+        'scopeGuardPassed',
+        'policyLock',
+        'policyCompilation',
+        'policyExceptions',
+        'policyGovernance',
+        'changeContract',
+        'runtimeGuard',
+        'governanceDecision',
+        'orgGovernance',
+        'aiChangeLog',
+        'verificationSource',
+        'tier',
+        'aiDebt',
+        'blastRadius',
+        'suspiciousChange',
+        'policyDecision',
+        'policyPack',
+        'changeContractViolations',
+    ];
+    for (const key of passthroughKeys) {
+        if (Object.prototype.hasOwnProperty.call(payload, key) && payload[key] !== undefined) {
+            canonical[key] = payload[key];
+        }
+    }
+    // Backward-compatibility alias: older integrations and tests expect `rule`
+    // while canonical contract uses `policy`.
+    canonical.violations = canonical.violations.map((item) => ({
+        ...item,
+        rule: item.policy,
+    }));
+    canonical.warnings = canonical.warnings.map((item) => ({
+        ...item,
+        rule: item.policy,
+    }));
+    return canonical;
 }
-function emitCanonicalVerifyJson(payload) {
-    console.log(JSON.stringify(toCanonicalVerifyOutput(payload), null, 2));
+function emitCanonicalVerifyJson(payload, onEmit) {
+    const canonical = toCanonicalVerifyOutput(payload);
+    onEmit?.(canonical);
+    console.log(JSON.stringify(canonical, null, 2));
 }
 function buildDeterministicLayerSummary(payload) {
     const verdict = asStringValue(payload.verdict) || 'UNKNOWN';
@@ -1415,12 +1462,13 @@ async function recordVerificationIfRequested(options, config, payload) {
  * Execute policy-only verification (General Governance mode)
  * Returns the exit code to use
  */
-async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRoot, config, client, source, scopeTelemetry, projectId, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, expediteModeEnabled, compiledPolicyArtifact, compiledPolicyMetadata, changeContractSummary) {
+async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRoot, config, client, source, ciModeEnabled, scopeTelemetry, projectId, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, expediteModeEnabled, compiledPolicyArtifact, compiledPolicyMetadata, changeContractSummary, onCanonicalEmit) {
     const emitPolicyOnlyJson = (payload) => {
         emitCanonicalVerifyJson({
             ...payload,
+            ciMode: payload.ciMode ?? ciModeEnabled,
             expediteMode: expediteModeEnabled,
-        });
+        }, onCanonicalEmit);
     };
     const policyOnlyVerificationSource = 'policy_only';
     const recordPolicyOnlyVerification = async (payload) => recordVerificationIfRequested(options, config, {
@@ -1902,44 +1950,50 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
             eventCount: auditIntegrity.count,
         },
     };
+    const policyOnlyPayload = {
+        grade,
+        score,
+        verdict: effectiveVerdict,
+        violations: violationsOutput,
+        message,
+        scopeGuardPassed: true, // N/A in policy-only mode
+        bloatCount: 0,
+        bloatFiles: [],
+        plannedFilesModified: 0,
+        totalPlannedFiles: 0,
+        adherenceScore: score,
+        mode: 'policy_only',
+        policyOnly: true,
+        policyOnlySource: source,
+        ...governancePayload,
+        policyLock: {
+            enforced: policyLockEvaluation.enforced,
+            matched: policyLockEvaluation.matched,
+            path: policyLockEvaluation.lockPath,
+            mismatches: policyLockEvaluation.mismatches,
+        },
+        policyExceptions: policyExceptionsSummary,
+        policyGovernance: policyGovernanceSummary,
+        ...(effectiveRules.policyPack
+            ? {
+                policyPack: {
+                    id: effectiveRules.policyPack.packId,
+                    name: effectiveRules.policyPack.packName,
+                    version: effectiveRules.policyPack.version,
+                    ruleCount: effectiveRules.policyPackRules.length,
+                },
+            }
+            : {}),
+    };
     if (options.json) {
-        emitPolicyOnlyJson({
-            grade,
-            score,
-            verdict: effectiveVerdict,
-            violations: violationsOutput,
-            message,
-            scopeGuardPassed: true, // N/A in policy-only mode
-            bloatCount: 0,
-            bloatFiles: [],
-            plannedFilesModified: 0,
-            totalPlannedFiles: 0,
-            adherenceScore: score,
-            mode: 'policy_only',
-            policyOnly: true,
-            policyOnlySource: source,
-            ...governancePayload,
-            policyLock: {
-                enforced: policyLockEvaluation.enforced,
-                matched: policyLockEvaluation.matched,
-                path: policyLockEvaluation.lockPath,
-                mismatches: policyLockEvaluation.mismatches,
-            },
-            policyExceptions: policyExceptionsSummary,
-            policyGovernance: policyGovernanceSummary,
-            ...(effectiveRules.policyPack
-                ? {
-                    policyPack: {
-                        id: effectiveRules.policyPack.packId,
-                        name: effectiveRules.policyPack.packName,
-                        version: effectiveRules.policyPack.version,
-                        ruleCount: effectiveRules.policyPackRules.length,
-                    },
-                }
-                : {}),
-        });
+        emitPolicyOnlyJson(policyOnlyPayload);
     }
     else {
+        onCanonicalEmit?.(toCanonicalVerifyOutput({
+            ...policyOnlyPayload,
+            ciMode: ciModeEnabled,
+            expediteMode: expediteModeEnabled,
+        }));
         if (effectiveVerdict === 'PASS') {
             console.log(chalk.green('✅ Policy check passed'));
         }
@@ -1979,6 +2033,7 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     return effectiveVerdict === 'FAIL' ? 2 : effectiveVerdict === 'WARN' ? 1 : 0;
 }
 async function verifyCommand(options) {
+    let exitWithEvidenceFromTry = null;
     try {
         const rootResolution = (0, project_root_1.resolveNeurcodeProjectRootWithTrace)(process.cwd());
         const projectRoot = rootResolution.projectRoot;
@@ -1986,9 +2041,77 @@ async function verifyCommand(options) {
         const localPlanExpectedFiles = [...localPlanSync.expectedFiles];
         const expediteModeEnabled = resolveVerifyExpediteMode(projectRoot);
         const scopeTelemetry = (0, scope_telemetry_1.buildScopeTelemetryPayload)(rootResolution);
+        const ciModeEnabled = options.ci === true || isEnabledFlag(process.env.NEURCODE_VERIFY_CI);
+        const evidenceEnabled = options.evidence === true || isEnabledFlag(process.env.NEURCODE_VERIFY_EVIDENCE);
+        const verifyStartedAtMs = Date.now();
+        const evidenceCiContext = collectCIContext();
+        let lastCanonicalOutput = null;
+        let lastEvidenceFallbackOutput = null;
+        let evidenceFinalizeAttempted = false;
+        if (ciModeEnabled) {
+            options.policyOnly = true;
+            options.requirePlan = false;
+            options.record = false;
+            options.asyncMode = false;
+        }
+        const captureEvidencePayload = (payload) => {
+            lastEvidenceFallbackOutput = payload;
+            lastCanonicalOutput = toCanonicalVerifyOutput(payload);
+        };
+        const finalizeEvidence = (exitCode) => {
+            if (!evidenceEnabled || evidenceFinalizeAttempted) {
+                return;
+            }
+            evidenceFinalizeAttempted = true;
+            try {
+                const artifactPath = (0, verification_evidence_1.writeVerificationEvidence)({
+                    enabled: evidenceEnabled,
+                    projectRoot,
+                    startedAtMs: verifyStartedAtMs,
+                    exitCode,
+                    ciMode: ciModeEnabled,
+                    deterministicMode: ciModeEnabled || options.policyOnly === true,
+                    evidenceDir: options.evidenceDir,
+                    canonicalOutput: lastCanonicalOutput,
+                    fallbackOutput: lastEvidenceFallbackOutput,
+                    ciContext: evidenceCiContext,
+                    runtimeMetadata: {
+                        cliJsonContractVersion: contracts_1.CLI_JSON_CONTRACT_VERSION,
+                        runtimeCompatibilityContractVersion: contracts_1.RUNTIME_COMPATIBILITY_CONTRACT_VERSION,
+                        componentVersion: CLI_COMPONENT_VERSION,
+                        nodeVersion: process.version,
+                        platform: process.platform,
+                        arch: process.arch,
+                        command: 'verify',
+                    },
+                });
+                if (artifactPath && !options.json) {
+                    console.log(chalk.dim(`\n   Verification evidence: ${artifactPath}`));
+                }
+            }
+            catch (error) {
+                if (!options.json) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    console.log(chalk.yellow(`\n⚠️  Failed to write verification evidence artifact: ${message}`));
+                }
+            }
+        };
+        const exitWithEvidence = (exitCode) => {
+            finalizeEvidence(exitCode);
+            process.exit(exitCode);
+        };
+        exitWithEvidenceFromTry = exitWithEvidence;
+        // Hoisted so emitVerifyJson (called on every early-exit path) can reference
+        // these via closure without hitting the temporal dead zone.
+        let intentEngineIssues = [];
+        let intentEngineDomains = [];
+        let intentEngineSummary = null;
+        let intentEngineFlowIssues = [];
+        let intentEngineRegressions = [];
         const emitVerifyJson = (payload) => {
-            emitCanonicalVerifyJson({
+            const enrichedPayload = {
                 ...payload,
+                ciMode: payload.ciMode ?? ciModeEnabled,
                 expediteMode: expediteModeEnabled,
                 // Intent engine results injected so every code-path gets them.
                 intentIssues: payload.intentIssues ?? intentEngineIssues,
@@ -1998,6 +2121,10 @@ async function verifyCommand(options) {
                 flowIssues: payload.flowIssues ?? intentEngineFlowIssues,
                 // V6: regressions always injected
                 regressions: payload.regressions ?? intentEngineRegressions,
+            };
+            lastEvidenceFallbackOutput = enrichedPayload;
+            emitCanonicalVerifyJson(enrichedPayload, (canonical) => {
+                lastCanonicalOutput = canonical;
             });
         };
         if (!isGitRepository(projectRoot)) {
@@ -2032,7 +2159,7 @@ async function verifyCommand(options) {
                 console.log(chalk.dim(`   Current path: ${projectRoot}`));
                 console.log(chalk.dim('   Next step: git init && git add . && git commit -m "chore: baseline"\n'));
             }
-            process.exit(1);
+            exitWithEvidence(1);
         }
         const enforceChangeContract = options.enforceChangeContract === true ||
             isEnabledFlag(process.env.NEURCODE_VERIFY_ENFORCE_CHANGE_CONTRACT);
@@ -2183,7 +2310,7 @@ async function verifyCommand(options) {
                     });
                     console.log(chalk.dim('\nRegenerate artifacts with valid signing keys: NEURCODE_GOVERNANCE_SIGNING_KEY or NEURCODE_GOVERNANCE_SIGNING_KEYS.\n'));
                 }
-                process.exit(2);
+                exitWithEvidence(2);
             }
             // Advisory notice when artifact has a signature but signing is not required in this context.
             if (!options.json) {
@@ -2236,7 +2363,7 @@ async function verifyCommand(options) {
                     signatureErrors.forEach((entry) => console.log(chalk.red(`   • ${entry}`)));
                     console.log(chalk.dim('\nEnable signing keys via NEURCODE_GOVERNANCE_SIGNING_KEY or NEURCODE_GOVERNANCE_SIGNING_KEYS and regenerate artifacts.\n'));
                 }
-                process.exit(2);
+                exitWithEvidence(2);
             }
         }
         if (!options.json) {
@@ -2304,6 +2431,14 @@ async function verifyCommand(options) {
             // Ensure no trailing slash
             config.apiUrl = config.apiUrl.replace(/\/$/, '');
         }
+        if (ciModeEnabled) {
+            // CI mode enforces deterministic local verification and must not depend on
+            // runtime compatibility handshakes or org-level remote settings.
+            config.apiKey = undefined;
+            if (!options.json) {
+                console.log(chalk.dim('   CI mode: deterministic local verification enabled (policy-only, non-interactive).'));
+            }
+        }
         const enforceCompatibilityHandshake = isEnabledFlag(process.env.NEURCODE_VERIFY_ENFORCE_COMPAT_HANDSHAKE)
             || strictArtifactMode
             || (process.env.CI === 'true' && Boolean(config.apiKey));
@@ -2351,7 +2486,7 @@ async function verifyCommand(options) {
                     console.log(chalk.dim(`   CLI version: ${CLI_COMPONENT_VERSION}`));
                     console.log(chalk.dim('   Upgrade/downgrade CLI, Action, or API to satisfy the runtime compatibility contract before running verify.\n'));
                 }
-                process.exit(2);
+                exitWithEvidence(2);
             }
             if (compatibilityProbe.status === 'error' && !options.json) {
                 console.log(chalk.yellow('\n⚠️  Runtime compatibility mismatch detected (advisory mode).'));
@@ -2490,7 +2625,7 @@ async function verifyCommand(options) {
                 projectId: projectId || undefined,
                 jsonMode: Boolean(options.json),
             });
-            process.exit(2);
+            exitWithEvidence(2);
         }
         // Determine which diff to capture.
         let diffText;
@@ -2547,7 +2682,7 @@ async function verifyCommand(options) {
                 });
             }
             recordVerifyEvent('NO_CHANGES', 'diff=empty');
-            process.exit(0);
+            exitWithEvidence(0);
         }
         // Parse tracked/staged diff and merge untracked files so plan adherence
         // correctly counts newly created files before they are git-added.
@@ -2591,7 +2726,7 @@ async function verifyCommand(options) {
                 });
             }
             recordVerifyEvent('NO_CHANGES', 'diff_files=0');
-            process.exit(0);
+            exitWithEvidence(0);
         }
         const ignoreFilter = (0, ignore_1.loadIgnore)(projectRoot);
         const runtimeIgnoreSet = getRuntimeIgnoreSetFromEnv();
@@ -2661,12 +2796,13 @@ async function verifyCommand(options) {
                     projectId: projectId || undefined,
                     jsonMode: Boolean(options.json),
                 });
-                process.exit(2);
+                return exitWithEvidence(2);
             }
-            const runtimeGuardEvaluation = (0, runtime_guard_1.evaluateRuntimeGuardArtifact)(guardRead.artifact, diffFiles.filter((file) => !shouldIgnore(file.path)));
+            const runtimeGuardArtifact = guardRead.artifact;
+            const runtimeGuardEvaluation = (0, runtime_guard_1.evaluateRuntimeGuardArtifact)(runtimeGuardArtifact, diffFiles.filter((file) => !shouldIgnore(file.path)));
             runtimeGuardSummary = {
                 ...runtimeGuardSummary,
-                active: guardRead.artifact.active,
+                active: runtimeGuardArtifact.active,
                 pass: runtimeGuardEvaluation.pass,
                 changedFiles: runtimeGuardEvaluation.changedFiles.length,
                 outOfScopeFiles: runtimeGuardEvaluation.outOfScopeFiles,
@@ -2677,7 +2813,7 @@ async function verifyCommand(options) {
                     ...(item.file ? { file: item.file } : {}),
                 })),
             };
-            const runtimeGuardUpdated = (0, runtime_guard_1.withRuntimeGuardCheckStats)(guardRead.artifact, {
+            const runtimeGuardUpdated = (0, runtime_guard_1.withRuntimeGuardCheckStats)(runtimeGuardArtifact, {
                 blocked: !runtimeGuardEvaluation.pass,
             });
             (0, runtime_guard_1.writeRuntimeGuardArtifact)(projectRoot, runtimeGuardUpdated, options.runtimeGuard);
@@ -2726,7 +2862,7 @@ async function verifyCommand(options) {
                     projectId: projectId || undefined,
                     jsonMode: Boolean(options.json),
                 });
-                process.exit(2);
+                exitWithEvidence(2);
             }
             if (!options.json) {
                 console.log(chalk.dim(`   Runtime guard passed (${runtimeGuardSummary.changedFiles} changed file(s), ` +
@@ -2805,7 +2941,7 @@ async function verifyCommand(options) {
                 jsonMode: Boolean(options.json),
                 governance: baselineGovernancePayload,
             });
-            process.exit(2);
+            exitWithEvidence(2);
         }
         if (!options.json) {
             console.log(chalk.cyan('\n📊 Analyzing change set...'));
@@ -2816,17 +2952,19 @@ async function verifyCommand(options) {
             }
         }
         const runPolicyOnlyModeAndExit = async (source) => {
-            const exitCode = await executePolicyOnlyMode(options, diffFiles, shouldIgnore, projectRoot, config, client, source, scopeTelemetry, projectId || undefined, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, expediteModeEnabled, compiledPolicyRead.artifact, compiledPolicyMetadata, changeContractSummary);
+            const exitCode = await executePolicyOnlyMode(options, diffFiles, shouldIgnore, projectRoot, config, client, source, ciModeEnabled, scopeTelemetry, projectId || undefined, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, expediteModeEnabled, compiledPolicyRead.artifact, compiledPolicyMetadata, changeContractSummary, (canonical) => {
+                lastCanonicalOutput = canonical;
+            });
             const changedFiles = diffFiles.map((f) => f.path);
             const verdict = exitCode === 2 ? 'FAIL' : exitCode === 1 ? 'WARN' : 'PASS';
             recordVerifyEvent(verdict, `policy_only_source=${source};exit=${exitCode}`, changedFiles);
-            process.exit(exitCode);
+            exitWithEvidence(exitCode);
         };
         // ============================================
         // --policy-only: General Governance (policy only, no plan enforcement)
         // ============================================
         if (options.policyOnly) {
-            await runPolicyOnlyModeAndExit('explicit');
+            await runPolicyOnlyModeAndExit(ciModeEnabled ? 'ci' : 'explicit');
         }
         const requirePlan = options.requirePlan === true
             || process.env.NEURCODE_VERIFY_REQUIRE_PLAN === '1'
@@ -2918,7 +3056,7 @@ async function verifyCommand(options) {
                     projectId: projectId || undefined,
                     jsonMode: Boolean(options.json),
                 });
-                process.exit(1);
+                exitWithEvidence(1);
             }
             let autoContractPath = null;
             if (!changeContractRead.contract && !strictArtifactMode) {
@@ -3017,7 +3155,7 @@ async function verifyCommand(options) {
                 console.log(chalk.dim('            neurcode contract import --auto-detect --write-change-contract'));
                 console.log(chalk.dim(`\nSummary: ${message}\n`));
             }
-            process.exit(0);
+            exitWithEvidence(0);
         }
         if (!planId) {
             throw new Error('Plan ID resolution failed unexpectedly');
@@ -3035,11 +3173,6 @@ async function verifyCommand(options) {
         let governanceResult = null;
         let planFilesForVerification = [];
         let intentConstraintsForVerification;
-        let intentEngineIssues = [];
-        let intentEngineDomains = [];
-        let intentEngineSummary = null;
-        let intentEngineFlowIssues = [];
-        let intentEngineRegressions = [];
         try {
             // Step A: Get Modified Files (already have from diffFiles)
             const modifiedFiles = diffFiles.map(f => f.path);
@@ -3237,7 +3370,7 @@ async function verifyCommand(options) {
                             })
                             : undefined,
                     });
-                    process.exit(1);
+                    exitWithEvidence(1);
                 }
                 else if (shouldBlockForScope) {
                     // Human-readable output only when NOT in json mode
@@ -3338,7 +3471,7 @@ async function verifyCommand(options) {
                             })
                             : undefined,
                     });
-                    process.exit(1);
+                    exitWithEvidence(1);
                 }
                 else {
                     scopeGuardExpediteBypass = true;
@@ -3504,7 +3637,7 @@ async function verifyCommand(options) {
                         })
                         : undefined,
                 });
-                process.exit(2);
+                exitWithEvidence(2);
             }
         }
         let effectiveCompiledPolicy = compiledPolicyRead.artifact;
@@ -3596,7 +3729,7 @@ async function verifyCommand(options) {
                     },
                 });
             }
-            process.exit(0);
+            exitWithEvidence(0);
         }
         let policyViolations = [];
         let policyDecision = 'allow';
@@ -3891,7 +4024,7 @@ async function verifyCommand(options) {
                         })
                         : undefined,
                 });
-                process.exit(2);
+                exitWithEvidence(2);
             }
             else if (!changeContractEvaluation.valid && !options.json) {
                 displayChangeContractDrift(changeContractSummary, { advisory: true });
@@ -4060,72 +4193,74 @@ async function verifyCommand(options) {
                     ((verifyResult.verdict === 'FAIL' || verifyResult.verdict === 'WARN') &&
                         policyViolations.length === 0 &&
                         verifyResult.bloatCount > 0));
+            const filteredBloatFiles = (verifyResult.bloatFiles || []).filter((f) => !shouldIgnore(f));
+            const scopeViolations = filteredBloatFiles.map((file) => ({
+                file,
+                rule: 'scope_guard',
+                severity: 'block',
+                message: 'File modified outside the plan',
+            }));
+            const policyViolationItems = policyViolations.map((v) => ({
+                file: v.file,
+                rule: v.rule,
+                severity: v.severity,
+                message: v.message,
+                ...(v.line != null ? { startLine: v.line } : {}),
+            }));
+            const aiDebtViolationItems = toAiDebtReportViolations(aiDebtSummary);
+            const violations = [...scopeViolations, ...policyViolationItems, ...aiDebtViolationItems];
+            const governancePayload = governanceResult
+                ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
+                    changeContract: changeContractSummary,
+                    compiledPolicy: compiledPolicyMetadata,
+                    aiDebt: aiDebtSummary,
+                })
+                : undefined;
+            const verifyEvidencePayload = {
+                grade,
+                score: verifyResult.adherenceScore,
+                verdict: effectiveVerdict,
+                violations,
+                message: effectiveMessage,
+                adherenceScore: verifyResult.adherenceScore,
+                scopeGuardPassed,
+                bloatCount: filteredBloatFiles.length,
+                bloatFiles: filteredBloatFiles,
+                plannedFilesModified: verifyResult.plannedFilesModified,
+                totalPlannedFiles: verifyResult.totalPlannedFiles,
+                verificationSource: verifySource,
+                mode: 'plan_enforced',
+                policyOnly: false,
+                aiDebt: aiDebtSummary,
+                changeContract: changeContractSummary,
+                ...(compiledPolicyMetadata ? { policyCompilation: compiledPolicyMetadata } : {}),
+                ...(governancePayload || {}),
+                policyLock: {
+                    enforced: policyLockEvaluation.enforced,
+                    matched: policyLockEvaluation.matched,
+                    path: policyLockEvaluation.lockPath,
+                    mismatches: policyLockEvaluation.mismatches,
+                },
+                policyExceptions: policyExceptionsSummary,
+                policyGovernance: policyGovernanceSummary,
+                intentProof: intentProofSummary,
+                ...(runtimeGuardSummary.required ? { runtimeGuard: runtimeGuardSummary } : {}),
+                ...(policyViolations.length > 0 && { policyDecision }),
+                ...(effectiveRules.policyPack
+                    ? {
+                        policyPack: {
+                            id: effectiveRules.policyPack.packId,
+                            name: effectiveRules.policyPack.packName,
+                            version: effectiveRules.policyPack.version,
+                            ruleCount: effectiveRules.policyPackRules.length,
+                        },
+                    }
+                    : {}),
+            };
+            captureEvidencePayload(verifyEvidencePayload);
             // If JSON output requested, output JSON and exit
             if (options.json) {
-                const filteredBloatFiles = (verifyResult.bloatFiles || []).filter((f) => !shouldIgnore(f));
-                const scopeViolations = filteredBloatFiles.map((file) => ({
-                    file,
-                    rule: 'scope_guard',
-                    severity: 'block',
-                    message: 'File modified outside the plan',
-                }));
-                const policyViolationItems = policyViolations.map((v) => ({
-                    file: v.file,
-                    rule: v.rule,
-                    severity: v.severity,
-                    message: v.message,
-                    ...(v.line != null ? { startLine: v.line } : {}),
-                }));
-                const aiDebtViolationItems = toAiDebtReportViolations(aiDebtSummary);
-                const violations = [...scopeViolations, ...policyViolationItems, ...aiDebtViolationItems];
-                const jsonOutput = {
-                    grade,
-                    score: verifyResult.adherenceScore,
-                    verdict: effectiveVerdict,
-                    violations,
-                    message: effectiveMessage,
-                    adherenceScore: verifyResult.adherenceScore,
-                    scopeGuardPassed,
-                    bloatCount: filteredBloatFiles.length,
-                    bloatFiles: filteredBloatFiles,
-                    plannedFilesModified: verifyResult.plannedFilesModified,
-                    totalPlannedFiles: verifyResult.totalPlannedFiles,
-                    verificationSource: verifySource,
-                    mode: 'plan_enforced',
-                    policyOnly: false,
-                    aiDebt: aiDebtSummary,
-                    changeContract: changeContractSummary,
-                    ...(compiledPolicyMetadata ? { policyCompilation: compiledPolicyMetadata } : {}),
-                    ...(governanceResult
-                        ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
-                            changeContract: changeContractSummary,
-                            compiledPolicy: compiledPolicyMetadata,
-                            aiDebt: aiDebtSummary,
-                        })
-                        : {}),
-                    policyLock: {
-                        enforced: policyLockEvaluation.enforced,
-                        matched: policyLockEvaluation.matched,
-                        path: policyLockEvaluation.lockPath,
-                        mismatches: policyLockEvaluation.mismatches,
-                    },
-                    policyExceptions: policyExceptionsSummary,
-                    policyGovernance: policyGovernanceSummary,
-                    intentProof: intentProofSummary,
-                    ...(runtimeGuardSummary.required ? { runtimeGuard: runtimeGuardSummary } : {}),
-                    ...(policyViolations.length > 0 && { policyDecision }),
-                    ...(effectiveRules.policyPack
-                        ? {
-                            policyPack: {
-                                id: effectiveRules.policyPack.packId,
-                                name: effectiveRules.policyPack.packName,
-                                version: effectiveRules.policyPack.version,
-                                ruleCount: effectiveRules.policyPackRules.length,
-                            },
-                        }
-                        : {}),
-                };
-                emitVerifyJson(jsonOutput);
+                emitVerifyJson(verifyEvidencePayload);
                 await recordVerificationIfRequested(options, config, {
                     grade,
                     violations: violations,
@@ -4140,26 +4275,20 @@ async function verifyCommand(options) {
                     projectId: projectId || undefined,
                     jsonMode: true,
                     verificationSource: verifySource,
-                    governance: governanceResult
-                        ? buildGovernancePayload(governanceResult, orgGovernanceSettings, {
-                            changeContract: changeContractSummary,
-                            compiledPolicy: compiledPolicyMetadata,
-                            aiDebt: aiDebtSummary,
-                        })
-                        : undefined,
+                    governance: governancePayload,
                 });
                 // Exit based on effective verdict (same logic as below)
                 if (shouldForceGovernancePass) {
-                    process.exit(0);
+                    exitWithEvidence(0);
                 }
                 if (effectiveVerdict === 'FAIL') {
-                    process.exit(2);
+                    exitWithEvidence(2);
                 }
                 else if (effectiveVerdict === 'WARN') {
-                    process.exit(1);
+                    exitWithEvidence(1);
                 }
                 else {
-                    process.exit(0);
+                    exitWithEvidence(0);
                 }
             }
             // Display results (only if not in json mode; exclude ignored paths from bloat)
@@ -4287,18 +4416,18 @@ async function verifyCommand(options) {
                 if (!options.json && policyExceptionsSummary.suppressed > 0) {
                     console.log(chalk.yellow(`   Policy exceptions applied: ${policyExceptionsSummary.suppressed}`));
                 }
-                process.exit(0);
+                exitWithEvidence(0);
             }
             // If scope guard didn't pass (or failed to check) or policy blocked, use effective verdict
             // Exit with appropriate code based on AI verification and custom policies
             if (effectiveVerdict === 'FAIL') {
-                process.exit(2);
+                exitWithEvidence(2);
             }
             else if (effectiveVerdict === 'WARN') {
-                process.exit(1);
+                exitWithEvidence(1);
             }
             else {
-                process.exit(0);
+                exitWithEvidence(0);
             }
         }
         catch (error) {
@@ -4341,7 +4470,7 @@ async function verifyCommand(options) {
                     console.error(chalk.red('❌ Error:', error));
                 }
             }
-            process.exit(1);
+            exitWithEvidence(1);
         }
     }
     catch (error) {
@@ -4377,6 +4506,9 @@ async function verifyCommand(options) {
             else {
                 console.error(error);
             }
+        }
+        if (exitWithEvidenceFromTry) {
+            exitWithEvidenceFromTry(1);
         }
         process.exit(1);
     }

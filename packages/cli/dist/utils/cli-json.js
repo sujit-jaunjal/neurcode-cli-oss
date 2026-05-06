@@ -91,6 +91,7 @@ async function runCliJson(commandArgs, options) {
                 ...process.env,
                 CI: process.env.CI || 'true',
                 FORCE_COLOR: '0',
+                ...(options?.env ?? {}),
             },
             stdio: ['ignore', 'pipe', 'pipe'],
         });

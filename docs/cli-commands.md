@@ -32,10 +32,13 @@ Evaluate the current git diff against policy rules and plan scope. Returns block
 
 ```bash
 neurcode verify
+neurcode verify --ci                       # deterministic CI-safe verification mode
 neurcode verify --policy-only              # policy checks only, no plan enforcement
 neurcode verify --staged                   # verify only staged changes
 neurcode verify --base main                # verify against a specific base ref
 neurcode verify --record                   # report results to Neurcode Cloud
+neurcode verify --ci --json --evidence     # emit deterministic verification evidence artifact
+neurcode verify --evidence-dir .neurcode/evidence
 neurcode verify --compiled-policy neurcode.policy.compiled.json
 ```
 
@@ -45,6 +48,7 @@ Convert verify findings into prioritized, file-level remediation guidance. Each 
 
 ```bash
 neurcode fix
+neurcode fix --ci                          # run fix against CI-safe verify mode
 neurcode fix --apply-safe                  # auto-apply high-confidence patches
 neurcode fix --json                        # machine-readable output
 ```
@@ -65,6 +69,91 @@ Start a local HTTP bridge on `http://localhost:4321` so the Neurcode dashboard c
 ```bash
 neurcode daemon
 ```
+
+### `neurcode execute <type>`
+
+Run actions through the unified deterministic execution pipeline and persist execution records.
+
+```bash
+neurcode execute verify --source cli
+neurcode execute verify --source ci --ci --dedupe-window-ms 5000
+neurcode execute apply-safe --source dashboard
+neurcode execute patch --target src/auth/middleware.ts --source ci
+neurcode execute intent-update --intent "Harden auth middleware scope"
+```
+
+Useful options:
+
+- `--ci` force CI-safe deterministic behavior (`--ci` propagation to verify/fix stages)
+- `--evidence-dir <path>` override evidence artifact output directory
+- `--dedupe-window-ms <ms>` suppress duplicate rapid-fire executions
+
+### `neurcode control-plane`
+
+Inspect and update centralized deterministic governance configuration.
+
+```bash
+neurcode control-plane show
+neurcode control-plane preview --patch '{"runtime":{"execution":{"duplicateSuppression":true}}}'
+neurcode control-plane apply --patch-file ./control-plane.patch.json --reason "Enable CI hardening defaults"
+```
+
+Subcommands:
+
+- `show` — current state + snapshot metadata
+- `preview` — deterministic impact preview (no write)
+- `apply` — apply patch, persist snapshot, emit runtime governance update event
+
+### `neurcode workspace`
+
+Operate deterministic multi-repository workspace governance orchestration.
+
+```bash
+neurcode workspace list
+neurcode workspace create --name "Platform Governance"
+neurcode workspace activate <workspace-id>
+neurcode workspace show --json
+neurcode workspace add-repo <workspace-id> --name api --path services/api --service api
+neurcode workspace execute verify --workspace <workspace-id> --ci
+```
+
+Subcommands:
+
+- `list` — list workspace catalog and posture targets
+- `show` — runtime posture snapshot with matrix/hotspots/activity
+- `create` — create workspace definition
+- `activate` — set active workspace pointer
+- `add-repo` — add repository/service node into workspace topology
+- `update` — deterministic definition patch update
+- `execute` — workspace-scoped execution bus orchestration across repositories
+
+### `neurcode executions`
+
+Inspect execution history from `.neurcode/executions/`.
+
+```bash
+neurcode executions --limit 20
+neurcode executions --id <execution-id> --json
+```
+
+### `neurcode replay`
+
+Deterministically reconstruct governance state from immutable artifacts.
+
+```bash
+neurcode replay --at "2026-05-01T10:00:00Z"
+neurcode replay --at "2026-05-01T10:00:00Z" --workspace platform --events --json
+neurcode replay execution <execution-id>
+neurcode replay workspace <workspace-id> --at "2026-05-01T10:00:00Z"
+neurcode replay timeline --from "2026-05-01T00:00:00Z" --to "2026-05-07T00:00:00Z" --limit 300
+```
+
+Useful options:
+
+- `--json` machine-readable deterministic output
+- `--export <path>` deterministic export artifact
+- `--workspace <workspace-id>` workspace-scoped replay
+- `--events` include runtime events in state replay
 
 ### `neurcode plan show`
 
@@ -102,7 +191,7 @@ Supported but not required for the core workflow:
 - `plan`, `plan-slo`, `prompt`
 - `refactor`, `remediate`, `repo`, `revert`
 - `security`, `session`, `ship`, `ship-runs`, `ship-resume`, `ship-attestation-verify`
-- `simulate`, `watch`
+- `simulate`, `watch`, `workspace`
 
 For detailed flags, run:
 

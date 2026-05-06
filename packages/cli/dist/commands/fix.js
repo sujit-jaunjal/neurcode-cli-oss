@@ -861,6 +861,9 @@ function buildVerifyArgs(options) {
     if (options.projectId) {
         args.push('--project-id', options.projectId);
     }
+    if (options.ci === true) {
+        args.push('--ci');
+    }
     if (options.policyOnly === true) {
         args.push('--policy-only');
     }

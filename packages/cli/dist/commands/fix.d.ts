@@ -1,6 +1,7 @@
 interface FixOptions {
     planId?: string;
     projectId?: string;
+    ci?: boolean;
     policyOnly?: boolean;
     staged?: boolean;
     head?: boolean;

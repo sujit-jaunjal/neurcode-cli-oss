@@ -53,6 +53,7 @@ function run() {
 
   const verifyHelp = runCli(['verify', '--help']);
   const requiredVerifyFlags = [
+    '--ci',
     '--policy-only',
     '--compiled-policy <path>',
     '--enforce-change-contract',

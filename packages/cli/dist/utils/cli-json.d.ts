@@ -32,6 +32,7 @@ export interface CliInvocationResult {
  */
 export declare function runCliJson(commandArgs: string[], options?: {
     cwd?: string;
+    env?: Record<string, string | undefined>;
 }): Promise<CliInvocationResult>;
 /** Emit a JSON object to `stdout`. */
 export declare function emitJson(payload: Record<string, unknown>): void;

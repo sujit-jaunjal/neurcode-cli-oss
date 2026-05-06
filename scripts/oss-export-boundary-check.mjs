@@ -33,6 +33,24 @@ const SKIP_DIRECTORIES = new Set([
   '.pnpm-store',
 ]);
 
+const NEURCODE_ALLOWED_SOURCE_PATTERNS = [
+  /^\.neurcode\/policies\/[^/]+\.json$/,
+  /^\.neurcode\/templates\/.+/,
+  /^\.neurcode\/control-plane\/[^/]+\.json$/,
+  /^\.neurcode\/workspaces\/definitions\/[^/]+\.json$/,
+];
+
+const NEURCODE_RUNTIME_ONLY_PATTERNS = [
+  /^\.neurcode\/intent-state\.json$/,
+  /^\.neurcode\/session\.json$/,
+  /^\.neurcode\/cache\//,
+  /^\.neurcode\/evidence\//,
+  /^\.neurcode\/policies\/[^/]+\.active\.json$/,
+  /^\.neurcode\/control-plane\/snapshots\//,
+  /^\.neurcode\/workspaces\/index\.json$/,
+  /^\.neurcode\/workspaces\/cache\//,
+];
+
 const PROFILE_RULES = {
   cli: {
     required: [
@@ -55,7 +73,6 @@ const PROFILE_RULES = {
       /^packages\/mcp-server\//,
       /^services\//,
       /^web\//,
-      /^\.neurcode\//,
       /^neurcode\.db$/,
       /(^|\/)\.env($|\.)/,
       /^.*\.map$/,
@@ -74,7 +91,6 @@ const PROFILE_RULES = {
       /^packages\//,
       /^services\//,
       /^web\//,
-      /^\.neurcode\//,
       /^neurcode\.db$/,
       /(^|\/)\.env($|\.)/,
       /^.*\.map$/,
@@ -173,6 +189,19 @@ function scanSecrets(files) {
   return findings;
 }
 
+function getNeurcodeBoundaryViolation(filePath) {
+  if (!filePath.startsWith('.neurcode/')) {
+    return null;
+  }
+  if (NEURCODE_RUNTIME_ONLY_PATTERNS.some((pattern) => pattern.test(filePath))) {
+    return 'runtime-only .neurcode state';
+  }
+  if (NEURCODE_ALLOWED_SOURCE_PATTERNS.some((pattern) => pattern.test(filePath))) {
+    return null;
+  }
+  return 'non-allowlisted .neurcode path';
+}
+
 function main() {
   const { profile, target } = parseArgs();
   if (!existsSync(target)) {
@@ -187,6 +216,11 @@ function main() {
   const missingRequired = rules.required.filter((pattern) => !relativePaths.some((file) => pattern.test(file)));
   const forbiddenHits = [];
   for (const file of relativePaths) {
+    const neurcodeViolation = getNeurcodeBoundaryViolation(file);
+    if (neurcodeViolation) {
+      forbiddenHits.push(`${file} (${neurcodeViolation})`);
+      continue;
+    }
     for (const pattern of rules.forbidden) {
       if (pattern.test(file)) {
         forbiddenHits.push(file);

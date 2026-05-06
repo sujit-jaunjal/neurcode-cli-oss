@@ -55,6 +55,11 @@ const config_2 = require("./config");
 const start_intent_1 = require("./commands/start-intent");
 const patch_apply_1 = require("./commands/patch-apply");
 const server_1 = require("./daemon/server");
+const export_1 = require("./commands/export");
+const control_plane_1 = require("./commands/control-plane");
+const workspace_1 = require("./commands/workspace");
+const replay_1 = require("./commands/replay");
+const execution_bus_1 = require("./utils/execution-bus");
 // Read version from package.json
 let version = '0.1.2'; // fallback
 try {
@@ -88,7 +93,34 @@ const CORE_WORKFLOW_STEPS = [
         description: 'Confirm patches resolve all findings',
     },
 ];
-const PRIMARY_COMMAND_NAMES = new Set(['start', 'verify', 'fix', 'patch', 'daemon']);
+const PRIMARY_COMMAND_NAMES = new Set(['start', 'generate', 'export', 'verify', 'fix', 'patch', 'daemon']);
+const EXECUTION_ACTION_TYPES = [
+    'verify',
+    'fix',
+    'patch',
+    'apply-safe',
+    'reverify',
+    'policy-sync',
+    'intent-update',
+];
+function isExecutionActionType(value) {
+    return EXECUTION_ACTION_TYPES.includes(value);
+}
+function shouldRouteJsonLegacyCommandThroughExecutionBus(jsonEnabled) {
+    if (!jsonEnabled)
+        return false;
+    if (process.env.NEURCODE_EXECUTION_CHILD === '1')
+        return false;
+    if (process.env.NEURCODE_LEGACY_JSON_DIRECT === '1')
+        return false;
+    return true;
+}
+function emitJsonPayloadWithExitCode(payload, exitCode) {
+    console.log(JSON.stringify(payload, null, 2));
+    if (typeof exitCode === 'number' && Number.isFinite(exitCode)) {
+        process.exitCode = exitCode;
+    }
+}
 function formatCoreWorkflowStep(step) {
     return `  * ${step.command.padEnd(28)} ${step.description}`;
 }
@@ -216,6 +248,9 @@ program
 (0, security_1.securityCommand)(program);
 (0, brain_1.brainCommand)(program);
 (0, policy_1.policyCommand)(program);
+(0, control_plane_1.controlPlaneCommand)(program);
+(0, workspace_1.workspaceCommand)(program);
+(0, replay_1.replayCommand)(program);
 (0, audit_1.auditCommand)(program);
 (0, contract_1.contractCommand)(program);
 (0, feedback_1.feedbackCommand)(program);
@@ -708,15 +743,17 @@ program
 });
 program
     .command('generate')
-    .description('Generate governed code')
-    .argument('<prompt...>', 'User prompt to govern')
+    .description('Generate a governed plan context (reads intent from plan.json if no prompt given)')
+    .argument('[prompt...]', 'Implementation prompt — omit to use intent from plan.json')
     .option('--plan-id <id>', 'Plan ID override for scope context')
     .option('--json', 'Output machine-readable JSON')
+    .option('--file <path>', 'Write JSON output to a file (for agent consumption)')
     .action((promptParts, options) => {
     const promptText = Array.isArray(promptParts) ? promptParts.join(' ') : String(promptParts || '');
     (0, generate_1.generateCommand)(promptText, {
         planId: options.planId,
         json: options.json === true,
+        file: options.file,
     });
 });
 program
@@ -724,7 +761,23 @@ program
     .description('Apply a deterministic fix patch to a file (from neurcode fix suggestions)')
     .requiredOption('--file <path>', 'Path to the file to patch')
     .option('--json', 'Output machine-readable JSON')
-    .action((options) => {
+    .action(async (options) => {
+    if (shouldRouteJsonLegacyCommandThroughExecutionBus(options.json === true)) {
+        const run = await (0, execution_bus_1.runExecution)({
+            type: 'patch',
+            source: 'cli',
+            target: options.file,
+            cwd: process.cwd(),
+            reverify: false,
+            primaryArgs: ['patch', '--file', options.file],
+        });
+        emitJsonPayloadWithExitCode(run.primaryPayload ?? {
+            success: false,
+            file: options.file,
+            message: run.execution.result?.message || 'Patch execution produced no payload',
+        }, run.execution.result?.exitCode);
+        return;
+    }
     (0, patch_apply_1.patchApplyCommand)({
         file: options.file,
         json: options.json === true,
@@ -735,6 +788,7 @@ program
     .description('Get actionable fixes')
     .option('--plan-id <id>', 'Plan ID for verify scope checks')
     .option('--project-id <id>', 'Project ID override')
+    .option('--ci', 'CI mode: deterministic verification-only flow, no local interactive/runtime assumptions')
     .option('--policy-only', 'Run in policy-only verification mode')
     .option('--staged', 'Only verify staged changes')
     .option('--head', 'Verify changes against HEAD')
@@ -742,9 +796,42 @@ program
     .option('--apply-safe', 'Auto-apply high-confidence, deterministic patches and re-run verify')
     .option('--json', 'Output machine-readable JSON')
     .action(async (options) => {
+    if (shouldRouteJsonLegacyCommandThroughExecutionBus(options.json === true)) {
+        const fixArgs = ['fix'];
+        if (options.planId)
+            fixArgs.push('--plan-id', options.planId);
+        if (options.projectId)
+            fixArgs.push('--project-id', options.projectId);
+        if (options.ci === true)
+            fixArgs.push('--ci');
+        if (options.policyOnly === true)
+            fixArgs.push('--policy-only');
+        if (options.staged === true)
+            fixArgs.push('--staged');
+        if (options.head === true)
+            fixArgs.push('--head');
+        if (options.base)
+            fixArgs.push('--base', options.base);
+        if (options.applySafe === true)
+            fixArgs.push('--apply-safe');
+        const run = await (0, execution_bus_1.runExecution)({
+            type: options.applySafe === true ? 'apply-safe' : 'fix',
+            source: 'cli',
+            cwd: process.cwd(),
+            reverify: false,
+            ciMode: options.ci === true,
+            primaryArgs: fixArgs,
+        });
+        emitJsonPayloadWithExitCode(run.primaryPayload ?? {
+            success: false,
+            message: run.execution.result?.message || 'Fix execution produced no payload',
+        }, run.execution.result?.exitCode);
+        return;
+    }
     await (0, fix_1.fixCommand)({
         planId: options.planId,
         projectId: options.projectId,
+        ci: options.ci === true,
         policyOnly: options.policyOnly === true,
         staged: options.staged === true,
         head: options.head === true,
@@ -758,6 +845,7 @@ program
     .description('Check code against policies and plan')
     .option('--plan-id <id>', 'Plan ID to verify against (required unless --policy-only)')
     .option('--project-id <id>', 'Project ID')
+    .option('--ci', 'CI mode: deterministic verification-only flow, no daemon/interactive/local-state assumptions')
     .option('--require-plan', 'Fail if no plan context exists instead of falling back to policy-only mode')
     .option('--policy-only', 'General Governance mode: policy checks only, no plan/scope enforcement')
     .option('--require-policy-lock', 'Fail if policy lock baseline is missing or mismatched')
@@ -780,11 +868,87 @@ program
     .option('--explain', 'Include AI change justification details in human-readable output')
     .option('--demo', 'Demo mode: print extra explanatory output')
     .option('--json', 'Output results as JSON')
+    .option('--evidence', 'Write deterministic verification evidence artifact (.neurcode/evidence)')
+    .option('--evidence-dir <path>', 'Verification evidence output directory (default: .neurcode/evidence)')
     .option('--record', 'Report verification results to Neurcode Cloud')
     .option('--api-key <key>', 'Neurcode API Key (overrides config and env var)')
     .option('--api-url <url>', 'Override API URL (default: https://api.neurcode.com)')
-    .action((options) => {
-    (0, verify_1.verifyCommand)({
+    .action(async (options) => {
+    if (shouldRouteJsonLegacyCommandThroughExecutionBus(options.json === true)) {
+        const verifyArgs = ['verify'];
+        if (options.planId)
+            verifyArgs.push('--plan-id', options.planId);
+        if (options.projectId)
+            verifyArgs.push('--project-id', options.projectId);
+        if (options.ci === true)
+            verifyArgs.push('--ci');
+        if (options.requirePlan === true)
+            verifyArgs.push('--require-plan');
+        if (options.policyOnly === true)
+            verifyArgs.push('--policy-only');
+        if (options.requirePolicyLock === true)
+            verifyArgs.push('--require-policy-lock');
+        if (options.skipPolicyLock === true)
+            verifyArgs.push('--skip-policy-lock');
+        if (options.compiledPolicy)
+            verifyArgs.push('--compiled-policy', options.compiledPolicy);
+        if (options.changeContract)
+            verifyArgs.push('--change-contract', options.changeContract);
+        if (options.enforceChangeContract === true)
+            verifyArgs.push('--enforce-change-contract');
+        if (options.strictArtifacts === true)
+            verifyArgs.push('--strict-artifacts');
+        if (options.requireSignedArtifacts === true)
+            verifyArgs.push('--require-signed-artifacts');
+        if (options.requireRuntimeGuard === true)
+            verifyArgs.push('--require-runtime-guard');
+        if (options.runtimeGuard)
+            verifyArgs.push('--runtime-guard', options.runtimeGuard);
+        if (options.async === true)
+            verifyArgs.push('--async');
+        if (Number.isFinite(options.verifyJobPollMs))
+            verifyArgs.push('--verify-job-poll-ms', String(options.verifyJobPollMs));
+        if (Number.isFinite(options.verifyJobTimeoutMs))
+            verifyArgs.push('--verify-job-timeout-ms', String(options.verifyJobTimeoutMs));
+        if (options.verifyIdempotencyKey)
+            verifyArgs.push('--verify-idempotency-key', options.verifyIdempotencyKey);
+        if (Number.isFinite(options.verifyJobMaxAttempts))
+            verifyArgs.push('--verify-job-max-attempts', String(options.verifyJobMaxAttempts));
+        if (options.staged === true)
+            verifyArgs.push('--staged');
+        if (options.head === true)
+            verifyArgs.push('--head');
+        if (options.base)
+            verifyArgs.push('--base', options.base);
+        if (options.explain === true)
+            verifyArgs.push('--explain');
+        if (options.demo === true)
+            verifyArgs.push('--demo');
+        if (options.evidence === true)
+            verifyArgs.push('--evidence');
+        if (options.evidenceDir)
+            verifyArgs.push('--evidence-dir', options.evidenceDir);
+        if (options.record === true)
+            verifyArgs.push('--record');
+        if (options.apiKey)
+            verifyArgs.push('--api-key', options.apiKey);
+        if (options.apiUrl)
+            verifyArgs.push('--api-url', options.apiUrl);
+        const run = await (0, execution_bus_1.runExecution)({
+            type: 'verify',
+            source: 'cli',
+            cwd: process.cwd(),
+            reverify: false,
+            ciMode: options.ci === true,
+            primaryArgs: verifyArgs,
+        });
+        emitJsonPayloadWithExitCode(run.primaryPayload ?? {
+            success: false,
+            message: run.execution.result?.message || 'Verify execution produced no payload',
+        }, run.execution.result?.exitCode);
+        return;
+    }
+    await (0, verify_1.verifyCommand)({
         planId: options.planId,
         projectId: options.projectId,
         staged: options.staged,
@@ -793,9 +957,12 @@ program
         demo: options.demo === true,
         explain: options.explain === true,
         json: options.json,
+        evidence: options.evidence === true,
+        evidenceDir: options.evidenceDir,
         record: options.record,
         apiKey: options.apiKey,
         apiUrl: options.apiUrl,
+        ci: options.ci === true,
         requirePlan: options.requirePlan === true,
         policyOnly: options.policyOnly === true,
         requirePolicyLock: options.requirePolicyLock === true,
@@ -864,12 +1031,125 @@ revertCmd
         force: options.force || false,
     });
 });
+// ── Export ────────────────────────────────────────────────────────────────────
+program
+    .command('export')
+    .description('Export current plan as structured JSON for agent consumption')
+    .option('--json', 'Output machine-readable JSON to stdout')
+    .option('--file <path>', 'Write exported plan to a file (e.g. plan.json)')
+    .action((options) => {
+    (0, export_1.exportCommand)({
+        json: options.json === true,
+        file: options.file,
+    });
+});
 // ── Daemon ────────────────────────────────────────────────────────────────────
 program
     .command('daemon')
     .description('Start a local HTTP bridge so the dashboard can trigger CLI actions (http://localhost:4321)')
     .action(() => {
     (0, server_1.startDaemon)();
+});
+// ── Unified Execution Bus ────────────────────────────────────────────────────
+program
+    .command('execute <type>')
+    .description('Run an action through the unified deterministic execution pipeline')
+    .option('--target <target>', 'Target file/path for action types that require one')
+    .option('--intent <text>', 'Intent text for intent-update actions')
+    .option('--source <source>', 'Execution source label (cli|daemon|dashboard|vscode|ci|mcp|cursor|api)', 'cli')
+    .option('--actor <actor>', 'Actor attribution label')
+    .option('--ci', 'Force CI-safe deterministic execution behavior')
+    .option('--evidence-dir <path>', 'Override evidence artifact directory')
+    .option('--dedupe-window-ms <ms>', 'Suppress duplicate runs within this time window', (val) => parseInt(val, 10))
+    .option('--no-reverify', 'Skip post-action deterministic reverify stage')
+    .option('--json', 'Output full execution record as JSON')
+    .action(async (type, options) => {
+    if (!isExecutionActionType(type)) {
+        console.error(`❌ Unsupported execution type: ${type}`);
+        console.error(`   Supported: ${EXECUTION_ACTION_TYPES.join(', ')}`);
+        process.exit(1);
+    }
+    const run = await (0, execution_bus_1.runExecution)({
+        type,
+        source: options.source,
+        actor: options.actor,
+        target: options.target ?? null,
+        intentText: options.intent ?? null,
+        reverify: options.reverify !== false,
+        ciMode: options.ci === true,
+        evidenceDir: options.evidenceDir,
+        dedupeWindowMs: Number.isFinite(options.dedupeWindowMs) ? options.dedupeWindowMs : undefined,
+        cwd: process.cwd(),
+    });
+    if (options.json === true) {
+        console.log(JSON.stringify(run.execution, null, 2));
+        process.exit(run.execution.result?.success === true ? 0 : 1);
+    }
+    const execution = run.execution;
+    const statusIcon = execution.result?.success ? '✅' : '❌';
+    const trend = execution.verification.diff.trend;
+    const evidenceCount = execution.evidence.references.length;
+    console.log(`\n${statusIcon} Execution ${execution.id}`);
+    console.log(`   Type: ${execution.type}`);
+    console.log(`   Source: ${execution.source} (${execution.actor})`);
+    console.log(`   Status: ${execution.status}`);
+    console.log(`   Trend: ${trend}`);
+    console.log(`   Evidence: ${evidenceCount} artifact(s)`);
+    if (execution.narrative) {
+        console.log(`\n   Narrative: ${execution.narrative.summary}`);
+        console.log(`   Why: ${execution.narrative.why}`);
+        console.log(`   Next: ${execution.narrative.recommendedAction}`);
+    }
+    console.log('');
+    process.exit(execution.result?.success === true ? 0 : 1);
+});
+program
+    .command('executions')
+    .description('Inspect execution history from the unified execution bus')
+    .option('--id <executionId>', 'Show one execution by ID')
+    .option('--limit <number>', 'Number of recent executions to show', '20')
+    .option('--json', 'Output JSON')
+    .action((options) => {
+    const limit = Number.parseInt(options.limit, 10);
+    if (options.id) {
+        const record = (0, execution_bus_1.getExecutionById)(options.id, process.cwd());
+        if (!record) {
+            console.error(`❌ Execution not found: ${options.id}`);
+            process.exit(1);
+        }
+        if (options.json === true) {
+            console.log(JSON.stringify(record, null, 2));
+            return;
+        }
+        console.log(`\nExecution ${record.id}`);
+        console.log(`  Type: ${record.type}`);
+        console.log(`  Source: ${record.source} (${record.actor})`);
+        console.log(`  Status: ${record.status}`);
+        console.log(`  Created: ${record.createdAt}`);
+        if (record.completedAt)
+            console.log(`  Completed: ${record.completedAt}`);
+        if (record.durationMs !== null)
+            console.log(`  Duration: ${record.durationMs}ms`);
+        console.log(`  Trend: ${record.verification.diff.trend}`);
+        console.log(`  Evidence: ${record.evidence.references.length} artifact(s)\n`);
+        return;
+    }
+    const records = (0, execution_bus_1.listExecutions)(process.cwd(), Number.isFinite(limit) ? limit : 20);
+    if (options.json === true) {
+        console.log(JSON.stringify(records, null, 2));
+        return;
+    }
+    if (records.length === 0) {
+        console.log('\nNo executions recorded yet.\n');
+        return;
+    }
+    console.log('');
+    for (const record of records) {
+        const icon = record.result?.success ? '✅' : '❌';
+        const duration = record.durationMs === null ? 'n/a' : `${record.durationMs}ms`;
+        console.log(`${icon} ${record.id}  ${record.type}  ${record.source}  ${record.status}  ${record.verification.diff.trend}  ${duration}`);
+    }
+    console.log('');
 });
 configurePrimaryHelpView(program);
 const advancedLegacyCommands = buildAdvancedLegacyCommandsList(program);

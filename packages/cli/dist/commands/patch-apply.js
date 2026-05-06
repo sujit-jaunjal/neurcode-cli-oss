@@ -69,6 +69,7 @@ function patchApplyCommand(options) {
         emitJson({
             success: true,
             file: options.file,
+            changed: content !== result.updatedContent,
             patternKind: result.patternKind,
             patchConfidence: result.patchConfidence,
             message: 'Patch applied successfully',

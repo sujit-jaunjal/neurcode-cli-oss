@@ -6,7 +6,6 @@ import { resolve } from 'node:path';
 
 const FORBIDDEN_PATH_RULES = [
   { id: 'pnpm-store', pattern: /^\.pnpm-store\//, reason: 'Local package cache must never be tracked.' },
-  { id: 'neurcode-runtime', pattern: /^\.neurcode\//, reason: 'Local runtime state may contain org/project context.' },
   { id: 'npm-auth-temp', pattern: /^packages\/cli\/\.npmrc\.tmp$/, reason: 'Temporary npm auth file can leak publish tokens.' },
   { id: 'local-db', pattern: /^neurcode\.db$/, reason: 'Local SQLite runtime DB should not be committed.' },
   { id: 'audit-dump', pattern: /^neurcode_.*_audit\.txt$/, reason: 'Generated audit dumps are local artifacts.' },
@@ -19,6 +18,23 @@ const FORBIDDEN_PATH_RULES = [
 const ENV_FILE_PATTERN = /(^|\/)\.env($|\.)/;
 const ENV_ALLOW_LIST = new Set(['.env.example', 'env.production.example']);
 const MAX_SCAN_FILE_BYTES = 1024 * 1024; // 1MB safety cap
+
+const NEURCODE_ALLOWED_SOURCE_PATTERNS = [
+  /^\.neurcode\/policies\/[^/]+\.json$/,
+  /^\.neurcode\/templates\/.+/,
+  /^\.neurcode\/control-plane\/[^/]+\.json$/,
+  /^\.neurcode\/workspaces\/definitions\/[^/]+\.json$/,
+];
+
+const NEURCODE_RUNTIME_FORBIDDEN_PATTERNS = [
+  /^\.neurcode\/intent-state\.json$/,
+  /^\.neurcode\/session\.json$/,
+  /^\.neurcode\/cache\//,
+  /^\.neurcode\/policies\/[^/]+\.active\.json$/,
+  /^\.neurcode\/control-plane\/snapshots\//,
+  /^\.neurcode\/workspaces\/index\.json$/,
+  /^\.neurcode\/workspaces\/cache\//,
+];
 
 const SECRET_LINE_PATTERNS = [
   {
@@ -79,6 +95,25 @@ function listTrackedFiles() {
     .filter(Boolean);
 }
 
+function getNeurcodePathViolation(filePath) {
+  if (!filePath.startsWith('.neurcode/')) {
+    return null;
+  }
+  if (NEURCODE_RUNTIME_FORBIDDEN_PATTERNS.some((pattern) => pattern.test(filePath))) {
+    return {
+      rule: 'neurcode-runtime',
+      reason: 'Runtime-only .neurcode state must never be tracked.',
+    };
+  }
+  if (NEURCODE_ALLOWED_SOURCE_PATTERNS.some((pattern) => pattern.test(filePath))) {
+    return null;
+  }
+  return {
+    rule: 'neurcode-non-allowlisted',
+    reason: 'Only .neurcode/policies/*.json, .neurcode/templates/**, .neurcode/control-plane/*.json, and .neurcode/workspaces/definitions/*.json may be tracked.',
+  };
+}
+
 function scanContentForSecrets(filePath) {
   const absPath = resolve(filePath);
   if (!existsSync(absPath)) return [];
@@ -130,6 +165,15 @@ function main() {
   const contentFindings = [];
 
   for (const filePath of trackedFiles) {
+    const neurcodeViolation = getNeurcodePathViolation(filePath);
+    if (neurcodeViolation) {
+      forbiddenPathFindings.push({
+        filePath,
+        reason: neurcodeViolation.reason,
+        rule: neurcodeViolation.rule,
+      });
+    }
+
     for (const rule of FORBIDDEN_PATH_RULES) {
       if (rule.pattern.test(filePath)) {
         forbiddenPathFindings.push({ filePath, reason: rule.reason, rule: rule.id });
@@ -199,7 +243,9 @@ function main() {
   }
 
   console.error('\nRecommended remediation:');
-  console.error('- Untrack local artifacts: git rm --cached -r .pnpm-store .neurcode');
+  console.error('- Untrack runtime-only .neurcode artifacts (intent/session/cache/*.active.json/control-plane snapshots).');
+  console.error('- Keep only allowlisted .neurcode sources: .neurcode/policies/*.json, .neurcode/templates/**, .neurcode/control-plane/*.json.');
+  console.error('- Untrack local artifacts: git rm --cached -r .pnpm-store');
   console.error('- Remove leaked auth files: git rm --cached packages/cli/.npmrc.tmp');
   console.error('- Rotate any exposed credentials before publishing.');
   process.exit(1);
