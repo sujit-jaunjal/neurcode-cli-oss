@@ -76,13 +76,19 @@ function success(res, data) {
 function failure(res, error, status = 200) {
     send(res, status, { success: false, error });
 }
-function addCorsHeaders(res, _origin) {
+function addCorsHeaders(res, req) {
     // Wildcard is safe: daemon binds to 127.0.0.1 only and isLoopback() rejects
     // any non-local TCP connection. CORS * just lets browsers read the response
     // regardless of what origin the dashboard is served from (local dev, prod domain, etc).
+    const requestedHeadersRaw = req.headers['access-control-request-headers'];
+    const requestedHeaders = Array.isArray(requestedHeadersRaw)
+        ? requestedHeadersRaw.join(',')
+        : (requestedHeadersRaw || '');
+    const allowedHeaders = new Set(['content-type', 'x-neurcode-source', 'x-neurcode-actor']
+        .concat(requestedHeaders.split(',').map((entry) => entry.trim().toLowerCase()).filter(Boolean)));
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-neurcode-source, x-neurcode-actor');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', [...allowedHeaders].join(', '));
     res.setHeader('Access-Control-Max-Age', '86400');
 }
 function isExecutionActionType(value) {
@@ -102,7 +108,16 @@ function isLoopback(req) {
 }
 function toSource(req) {
     const raw = req.headers['x-neurcode-source'];
-    const value = Array.isArray(raw) ? raw[0] : raw;
+    let value = Array.isArray(raw) ? raw[0] : raw;
+    if (!value) {
+        try {
+            const requestUrl = new URL(req.url ?? '/', 'http://localhost');
+            value = requestUrl.searchParams.get('source') ?? undefined;
+        }
+        catch {
+            value = undefined;
+        }
+    }
     if (!value)
         return 'daemon';
     const normalized = value.trim().toLowerCase();
@@ -951,7 +966,7 @@ async function handleRuntimeEventStream(req, res) {
 // ── Server factory ─────────────────────────────────────────────────────────────
 function createDaemonServer() {
     const server = http.createServer(async (req, res) => {
-        addCorsHeaders(res, req.headers.origin);
+        addCorsHeaders(res, req);
         if (req.method === 'OPTIONS') {
             res.writeHead(204);
             res.end();
