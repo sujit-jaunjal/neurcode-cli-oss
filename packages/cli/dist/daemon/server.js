@@ -152,6 +152,54 @@ function collectUnexpectedPatchSideEffects(before, after, targetAbsPath, cwd) {
         .sort();
     return unexpected;
 }
+function setupPatchScopeDemoFiles(cwd) {
+    const rootDir = path.resolve(cwd, 'tmp', 'patch-scope-demo');
+    fs.mkdirSync(rootDir, { recursive: true });
+    const entries = [
+        {
+            file: '01-auth-middleware.ts',
+            content: `export function validateAuthToken(token: string) {\n  // TODO replace temporary bypass with strict token validation\n  return token.length > 0;\n}\n`,
+            message: 'Auth middleware still contains temporary bypass marker (TODO).',
+            rule: 'intent:missing-token-validation',
+        },
+        {
+            file: '02-payment-webhook.ts',
+            content: `export function handlePaymentWebhook(event: string) {\n  // TODO verify webhook signature before processing\n  return \`processed:\${event}\`;\n}\n`,
+            message: 'Payment webhook path lacks explicit signature verification work (TODO marker).',
+            rule: 'intent:missing-webhook-verification',
+        },
+        {
+            file: '03-session-guard.ts',
+            content: `export function ensureSession(sessionId: string) {\n  // TODO add secure session guard\n  return !!sessionId;\n}\n`,
+            message: 'Session guard remains incomplete and must be hardened before merge.',
+            rule: 'intent:missing-session-guard',
+        },
+        {
+            file: '04-rbac-check.ts',
+            content: `export function checkRole(role: string) {\n  // TODO enforce admin + scoped role checks\n  return role === 'admin';\n}\n`,
+            message: 'RBAC checks are still placeholder-only and need full scoped enforcement.',
+            rule: 'intent:missing-role-checks',
+        },
+        {
+            file: '05-api-validation.ts',
+            content: `export function validatePayload(payload: Record<string, unknown>) {\n  // TODO add schema-based request validation\n  return Object.keys(payload).length > 0;\n}\n`,
+            message: 'API validation still relies on placeholder logic (TODO marker present).',
+            rule: 'intent:missing-api-validation',
+        },
+    ];
+    for (const entry of entries) {
+        fs.writeFileSync(path.join(rootDir, entry.file), entry.content, 'utf-8');
+    }
+    return {
+        rootDir,
+        files: entries.map((entry) => ({
+            file: `tmp/patch-scope-demo/${entry.file}`,
+            message: entry.message,
+            rule: entry.rule,
+            severity: 'high',
+        })),
+    };
+}
 function isExecutionActionType(value) {
     if (typeof value !== 'string')
         return false;
@@ -617,6 +665,16 @@ async function handlePatchPreview(req, res) {
         changed: contentBefore !== preview.updatedContent,
         patternKind: preview.patternKind,
         patchConfidence: preview.patchConfidence,
+    });
+}
+async function handlePatchScopeDemoSetup(_req, res) {
+    const cwd = process.cwd();
+    const demo = setupPatchScopeDemoFiles(cwd);
+    success(res, {
+        success: true,
+        rootDir: demo.rootDir,
+        files: demo.files,
+        message: 'Patch scope demo files created',
     });
 }
 async function handleExecute(req, res) {
@@ -1305,6 +1363,10 @@ function createDaemonServer() {
                 await handleFixApplySafe(req, res);
                 return;
             }
+            if (method === 'POST' && (url === '/demo/patch-scope/setup' || url.startsWith('/demo/patch-scope/setup?'))) {
+                await handlePatchScopeDemoSetup(req, res);
+                return;
+            }
             if (method === 'POST' && (url === '/patch/preview' || url.startsWith('/patch/preview?'))) {
                 await handlePatchPreview(req, res);
                 return;
@@ -1346,6 +1408,7 @@ function startDaemon() {
         console.log(`  POST /verify         → execution bus: verify`);
         console.log(`  POST /fix            → execution bus: fix + reverify`);
         console.log(`  POST /fix/apply-safe → execution bus: apply-safe + reverify`);
+        console.log(`  POST /demo/patch-scope/setup → create 5 deterministic demo violation files`);
         console.log(`  POST /patch/preview  → deterministic patch preview (before/after diff)`);
         console.log(`  POST /patch          → execution bus: patch + reverify`);
         console.log(`  POST /execute        → unified execution endpoint`);
