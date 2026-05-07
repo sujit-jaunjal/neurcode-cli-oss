@@ -5,6 +5,15 @@ const patterns_1 = require("./patterns");
 function leadingWhitespace(line) {
     return line.match(/^(\s*)/)?.[1] ?? '';
 }
+function extractRequestAccess(line) {
+    const match = line.match(/\b(req|request)\.(body|params|query)\b/);
+    if (!match)
+        return null;
+    return {
+        receiver: match[1],
+        field: match[2],
+    };
+}
 // Replace the matched DB call line with a service-layer redirect comment.
 function applyDbAccessFix(lines, lineIndex) {
     const indent = leadingWhitespace(lines[lineIndex]);
@@ -12,13 +21,20 @@ function applyDbAccessFix(lines, lineIndex) {
     updated[lineIndex] = `${indent}// [NEURCODE] Move to service layer — replace direct DB call with a service method`;
     return updated;
 }
-// Insert a validation reminder line immediately before the req.body/params/query access.
+// Insert a deterministic runtime validation guard before req.body/params/query access.
 function applyValidationFix(lines, lineIndex) {
     const indent = leadingWhitespace(lines[lineIndex]);
-    const comment = `${indent}// [NEURCODE] Add validation — e.g. const { error } = schema.validate(req.body); ` +
-        `if (error) return res.status(400).json({ error: error.message });`;
+    const access = extractRequestAccess(lines[lineIndex]);
+    const receiver = access?.receiver ?? 'req';
+    const field = access?.field ?? 'body';
+    const accessExpr = `${receiver}.${field}`;
+    const invalidMessage = field === 'body'
+        ? 'Invalid request body'
+        : field === 'params'
+            ? 'Invalid request params'
+            : 'Invalid request query';
     const updated = [...lines];
-    updated.splice(lineIndex, 0, comment);
+    updated.splice(lineIndex, 0, `${indent}if (!${accessExpr} || typeof ${accessExpr} !== 'object' || Array.isArray(${accessExpr})) {`, `${indent}  throw new Error('${invalidMessage}');`, `${indent}}`);
     return updated;
 }
 // Remove the TODO/FIXME comment line entirely.

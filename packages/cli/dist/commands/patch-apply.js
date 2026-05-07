@@ -51,6 +51,25 @@ function patchApplyCommand(options) {
         }
         return;
     }
+    if (result.patchConfidence === 'low') {
+        const message = `Patch rejected for ${options.file}: low-confidence advisory transform (${result.patternKind}).`;
+        if (options.json) {
+            emitJson({
+                success: false,
+                file: options.file,
+                changed: false,
+                patternKind: result.patternKind,
+                patchConfidence: result.patchConfidence,
+                diff: result.diff,
+                message,
+            });
+        }
+        else {
+            console.log(chalk.yellow(message));
+            console.log(chalk.dim('Use `neurcode fix` guidance and patch manually for this violation.'));
+        }
+        return;
+    }
     try {
         (0, fs_1.writeFileSync)(filePath, result.updatedContent, 'utf-8');
     }

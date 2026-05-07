@@ -7,7 +7,7 @@ const patterns_1 = require("./patterns");
 const generator_1 = require("./generator");
 const diff_1 = require("./diff");
 // Patterns that must appear in original content for a patch to be considered safe.
-const PATCHABLE_PATTERN_RE = /db\.(query|execute|run|find[A-Za-z]*)\b|prisma\.\w+\.\w+\b|new\s+Pool\s*\(|knex\s*\(|TODO|FIXME|\bvalidat/i;
+const PATCHABLE_PATTERN_RE = /db\.(query|execute|run|find[A-Za-z]*)\b|prisma\.\w+\.\w+\b|new\s+Pool\s*\(|knex\s*\(|TODO|FIXME|\bvalidat|(?:req|request)\.(?:body|params|query)\b/i;
 /**
  * A patch is safe when:
  *  - updated content is non-empty
@@ -35,10 +35,12 @@ function isPatchSafe(original, updated) {
     return true;
 }
 function scorePatchConfidence(kind) {
-    if (kind === 'db_in_ui')
-        return 'high';
     if (kind === 'missing_validation')
-        return 'medium';
+        return 'high';
+    // db_in_ui auto-transform is advisory-only; deterministic but not production-safe
+    // without human review, so keep confidence low to prevent blind auto-apply.
+    if (kind === 'db_in_ui')
+        return 'low';
     return 'low'; // todo_fixme — simple removal, lowest confidence
 }
 /**

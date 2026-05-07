@@ -7,7 +7,7 @@ const CONTEXT_LINES = 3;
  *
  * Handles three cases without external libraries:
  *  - 1→1  replacement  (db_in_ui)
- *  - 0→1  insertion    (missing_validation: comment inserted before a line)
+ *  - 0→N  insertion    (missing_validation: guard inserted before a line)
  *  - 1→0  deletion     (todo_fixme: comment line removed)
  *
  * Returns an empty string when original === updated.
