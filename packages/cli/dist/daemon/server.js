@@ -163,6 +163,68 @@ function isExecutionActionType(value) {
         || value === 'policy-sync'
         || value === 'intent-update');
 }
+function asObjectRecord(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return null;
+    return value;
+}
+function asObjectArray(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value
+        .map((entry) => asObjectRecord(entry))
+        .filter((entry) => entry !== null);
+}
+function toLegacyViolation(entry, fallbackSeverity) {
+    const file = typeof entry.file === 'string' && entry.file.trim().length > 0
+        ? entry.file.trim()
+        : '';
+    const message = typeof entry.message === 'string' && entry.message.trim().length > 0
+        ? entry.message.trim()
+        : '';
+    if (!file || !message)
+        return null;
+    const severity = typeof entry.severity === 'string' && entry.severity.trim().length > 0
+        ? entry.severity.trim()
+        : fallbackSeverity;
+    const rule = typeof entry.rule === 'string' && entry.rule.trim().length > 0
+        ? entry.rule.trim()
+        : typeof entry.policy === 'string' && entry.policy.trim().length > 0
+            ? entry.policy.trim()
+            : '';
+    return { file, message, severity, rule };
+}
+function normalizeVerifyPayloadForLegacyClients(payload) {
+    if (!payload)
+        return null;
+    const existingViolations = asObjectArray(payload.violations)
+        .map((entry) => toLegacyViolation(entry, 'warn'))
+        .filter((entry) => entry !== null);
+    const blockingItems = asObjectArray(payload.blockingItems)
+        .map((entry) => toLegacyViolation(entry, 'block'))
+        .filter((entry) => entry !== null);
+    const advisoryItems = asObjectArray(payload.advisoryItems)
+        .map((entry) => toLegacyViolation(entry, 'warn'))
+        .filter((entry) => entry !== null);
+    const warnings = asObjectArray(payload.warnings)
+        .map((entry) => toLegacyViolation(entry, 'warn'))
+        .filter((entry) => entry !== null);
+    const merged = [...existingViolations];
+    const seen = new Set(merged.map((entry) => `${entry.file}::${entry.rule}::${entry.message}::${entry.severity}`));
+    for (const item of [...blockingItems, ...advisoryItems, ...warnings]) {
+        const key = `${item.file}::${item.rule}::${item.message}::${item.severity}`;
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        merged.push(item);
+    }
+    if (merged.length === 0)
+        return payload;
+    return {
+        ...payload,
+        violations: merged,
+    };
+}
 function isLoopback(req) {
     const addr = req.socket.remoteAddress ?? '';
     return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
@@ -411,8 +473,9 @@ async function handleVerify(req, res) {
         failure(res, run.execution.result?.message || 'verify execution produced no payload');
         return;
     }
+    const normalizedPayload = normalizeVerifyPayloadForLegacyClients(run.primaryPayload ?? null) ?? run.primaryPayload;
     success(res, {
-        ...run.primaryPayload,
+        ...normalizedPayload,
         _execution: {
             id: run.execution.id,
             type: run.execution.type,
@@ -437,9 +500,10 @@ async function handleFix(req, res) {
         failure(res, run.execution.result?.message || 'fix execution produced no payload');
         return;
     }
+    const normalizedVerifyAfter = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
     success(res, {
         ...run.primaryPayload,
-        verifyAfter: run.verificationPayload ?? null,
+        verifyAfter: normalizedVerifyAfter ?? null,
         _execution: {
             id: run.execution.id,
             type: run.execution.type,
@@ -464,9 +528,10 @@ async function handleFixApplySafe(req, res) {
         failure(res, run.execution.result?.message || 'fix --apply-safe execution produced no payload');
         return;
     }
+    const normalizedVerifyAfter = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
     success(res, {
         ...run.primaryPayload,
-        verifyAfter: run.verificationPayload ?? null,
+        verifyAfter: normalizedVerifyAfter ?? null,
         execution: run.execution,
     });
 }
@@ -549,6 +614,7 @@ async function handlePatch(req, res) {
             ? patchData.message
             : 'Patch rejected; no deterministic file-scoped change applied';
     })();
+    const normalizedVerifyPayload = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
     success(res, {
         patch: {
             ...patchData,
@@ -561,7 +627,7 @@ async function handlePatch(req, res) {
             sideEffects,
             message: patchMessage,
         },
-        verify: run.verificationPayload ?? null,
+        verify: normalizedVerifyPayload ?? null,
         execution: run.execution,
     });
 }
