@@ -141,6 +141,7 @@ function applyFirstMatchingPatch(filePath, fileContent) {
             updatedContent: result.updatedContent,
             patternKind: kind,
             patchConfidence: scorePatchConfidence(kind),
+            diff,
         };
     }
     return null;

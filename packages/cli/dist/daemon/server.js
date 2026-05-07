@@ -39,6 +39,8 @@ exports.startDaemon = startDaemon;
 const http = __importStar(require("node:http"));
 const path = __importStar(require("node:path"));
 const fs = __importStar(require("node:fs"));
+const node_child_process_1 = require("node:child_process");
+const patch_engine_1 = require("../patch-engine");
 const execution_bus_1 = require("../utils/execution-bus");
 const runtime_events_1 = require("../utils/runtime-events");
 const control_plane_1 = require("../utils/control-plane");
@@ -90,6 +92,65 @@ function addCorsHeaders(res, req) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', [...allowedHeaders].join(', '));
     res.setHeader('Access-Control-Max-Age', '86400');
+}
+function resolveGitRoot(cwd) {
+    const result = (0, node_child_process_1.spawnSync)('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (result.status !== 0)
+        return null;
+    const value = typeof result.stdout === 'string' ? result.stdout.trim() : '';
+    return value.length > 0 ? value : null;
+}
+function captureGitDirtyPaths(cwd) {
+    const gitRoot = resolveGitRoot(cwd);
+    if (!gitRoot)
+        return null;
+    const statusResult = (0, node_child_process_1.spawnSync)('git', ['-C', cwd, 'status', '--porcelain=1', '-z', '--untracked-files=all'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (statusResult.status !== 0 || typeof statusResult.stdout !== 'string')
+        return null;
+    const tokens = statusResult.stdout.split('\0').filter((entry) => entry.length > 0);
+    const dirty = new Set();
+    for (let index = 0; index < tokens.length; index += 1) {
+        const token = tokens[index];
+        if (token.length < 4)
+            continue;
+        const status = token.slice(0, 2);
+        const filePath = token.slice(3).trim();
+        if (filePath.length > 0) {
+            dirty.add(path.resolve(gitRoot, filePath));
+        }
+        const renamedOrCopied = status.includes('R') || status.includes('C');
+        if (renamedOrCopied && index + 1 < tokens.length) {
+            index += 1;
+        }
+    }
+    return dirty;
+}
+function isAllowedPatchSideEffect(absPath, targetAbsPath, cwd) {
+    if (absPath === targetAbsPath)
+        return true;
+    const rel = path.relative(cwd, absPath);
+    if (!rel || rel.startsWith('..'))
+        return false;
+    if (rel === 'neurcode.policy.compiled.json')
+        return true;
+    return rel === '.neurcode' || rel.startsWith(`.neurcode${path.sep}`);
+}
+function collectUnexpectedPatchSideEffects(before, after, targetAbsPath, cwd) {
+    if (!before || !after)
+        return [];
+    const added = [...after].filter((entry) => !before.has(entry));
+    const unexpected = added
+        .filter((entry) => !isAllowedPatchSideEffect(entry, targetAbsPath, cwd))
+        .map((entry) => path.relative(cwd, entry).replace(/\\/g, '/'))
+        .filter((entry) => entry.length > 0)
+        .sort();
+    return unexpected;
 }
 function isExecutionActionType(value) {
     if (typeof value !== 'string')
@@ -423,8 +484,11 @@ async function handlePatch(req, res) {
         failure(res, 'Missing or unsafe "file" field', 400);
         return;
     }
+    const cwd = process.cwd();
+    const targetPath = file.trim();
+    const absPath = path.resolve(cwd, targetPath);
+    const beforeDirtyPaths = captureGitDirtyPaths(cwd);
     // Capture file content before patch to detect real change
-    const absPath = path.resolve(process.cwd(), file);
     let contentBefore = null;
     try {
         contentBefore = fs.readFileSync(absPath, 'utf-8');
@@ -434,13 +498,13 @@ async function handlePatch(req, res) {
         type: 'patch',
         source: toSource(req),
         actor: toActor(req),
-        target: file,
-        cwd: process.cwd(),
+        target: targetPath,
+        cwd,
         reverify: true,
     });
     const patchData = run.primaryPayload ?? {
         success: false,
-        file,
+        file: targetPath,
         message: run.execution.result?.message || 'No applicable patch found',
     };
     // Validate that the file actually changed on disk
@@ -452,10 +516,107 @@ async function handlePatch(req, res) {
         }
         catch { /* ignore read error */ }
     }
+    const afterDirtyPaths = captureGitDirtyPaths(cwd);
+    const sideEffects = collectUnexpectedPatchSideEffects(beforeDirtyPaths, afterDirtyPaths, absPath, cwd);
+    const payloadFile = typeof patchData.file === 'string' ? patchData.file : '';
+    const payloadTargetMatch = payloadFile.length > 0
+        ? path.resolve(cwd, payloadFile) === absPath
+        : true;
+    const patchSucceeded = patchData.success === true;
+    const patchStatus = !patchSucceeded
+        ? 'rejected'
+        : changed && payloadTargetMatch && sideEffects.length === 0
+            ? 'applied'
+            : changed
+                ? 'partial'
+                : 'rejected';
+    const patchMessage = (() => {
+        if (patchStatus === 'applied') {
+            return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
+                ? patchData.message
+                : 'Patch applied successfully';
+        }
+        if (patchStatus === 'partial') {
+            if (!payloadTargetMatch) {
+                return 'Patch target mismatch detected. Requested file and daemon payload file differ.';
+            }
+            if (sideEffects.length > 0) {
+                return `Patch introduced side effects in ${sideEffects.length} additional file(s).`;
+            }
+            return 'Patch applied but requires manual review.';
+        }
+        return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
+            ? patchData.message
+            : 'Patch rejected; no deterministic file-scoped change applied';
+    })();
     success(res, {
-        patch: { ...patchData, changed },
+        patch: {
+            ...patchData,
+            file: payloadFile || targetPath,
+            success: patchStatus === 'applied',
+            rawSuccess: patchData.success === true,
+            changed,
+            status: patchStatus,
+            targetMatch: payloadTargetMatch,
+            sideEffects,
+            message: patchMessage,
+        },
         verify: run.verificationPayload ?? null,
         execution: run.execution,
+    });
+}
+async function handlePatchPreview(req, res) {
+    let body = {};
+    try {
+        body = JSON.parse(await readBody(req));
+    }
+    catch {
+        failure(res, 'Invalid JSON body', 400);
+        return;
+    }
+    const file = body.file;
+    if (!file || typeof file !== 'string' || file.includes('..')) {
+        failure(res, 'Missing or unsafe "file" field', 400);
+        return;
+    }
+    const cwd = process.cwd();
+    const targetPath = file.trim();
+    const absPath = path.resolve(cwd, targetPath);
+    let contentBefore = '';
+    try {
+        contentBefore = fs.readFileSync(absPath, 'utf-8');
+    }
+    catch {
+        failure(res, `File not found: ${targetPath}`, 404);
+        return;
+    }
+    const preview = (0, patch_engine_1.applyFirstMatchingPatch)(targetPath, contentBefore);
+    if (!preview) {
+        success(res, {
+            success: false,
+            file: targetPath,
+            status: 'rejected',
+            message: `No deterministic patch preview available for ${targetPath}`,
+            beforeContent: contentBefore,
+            afterContent: null,
+            diff: null,
+            changed: false,
+            patternKind: null,
+            patchConfidence: null,
+        });
+        return;
+    }
+    success(res, {
+        success: true,
+        file: targetPath,
+        status: 'preview',
+        message: 'Patch preview generated',
+        beforeContent: contentBefore,
+        afterContent: preview.updatedContent,
+        diff: preview.diff,
+        changed: contentBefore !== preview.updatedContent,
+        patternKind: preview.patternKind,
+        patchConfidence: preview.patchConfidence,
     });
 }
 async function handleExecute(req, res) {
@@ -1053,11 +1214,11 @@ function createDaemonServer() {
                 await handleGetControlPlane(req, res);
                 return;
             }
-            if (method === 'POST' && url === '/control-plane/preview') {
+            if (method === 'POST' && (url === '/control-plane/preview' || url.startsWith('/control-plane/preview?'))) {
                 await handlePreviewControlPlaneUpdate(req, res);
                 return;
             }
-            if (method === 'PUT' && url === '/control-plane') {
+            if (method === 'PUT' && (url === '/control-plane' || url.startsWith('/control-plane?'))) {
                 await handleApplyControlPlaneUpdate(req, res);
                 return;
             }
@@ -1081,26 +1242,26 @@ function createDaemonServer() {
                     return;
                 }
             }
-            if (method === 'POST' && url === '/workspaces') {
+            if (method === 'POST' && (url === '/workspaces' || url.startsWith('/workspaces?'))) {
                 await handleCreateWorkspace(req, res);
                 return;
             }
-            const activateMatch = url.match(/^\/workspaces\/([^/]+)\/activate$/);
+            const activateMatch = url.match(/^\/workspaces\/([^/]+)\/activate(?:\?.*)?$/);
             if (method === 'POST' && activateMatch) {
                 await handleActivateWorkspace(req, res, decodeURIComponent(activateMatch[1]));
                 return;
             }
-            const addRepoMatch = url.match(/^\/workspaces\/([^/]+)\/repositories$/);
+            const addRepoMatch = url.match(/^\/workspaces\/([^/]+)\/repositories(?:\?.*)?$/);
             if (method === 'POST' && addRepoMatch) {
                 await handleAddWorkspaceRepository(req, res, decodeURIComponent(addRepoMatch[1]));
                 return;
             }
-            const updateWorkspaceMatch = url.match(/^\/workspaces\/([^/?]+)$/);
+            const updateWorkspaceMatch = url.match(/^\/workspaces\/([^/?]+)(?:\?.*)?$/);
             if (method === 'PUT' && updateWorkspaceMatch) {
                 await handleUpdateWorkspace(req, res, decodeURIComponent(updateWorkspaceMatch[1]));
                 return;
             }
-            if (method === 'POST' && url === '/workspaces/execute') {
+            if (method === 'POST' && (url === '/workspaces/execute' || url.startsWith('/workspaces/execute?'))) {
                 await handleExecuteWorkspace(req, res);
                 return;
             }
@@ -1128,23 +1289,27 @@ function createDaemonServer() {
                     return;
                 }
             }
-            if (method === 'POST' && url === '/execute') {
+            if (method === 'POST' && (url === '/execute' || url.startsWith('/execute?'))) {
                 await handleExecute(req, res);
                 return;
             }
-            if (method === 'POST' && url === '/verify') {
+            if (method === 'POST' && (url === '/verify' || url.startsWith('/verify?'))) {
                 await handleVerify(req, res);
                 return;
             }
-            if (method === 'POST' && url === '/fix') {
+            if (method === 'POST' && (url === '/fix' || url.startsWith('/fix?'))) {
                 await handleFix(req, res);
                 return;
             }
-            if (method === 'POST' && url === '/fix/apply-safe') {
+            if (method === 'POST' && (url === '/fix/apply-safe' || url.startsWith('/fix/apply-safe?'))) {
                 await handleFixApplySafe(req, res);
                 return;
             }
-            if (method === 'POST' && url === '/patch') {
+            if (method === 'POST' && (url === '/patch/preview' || url.startsWith('/patch/preview?'))) {
+                await handlePatchPreview(req, res);
+                return;
+            }
+            if (method === 'POST' && (url === '/patch' || url.startsWith('/patch?'))) {
                 await handlePatch(req, res);
                 return;
             }
@@ -1181,6 +1346,7 @@ function startDaemon() {
         console.log(`  POST /verify         → execution bus: verify`);
         console.log(`  POST /fix            → execution bus: fix + reverify`);
         console.log(`  POST /fix/apply-safe → execution bus: apply-safe + reverify`);
+        console.log(`  POST /patch/preview  → deterministic patch preview (before/after diff)`);
         console.log(`  POST /patch          → execution bus: patch + reverify`);
         console.log(`  POST /execute        → unified execution endpoint`);
         console.log(`  GET  /executions     → execution history`);

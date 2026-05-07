@@ -10,6 +10,113 @@ const chalk = (0, cli_json_1.loadChalk)();
 const MAX_SUGGESTIONS = 10;
 // Minimum context-engine score for a target file to be trusted.
 const MIN_TARGET_SCORE = 3;
+function normalizeVerifyVerdict(value) {
+    if (typeof value !== 'string')
+        return 'FAIL';
+    const normalized = value.trim().toUpperCase();
+    if (normalized === 'PASS' || normalized === 'WARN' || normalized === 'FAIL') {
+        return normalized;
+    }
+    return 'FAIL';
+}
+function normalizeVerifySeverity(value) {
+    if (typeof value !== 'string')
+        return 'warning';
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'critical' || normalized === 'high' || normalized === 'warning' || normalized === 'info') {
+        return normalized;
+    }
+    if (normalized === 'warn' || normalized === 'medium')
+        return 'warning';
+    return 'warning';
+}
+function normalizeVerifyOutput(payload) {
+    const rawViolations = Array.isArray(payload.violations) ? payload.violations : [];
+    const rawWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+    const rawScopeIssues = Array.isArray(payload.scopeIssues) ? payload.scopeIssues : [];
+    const violations = rawViolations
+        .map((entry) => {
+        if (!entry || typeof entry !== 'object')
+            return null;
+        const record = entry;
+        const file = typeof record.file === 'string' ? record.file : 'unknown';
+        const message = typeof record.message === 'string' ? record.message : 'Policy violation';
+        const policy = typeof record.policy === 'string'
+            ? record.policy
+            : typeof record.rule === 'string'
+                ? record.rule
+                : 'unknown_policy';
+        return {
+            file,
+            message,
+            policy,
+            severity: normalizeVerifySeverity(record.severity),
+        };
+    })
+        .filter((entry) => Boolean(entry));
+    const warnings = rawWarnings
+        .map((entry) => {
+        if (!entry || typeof entry !== 'object')
+            return null;
+        const record = entry;
+        return {
+            file: typeof record.file === 'string' ? record.file : 'unknown',
+            message: typeof record.message === 'string' ? record.message : 'Warning',
+            policy: typeof record.policy === 'string'
+                ? record.policy
+                : typeof record.rule === 'string'
+                    ? record.rule
+                    : 'warning',
+        };
+    })
+        .filter((entry) => Boolean(entry));
+    const scopeIssues = rawScopeIssues
+        .map((entry) => {
+        if (!entry || typeof entry !== 'object')
+            return null;
+        const record = entry;
+        return {
+            file: typeof record.file === 'string' ? record.file : 'unknown',
+            message: typeof record.message === 'string' ? record.message : 'Scope issue',
+        };
+    })
+        .filter((entry) => Boolean(entry));
+    const files = [
+        ...violations.map((entry) => entry.file),
+        ...warnings.map((entry) => entry.file),
+        ...scopeIssues.map((entry) => entry.file),
+    ].filter((entry) => entry && entry !== 'unknown');
+    const uniqueFiles = new Set(files);
+    const providedSummary = payload.summary && typeof payload.summary === 'object'
+        ? payload.summary
+        : null;
+    const summary = {
+        totalFilesChanged: typeof providedSummary?.totalFilesChanged === 'number'
+            ? providedSummary.totalFilesChanged
+            : uniqueFiles.size,
+        totalViolations: typeof providedSummary?.totalViolations === 'number'
+            ? providedSummary.totalViolations
+            : violations.length,
+        totalWarnings: typeof providedSummary?.totalWarnings === 'number'
+            ? providedSummary.totalWarnings
+            : warnings.length,
+        totalScopeIssues: typeof providedSummary?.totalScopeIssues === 'number'
+            ? providedSummary.totalScopeIssues
+            : scopeIssues.length,
+    };
+    let verdict = normalizeVerifyVerdict(payload.verdict);
+    if (typeof payload.verdict !== 'string') {
+        verdict = summary.totalViolations > 0 ? 'FAIL' : summary.totalWarnings > 0 || summary.totalScopeIssues > 0 ? 'WARN' : 'PASS';
+    }
+    return {
+        verdict,
+        summary,
+        violations,
+        warnings,
+        scopeIssues,
+        ...(typeof payload.driftScore === 'number' ? { driftScore: payload.driftScore } : {}),
+    };
+}
 // ---------------------------------------------------------------------------
 // Intent issue → FixSuggestion conversion
 // ---------------------------------------------------------------------------
@@ -903,7 +1010,7 @@ async function fixCommand(options) {
             }
             process.exit(1);
         }
-        const verifyOutput = payload;
+        const verifyOutput = normalizeVerifyOutput(payload);
         // Scan project once; scoring and patch generation reuse this data.
         let graph = null;
         let fileContents = {};

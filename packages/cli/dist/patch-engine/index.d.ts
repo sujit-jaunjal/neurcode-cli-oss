@@ -28,6 +28,7 @@ export declare function applyFirstMatchingPatch(filePath: string, fileContent: s
     updatedContent: string;
     patternKind: PatternKind;
     patchConfidence: PatchConfidence;
+    diff: string;
 } | null;
 /**
  * Given a fix suggestion and the current content of suggestion.file,

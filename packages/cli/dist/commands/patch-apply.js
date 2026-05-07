@@ -72,6 +72,7 @@ function patchApplyCommand(options) {
             changed: content !== result.updatedContent,
             patternKind: result.patternKind,
             patchConfidence: result.patchConfidence,
+            diff: result.diff,
             message: 'Patch applied successfully',
         });
     }
