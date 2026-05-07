@@ -12,10 +12,11 @@ const PATCHABLE_PATTERN_RE = /db\.(query|execute|run|find[A-Za-z]*)\b|prisma\.\w
  * A patch is safe when:
  *  - updated content is non-empty
  *  - the diff is non-empty (something actually changed)
- *  - total added + removed lines ≤ 5 (not a full-file rewrite)
+ *  - total added + removed lines stays under deterministic thresholds
+ *    (≤12 for missing_validation, ≤5 for other transforms)
  *  - the original file contains at least one recognizable patchable pattern
  */
-function isPatchSafe(original, updated) {
+function isPatchSafe(original, updated, kind) {
     if (!updated || !updated.trim())
         return false;
     const diff = (0, diff_1.generateUnifiedDiff)('', original, updated);
@@ -28,7 +29,8 @@ function isPatchSafe(original, updated) {
         if (line.startsWith('+') && !line.startsWith('+++'))
             changed++;
     }
-    if (changed > 5)
+    const maxChangedLines = kind === 'missing_validation' ? 12 : 5;
+    if (changed > maxChangedLines)
         return false;
     if (!PATCHABLE_PATTERN_RE.test(original))
         return false;
@@ -137,7 +139,7 @@ function applyFirstMatchingPatch(filePath, fileContent) {
         const diff = (0, diff_1.generateUnifiedDiff)(filePath, fileContent, result.updatedContent);
         if (!diff)
             continue;
-        if (!isPatchSafe(fileContent, result.updatedContent))
+        if (!isPatchSafe(fileContent, result.updatedContent, kind))
             continue;
         return {
             updatedContent: result.updatedContent,
@@ -174,7 +176,7 @@ function generatePatchForSuggestion(suggestion, fileContent) {
     const diff = (0, diff_1.generateUnifiedDiff)(suggestion.file, fileContent, result.updatedContent);
     if (!diff)
         return null;
-    if (!isPatchSafe(fileContent, result.updatedContent))
+    if (!isPatchSafe(fileContent, result.updatedContent, kind))
         return null;
     return {
         file: suggestion.file,

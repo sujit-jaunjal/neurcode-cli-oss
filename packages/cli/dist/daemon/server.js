@@ -152,6 +152,67 @@ function collectUnexpectedPatchSideEffects(before, after, targetAbsPath, cwd) {
         .sort();
     return unexpected;
 }
+function extractRequestInputUsage(content) {
+    const accessMatch = content.match(/\b(req|request)\.(body|params|query)\b/);
+    if (!accessMatch)
+        return null;
+    const receiver = accessMatch[1];
+    const field = accessMatch[2];
+    const fieldRegex = new RegExp(`\\b${receiver}\\.${field}\\.([A-Za-z_$][\\w$]*)\\b`, 'g');
+    const fields = [];
+    const seen = new Set();
+    let match = fieldRegex.exec(content);
+    while (match) {
+        const fieldName = match[1];
+        if (!seen.has(fieldName)) {
+            seen.add(fieldName);
+            fields.push(fieldName);
+        }
+        match = fieldRegex.exec(content);
+    }
+    return { receiver, field, fields };
+}
+function buildPatchPreviewReasoning(patternKind, targetPath, beforeContent) {
+    if (!patternKind)
+        return null;
+    if (patternKind === 'missing_validation') {
+        const usage = extractRequestInputUsage(beforeContent);
+        if (!usage) {
+            return {
+                summary: 'Adds deterministic API input validation guard.',
+                why: `This file accesses request input without a validation boundary check.`,
+                risk: 'Malformed input can cause runtime errors or unsafe processing paths.',
+                expectedOutcome: 'Invalid requests fail fast and valid requests continue unchanged.',
+            };
+        }
+        const noun = usage.field === 'body' ? 'request body' : usage.field === 'params' ? 'route params' : 'query params';
+        const fieldSummary = usage.fields.length > 0 ? usage.fields.join(', ') : 'no explicit property access detected';
+        return {
+            summary: `Adds deterministic validation before reading ${usage.receiver}.${usage.field}.`,
+            why: `${targetPath} reads ${noun} fields (${fieldSummary}) before validation.`,
+            risk: `Without boundary validation, malformed ${noun} may propagate into handler logic.`,
+            expectedOutcome: `Invalid ${noun} returns HTTP 400 early; valid requests keep existing behavior.`,
+            fields: usage.fields,
+        };
+    }
+    if (patternKind === 'db_in_ui') {
+        return {
+            summary: 'Suggests moving direct DB access behind a service boundary.',
+            why: `${targetPath} appears to perform direct data access in a non-service layer.`,
+            risk: 'Layering violations increase coupling and make behavior harder to govern.',
+            expectedOutcome: 'Patch inserts a deterministic placeholder to redirect to service-layer logic.',
+        };
+    }
+    if (patternKind === 'todo_fixme') {
+        return {
+            summary: 'Removes TODO/FIXME marker matched by policy.',
+            why: `${targetPath} includes TODO/FIXME comments tracked as governance debt.`,
+            risk: 'Unresolved TODO markers can hide missing implementation or review debt.',
+            expectedOutcome: 'Patch removes the marker; implementation must still be verified separately.',
+        };
+    }
+    return null;
+}
 function isExecutionActionType(value) {
     if (typeof value !== 'string')
         return false;
@@ -669,9 +730,11 @@ async function handlePatchPreview(req, res) {
             changed: false,
             patternKind: null,
             patchConfidence: null,
+            reasoning: null,
         });
         return;
     }
+    const reasoning = buildPatchPreviewReasoning(preview.patternKind, targetPath, contentBefore);
     if (preview.patchConfidence === 'low') {
         success(res, {
             success: false,
@@ -684,6 +747,7 @@ async function handlePatchPreview(req, res) {
             changed: false,
             patternKind: preview.patternKind,
             patchConfidence: preview.patchConfidence,
+            reasoning,
         });
         return;
     }
@@ -698,6 +762,7 @@ async function handlePatchPreview(req, res) {
         changed: contentBefore !== preview.updatedContent,
         patternKind: preview.patternKind,
         patchConfidence: preview.patchConfidence,
+        reasoning,
     });
 }
 async function handleExecute(req, res) {
