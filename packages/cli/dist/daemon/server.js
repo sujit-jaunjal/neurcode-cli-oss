@@ -39,22 +39,181 @@ exports.startDaemon = startDaemon;
 const http = __importStar(require("node:http"));
 const path = __importStar(require("node:path"));
 const fs = __importStar(require("node:fs"));
+const node_crypto_1 = require("node:crypto");
 const node_child_process_1 = require("node:child_process");
 const patch_engine_1 = require("../patch-engine");
+const diff_1 = require("../patch-engine/diff");
 const execution_bus_1 = require("../utils/execution-bus");
 const runtime_events_1 = require("../utils/runtime-events");
 const control_plane_1 = require("../utils/control-plane");
 const workspace_runtime_1 = require("../utils/workspace-runtime");
 const replay_runtime_1 = require("../utils/replay-runtime");
+const contracts_1 = require("@neurcode-ai/contracts");
 // ── Configuration ──────────────────────────────────────────────────────────────
-exports.DAEMON_PORT = 4321;
-exports.DAEMON_HOST = '127.0.0.1';
+exports.DAEMON_PORT = Number.parseInt(process.env.NEURCODE_DAEMON_PORT || '4321', 10) || 4321;
+exports.DAEMON_HOST = process.env.NEURCODE_DAEMON_HOST || '127.0.0.1';
 const SSE_RETRY_MS = 3000;
+const REQUEST_ID_HEADER = 'x-neurcode-request-id';
+const ALLOW_NON_LOOPBACK = ['1', 'true', 'yes', 'on'].includes(String(process.env.NEURCODE_DAEMON_ALLOW_REMOTE || '').trim().toLowerCase());
 const runtimeEventClients = new Map();
 let runtimeEventClientSeq = 0;
 let runtimeEventUnsubscribe = null;
 let runtimeEventTailTimer = null;
 let runtimeEventTailCursor = null;
+const DAEMON_MAX_ERROR_HISTORY = 40;
+const DAEMON_MAX_ROUTE_SAMPLE = 1000;
+const daemonOpsMetrics = {
+    startedAt: new Date().toISOString(),
+    requestsTotal: 0,
+    requestsByMethod: {},
+    requestsByRoute: {},
+    failuresTotal: 0,
+    retriableFailuresTotal: 0,
+    stalePreviewRejections: 0,
+    rollbackStaleRejections: 0,
+    patchApplied: 0,
+    patchPartial: 0,
+    patchRejected: 0,
+    rollbackApplied: 0,
+    rollbackRejected: 0,
+    recentErrors: [],
+};
+function normalizeRoutePath(url) {
+    const pathOnly = url.split('?')[0]?.trim() || '/';
+    return pathOnly.startsWith('/') ? pathOnly : `/${pathOnly}`;
+}
+function incrementMetricCounter(record, key) {
+    record[key] = (record[key] || 0) + 1;
+}
+function recordDaemonRequest(url, method) {
+    daemonOpsMetrics.requestsTotal += 1;
+    incrementMetricCounter(daemonOpsMetrics.requestsByMethod, method.toUpperCase());
+    const route = normalizeRoutePath(url);
+    incrementMetricCounter(daemonOpsMetrics.requestsByRoute, route);
+    // Keep route cardinality bounded for long-lived daemon sessions.
+    const routeKeys = Object.keys(daemonOpsMetrics.requestsByRoute);
+    if (routeKeys.length > DAEMON_MAX_ROUTE_SAMPLE) {
+        const overflow = routeKeys
+            .sort((left, right) => (daemonOpsMetrics.requestsByRoute[left] || 0) - (daemonOpsMetrics.requestsByRoute[right] || 0))
+            .slice(0, routeKeys.length - DAEMON_MAX_ROUTE_SAMPLE);
+        for (const key of overflow) {
+            delete daemonOpsMetrics.requestsByRoute[key];
+        }
+    }
+}
+function recordDaemonFailure(sample) {
+    daemonOpsMetrics.failuresTotal += 1;
+    if (sample.retriable) {
+        daemonOpsMetrics.retriableFailuresTotal += 1;
+    }
+    daemonOpsMetrics.recentErrors.unshift({
+        at: new Date().toISOString(),
+        ...sample,
+    });
+    if (daemonOpsMetrics.recentErrors.length > DAEMON_MAX_ERROR_HISTORY) {
+        daemonOpsMetrics.recentErrors.length = DAEMON_MAX_ERROR_HISTORY;
+    }
+}
+function recordPatchOutcome(status) {
+    if (status === 'applied') {
+        daemonOpsMetrics.patchApplied += 1;
+        return;
+    }
+    if (status === 'partial') {
+        daemonOpsMetrics.patchPartial += 1;
+        return;
+    }
+    if (status === 'stale_preview') {
+        daemonOpsMetrics.patchRejected += 1;
+        daemonOpsMetrics.stalePreviewRejections += 1;
+        return;
+    }
+    if (status === 'rollback_applied') {
+        daemonOpsMetrics.rollbackApplied += 1;
+        return;
+    }
+    if (status === 'rollback_stale') {
+        daemonOpsMetrics.rollbackRejected += 1;
+        daemonOpsMetrics.rollbackStaleRejections += 1;
+        return;
+    }
+    if (status === 'rollback_rejected') {
+        daemonOpsMetrics.rollbackRejected += 1;
+        return;
+    }
+    daemonOpsMetrics.patchRejected += 1;
+}
+function buildDaemonOperationalSummary(cwd) {
+    const uptimeSeconds = Math.max(0, Math.floor((Date.now() - new Date(daemonOpsMetrics.startedAt).getTime()) / 1000));
+    const lockPath = path.resolve(cwd, '.neurcode', 'executions', '.lock');
+    let lockPresent = false;
+    let lockAgeMs = null;
+    try {
+        const stat = fs.statSync(lockPath);
+        lockPresent = stat.isFile();
+        lockAgeMs = Date.now() - stat.mtimeMs;
+    }
+    catch {
+        lockPresent = false;
+        lockAgeMs = null;
+    }
+    const executionQuery = (0, execution_bus_1.queryExecutions)(cwd, {
+        limit: 200,
+        status: 'all',
+    });
+    const items = executionQuery.items || [];
+    const activeExecutions = items.filter((item) => item.status !== 'completed' && item.status !== 'failed').length;
+    const recentFailures = items
+        .filter((item) => item.status === 'failed')
+        .slice(0, 10)
+        .map((item) => ({
+        id: item.id,
+        type: item.type,
+        source: item.source,
+        actor: item.actor,
+        completedAt: item.completedAt,
+        message: item.result?.message || null,
+    }));
+    const patchAttempts = daemonOpsMetrics.patchApplied + daemonOpsMetrics.patchPartial + daemonOpsMetrics.patchRejected;
+    const rollbackAttempts = daemonOpsMetrics.rollbackApplied + daemonOpsMetrics.rollbackRejected;
+    return {
+        uptimeSeconds,
+        activeExecutions,
+        sseClients: runtimeEventClients.size,
+        requestTotals: {
+            total: daemonOpsMetrics.requestsTotal,
+            failures: daemonOpsMetrics.failuresTotal,
+            retriableFailures: daemonOpsMetrics.retriableFailuresTotal,
+            byMethod: daemonOpsMetrics.requestsByMethod,
+            topRoutes: Object.entries(daemonOpsMetrics.requestsByRoute)
+                .sort((left, right) => right[1] - left[1])
+                .slice(0, 12)
+                .map(([route, count]) => ({ route, count })),
+        },
+        patchStats: {
+            attempts: patchAttempts,
+            applied: daemonOpsMetrics.patchApplied,
+            partial: daemonOpsMetrics.patchPartial,
+            rejected: daemonOpsMetrics.patchRejected,
+            stalePreviewRejections: daemonOpsMetrics.stalePreviewRejections,
+            successRate: patchAttempts > 0 ? Number((daemonOpsMetrics.patchApplied / patchAttempts).toFixed(4)) : null,
+        },
+        rollbackStats: {
+            attempts: rollbackAttempts,
+            applied: daemonOpsMetrics.rollbackApplied,
+            rejected: daemonOpsMetrics.rollbackRejected,
+            staleRejections: daemonOpsMetrics.rollbackStaleRejections,
+            successRate: rollbackAttempts > 0 ? Number((daemonOpsMetrics.rollbackApplied / rollbackAttempts).toFixed(4)) : null,
+        },
+        executionLock: {
+            path: lockPath,
+            present: lockPresent,
+            ageMs: lockAgeMs,
+        },
+        recentFailures,
+        recentErrors: daemonOpsMetrics.recentErrors,
+    };
+}
 // ── Request helpers ────────────────────────────────────────────────────────────
 function readBody(req) {
     return new Promise((resolve, reject) => {
@@ -65,7 +224,18 @@ function readBody(req) {
     });
 }
 function send(res, status, body) {
-    const payload = JSON.stringify(body);
+    const requestIdRaw = res.getHeader(REQUEST_ID_HEADER);
+    const requestId = typeof requestIdRaw === 'string' && requestIdRaw.trim().length > 0
+        ? requestIdRaw.trim()
+        : null;
+    const payloadBody = (requestId
+        && body
+        && typeof body === 'object'
+        && !Array.isArray(body)
+        && !Object.prototype.hasOwnProperty.call(body, 'requestId'))
+        ? { ...body, requestId }
+        : body;
+    const payload = JSON.stringify(payloadBody);
     res.writeHead(status, {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
@@ -75,8 +245,52 @@ function send(res, status, body) {
 function success(res, data) {
     send(res, 200, { success: true, data });
 }
-function failure(res, error, status = 200) {
-    send(res, status, { success: false, error });
+function defaultFailureCode(status, error) {
+    if (status === 400)
+        return contracts_1.DAEMON_ERROR_CODES.badRequest;
+    if (status === 401)
+        return contracts_1.DAEMON_ERROR_CODES.unauthorized;
+    if (status === 403)
+        return contracts_1.DAEMON_ERROR_CODES.forbidden;
+    if (status === 404) {
+        if (/no route for/i.test(error))
+            return contracts_1.DAEMON_ERROR_CODES.routeNotFound;
+        return contracts_1.DAEMON_ERROR_CODES.notFound;
+    }
+    if (status === 408)
+        return contracts_1.DAEMON_ERROR_CODES.timeout;
+    if (status === 409)
+        return contracts_1.DAEMON_ERROR_CODES.conflict;
+    if (status === 422)
+        return contracts_1.DAEMON_ERROR_CODES.validationFailed;
+    if (status === 429)
+        return contracts_1.DAEMON_ERROR_CODES.rateLimited;
+    if (status >= 500)
+        return contracts_1.DAEMON_ERROR_CODES.internalError;
+    return contracts_1.DAEMON_ERROR_CODES.unknown;
+}
+function failure(res, error, status = 500, options = {}) {
+    const code = options.code ?? defaultFailureCode(status, error);
+    const retriable = options.retriable ?? status >= 500;
+    const requestIdRaw = res.getHeader(REQUEST_ID_HEADER);
+    const requestId = typeof requestIdRaw === 'string' && requestIdRaw.trim().length > 0
+        ? requestIdRaw.trim()
+        : null;
+    const route = res.__neurcodeRoutePath || '/unknown';
+    recordDaemonFailure({
+        route,
+        requestId,
+        code,
+        message: error,
+        retriable,
+    });
+    send(res, status, {
+        success: false,
+        error,
+        code,
+        retriable,
+        details: options.details ?? null,
+    });
 }
 function addCorsHeaders(res, req) {
     // Wildcard is safe: daemon binds to 127.0.0.1 only and isLoopback() rejects
@@ -86,7 +300,7 @@ function addCorsHeaders(res, req) {
     const requestedHeaders = Array.isArray(requestedHeadersRaw)
         ? requestedHeadersRaw.join(',')
         : (requestedHeadersRaw || '');
-    const allowedHeaders = new Set(['content-type', 'x-neurcode-source', 'x-neurcode-actor']
+    const allowedHeaders = new Set(['content-type', 'x-neurcode-source', 'x-neurcode-actor', REQUEST_ID_HEADER]
         .concat(requestedHeaders.split(',').map((entry) => entry.trim().toLowerCase()).filter(Boolean)));
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
@@ -131,6 +345,28 @@ function captureGitDirtyPaths(cwd) {
     }
     return dirty;
 }
+function hashFileForDiff(absPath) {
+    try {
+        const stat = fs.statSync(absPath);
+        if (!stat.isFile())
+            return '<non-file>';
+        const content = fs.readFileSync(absPath);
+        return (0, node_crypto_1.createHash)('sha256').update(content).digest('hex');
+    }
+    catch {
+        return '<missing>';
+    }
+}
+function captureDirtyFileFingerprints(cwd) {
+    const dirtyPaths = captureGitDirtyPaths(cwd);
+    if (!dirtyPaths)
+        return null;
+    const map = new Map();
+    for (const dirtyPath of dirtyPaths) {
+        map.set(dirtyPath, hashFileForDiff(dirtyPath));
+    }
+    return map;
+}
 function isAllowedPatchSideEffect(absPath, targetAbsPath, cwd) {
     if (absPath === targetAbsPath)
         return true;
@@ -151,6 +387,73 @@ function collectUnexpectedPatchSideEffects(before, after, targetAbsPath, cwd) {
         .filter((entry) => entry.length > 0)
         .sort();
     return unexpected;
+}
+function collectUnexpectedPatchMutations(before, after, targetAbsPath, cwd) {
+    if (!before || !after)
+        return [];
+    const keys = new Set([...before.keys(), ...after.keys()]);
+    const unexpected = [];
+    for (const key of keys) {
+        const beforeHash = before.get(key) ?? '<missing>';
+        const afterHash = after.get(key) ?? '<missing>';
+        if (beforeHash === afterHash)
+            continue;
+        if (isAllowedPatchSideEffect(key, targetAbsPath, cwd))
+            continue;
+        const rel = path.relative(cwd, key).replace(/\\/g, '/');
+        if (rel.length > 0 && !rel.startsWith('..')) {
+            unexpected.push(rel);
+        }
+    }
+    return unexpected.sort();
+}
+function patternDescriptor(kind, confidence, manualReviewRequired) {
+    const labelByKind = {
+        missing_validation: 'API input validation guard',
+        missing_timeout_handling: 'Outbound request timeout guard',
+        unsafe_fetch_without_retries: 'Outbound request retry guard',
+        missing_idempotency_keys: 'Mutation idempotency-key guard',
+        unsafe_file_uploads: 'Upload MIME/size validation guard',
+        missing_auth_middleware: 'Route authentication middleware',
+        missing_rate_limiting: 'Route rate limiting middleware',
+        missing_token_expiry: 'JWT expiry enforcement',
+        unsafe_inner_html_usage: 'Unsafe DOM sink replacement',
+        unsafe_sensitive_logging: 'Sensitive log redaction',
+        db_in_ui: 'Service-layer boundary placeholder',
+        todo_fixme: 'TODO/FIXME debt marker removal',
+    };
+    const confidenceModel = confidence === 'high'
+        ? 'high'
+        : confidence === 'medium'
+            ? 'medium'
+            : 'low';
+    return {
+        kind,
+        label: labelByKind[kind] || kind,
+        deterministic: true,
+        confidenceModel,
+        advisoryOnly: confidenceModel === 'low',
+        manualReviewRequired,
+    };
+}
+function summarizeDiff(diff) {
+    let addedLines = 0;
+    let removedLines = 0;
+    for (const line of diff.split('\n')) {
+        if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@'))
+            continue;
+        if (line.startsWith('+'))
+            addedLines += 1;
+        if (line.startsWith('-'))
+            removedLines += 1;
+    }
+    const changedLines = addedLines + removedLines;
+    return {
+        addedLines,
+        removedLines,
+        changedLines,
+        summary: `${changedLines} changed line(s): +${addedLines} / -${removedLines}`,
+    };
 }
 function extractRequestInputUsage(content) {
     const accessMatch = content.match(/\b(req|request)\.(body|params|query)\b/);
@@ -201,6 +504,78 @@ function buildPatchPreviewReasoning(patternKind, targetPath, beforeContent) {
             why: `${targetPath} appears to perform direct data access in a non-service layer.`,
             risk: 'Layering violations increase coupling and make behavior harder to govern.',
             expectedOutcome: 'Patch inserts a deterministic placeholder to redirect to service-layer logic.',
+        };
+    }
+    if (patternKind === 'missing_auth_middleware') {
+        return {
+            summary: 'Adds deterministic authentication middleware to the route definition.',
+            why: `${targetPath} appears to expose a request handler without an auth middleware guard.`,
+            risk: 'Unauthenticated routes can expose sensitive behavior to unauthorized clients.',
+            expectedOutcome: 'Route execution is gated by requireAuth before handler logic runs.',
+        };
+    }
+    if (patternKind === 'missing_rate_limiting') {
+        return {
+            summary: 'Adds deterministic rate-limit middleware to the route definition.',
+            why: `${targetPath} appears to expose a request handler without rate limiting controls.`,
+            risk: 'Unbounded request rates can increase abuse, cost, and availability risks.',
+            expectedOutcome: 'Route applies rateLimitGuard before handler execution.',
+        };
+    }
+    if (patternKind === 'missing_timeout_handling') {
+        return {
+            summary: 'Adds deterministic timeout guard to outbound fetch call.',
+            why: `${targetPath} issues a fetch request without timeout protection.`,
+            risk: 'Unbounded network calls can hang request execution and degrade reliability under upstream latency.',
+            expectedOutcome: 'Fetch call aborts after timeout and fails fast instead of hanging.',
+        };
+    }
+    if (patternKind === 'unsafe_fetch_without_retries') {
+        return {
+            summary: 'Wraps outbound fetch call in deterministic retry guard.',
+            why: `${targetPath} makes outbound network calls without transient failure retry handling.`,
+            risk: 'Single transient failures can become user-facing errors and increase instability.',
+            expectedOutcome: 'Transient upstream failures retry deterministically before failing.',
+        };
+    }
+    if (patternKind === 'missing_idempotency_keys') {
+        return {
+            summary: 'Adds deterministic idempotency-key guard for side-effecting requests.',
+            why: `${targetPath} appears to process payment/order-like mutations without idempotency key enforcement.`,
+            risk: 'Duplicate requests can cause repeated side effects (double charges/orders).',
+            expectedOutcome: 'Requests missing idempotency key fail early with explicit error.',
+        };
+    }
+    if (patternKind === 'unsafe_file_uploads') {
+        return {
+            summary: 'Adds deterministic MIME and size guards for uploaded files.',
+            why: `${targetPath} appears to process uploaded files without boundary checks.`,
+            risk: 'Unbounded or unsafe uploads increase security and stability risk.',
+            expectedOutcome: 'Invalid upload payloads are rejected before processing.',
+        };
+    }
+    if (patternKind === 'missing_token_expiry') {
+        return {
+            summary: 'Adds deterministic token expiry to JWT signing call.',
+            why: `${targetPath} signs JWT tokens without an expiresIn option.`,
+            risk: 'Long-lived tokens increase replay and account-compromise blast radius.',
+            expectedOutcome: 'Tokens gain explicit expiry to enforce credential rotation windows.',
+        };
+    }
+    if (patternKind === 'unsafe_inner_html_usage') {
+        return {
+            summary: 'Replaces unsafe innerHTML assignment with textContent.',
+            why: `${targetPath} writes HTML content directly into the DOM using innerHTML.`,
+            risk: 'innerHTML assignments can expose XSS vectors when input is not trusted.',
+            expectedOutcome: 'DOM assignment becomes text-only rendering with reduced injection risk.',
+        };
+    }
+    if (patternKind === 'unsafe_sensitive_logging') {
+        return {
+            summary: 'Removes deterministic sensitive logging line.',
+            why: `${targetPath} appears to log secret-bearing fields (token/authorization/password).`,
+            risk: 'Sensitive log content can leak credentials to observability or audit sinks.',
+            expectedOutcome: 'Sensitive logging path is replaced with a neutral warning placeholder.',
         };
     }
     if (patternKind === 'todo_fixme') {
@@ -271,9 +646,18 @@ function normalizeVerifyPayloadForLegacyClients(payload) {
         .map((entry) => toLegacyViolation(entry, 'warn'))
         .filter((entry) => entry !== null);
     const merged = [...existingViolations];
-    const seen = new Set(merged.map((entry) => `${entry.file}::${entry.rule}::${entry.message}::${entry.severity}`));
+    const canonicalSeverity = (value) => {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'block' || normalized === 'critical' || normalized === 'high')
+            return 'block';
+        if (normalized === 'warn' || normalized === 'warning' || normalized === 'advisory' || normalized === 'medium' || normalized === 'low')
+            return 'warn';
+        return normalized;
+    };
+    const canonicalKey = (entry) => `${entry.file}::${entry.rule}::${entry.message}::${canonicalSeverity(entry.severity)}`;
+    const seen = new Set(merged.map((entry) => canonicalKey(entry)));
     for (const item of [...blockingItems, ...advisoryItems, ...warnings]) {
-        const key = `${item.file}::${item.rule}::${item.message}::${item.severity}`;
+        const key = canonicalKey(item);
         if (seen.has(key))
             continue;
         seen.add(key);
@@ -286,7 +670,48 @@ function normalizeVerifyPayloadForLegacyClients(payload) {
         violations: merged,
     };
 }
+function normalizeFixPayloadForLegacyClients(payload) {
+    if (!payload)
+        return null;
+    const suggestions = asObjectArray(payload.suggestions);
+    if (suggestions.length === 0)
+        return payload;
+    const deduped = [];
+    const seen = new Set();
+    for (const suggestion of suggestions) {
+        const file = typeof suggestion.file === 'string' ? suggestion.file.trim() : '';
+        const line = typeof suggestion.line === 'number' && Number.isFinite(suggestion.line)
+            ? String(Math.floor(suggestion.line))
+            : '';
+        const message = typeof suggestion.message === 'string' ? suggestion.message.trim() : '';
+        const rule = typeof suggestion.rule === 'string'
+            ? suggestion.rule.trim()
+            : typeof suggestion.policy === 'string'
+                ? suggestion.policy.trim()
+                : '';
+        const confidence = typeof suggestion.confidence === 'string' ? suggestion.confidence.trim().toLowerCase() : '';
+        const patch = asObjectRecord(suggestion.patch);
+        const patchDiff = patch && typeof patch.diff === 'string' ? patch.diff : '';
+        const key = `${file}::${line}::${rule}::${message}::${confidence}::${(0, node_crypto_1.createHash)('sha1').update(patchDiff).digest('hex')}`;
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        deduped.push(suggestion);
+    }
+    if (deduped.length === suggestions.length)
+        return payload;
+    return {
+        ...payload,
+        suggestions: deduped,
+        _normalization: {
+            ...(asObjectRecord(payload._normalization) || {}),
+            suggestionsDeduped: suggestions.length - deduped.length,
+        },
+    };
+}
 function isLoopback(req) {
+    if (ALLOW_NON_LOOPBACK)
+        return true;
     const addr = req.socket.remoteAddress ?? '';
     return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
@@ -561,9 +986,10 @@ async function handleFix(req, res) {
         failure(res, run.execution.result?.message || 'fix execution produced no payload');
         return;
     }
+    const normalizedFixPayload = normalizeFixPayloadForLegacyClients(run.primaryPayload) ?? run.primaryPayload;
     const normalizedVerifyAfter = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
     success(res, {
-        ...run.primaryPayload,
+        ...normalizedFixPayload,
         verifyAfter: normalizedVerifyAfter ?? null,
         _execution: {
             id: run.execution.id,
@@ -589,9 +1015,10 @@ async function handleFixApplySafe(req, res) {
         failure(res, run.execution.result?.message || 'fix --apply-safe execution produced no payload');
         return;
     }
+    const normalizedFixPayload = normalizeFixPayloadForLegacyClients(run.primaryPayload) ?? run.primaryPayload;
     const normalizedVerifyAfter = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
     success(res, {
-        ...run.primaryPayload,
+        ...normalizedFixPayload,
         verifyAfter: normalizedVerifyAfter ?? null,
         execution: run.execution,
     });
@@ -610,16 +1037,24 @@ async function handlePatch(req, res) {
         failure(res, 'Missing or unsafe "file" field', 400);
         return;
     }
+    const previewToken = typeof body.previewToken === 'string' && body.previewToken.trim().length > 0
+        ? body.previewToken.trim()
+        : undefined;
     const cwd = process.cwd();
     const targetPath = file.trim();
     const absPath = path.resolve(cwd, targetPath);
     const beforeDirtyPaths = captureGitDirtyPaths(cwd);
+    const beforeDirtyFingerprints = captureDirtyFileFingerprints(cwd);
     // Capture file content before patch to detect real change
     let contentBefore = null;
     try {
         contentBefore = fs.readFileSync(absPath, 'utf-8');
     }
     catch { /* file may not exist */ }
+    const primaryArgs = ['patch', '--file', targetPath];
+    if (previewToken) {
+        primaryArgs.push('--preview-token', previewToken);
+    }
     const run = await (0, execution_bus_1.runExecution)({
         type: 'patch',
         source: toSource(req),
@@ -627,6 +1062,7 @@ async function handlePatch(req, res) {
         target: targetPath,
         cwd,
         reverify: true,
+        primaryArgs,
     });
     const patchData = run.primaryPayload ?? {
         success: false,
@@ -643,38 +1079,52 @@ async function handlePatch(req, res) {
         catch { /* ignore read error */ }
     }
     const afterDirtyPaths = captureGitDirtyPaths(cwd);
+    const afterDirtyFingerprints = captureDirtyFileFingerprints(cwd);
     const sideEffects = collectUnexpectedPatchSideEffects(beforeDirtyPaths, afterDirtyPaths, absPath, cwd);
+    const mutatedSideEffects = collectUnexpectedPatchMutations(beforeDirtyFingerprints, afterDirtyFingerprints, absPath, cwd);
+    const combinedSideEffects = [...new Set([...sideEffects, ...mutatedSideEffects])].sort();
     const payloadFile = typeof patchData.file === 'string' ? patchData.file : '';
     const payloadTargetMatch = payloadFile.length > 0
         ? path.resolve(cwd, payloadFile) === absPath
         : true;
     const patchSucceeded = patchData.success === true;
-    const patchStatus = !patchSucceeded
-        ? 'rejected'
-        : changed && payloadTargetMatch && sideEffects.length === 0
-            ? 'applied'
-            : changed
-                ? 'partial'
-                : 'rejected';
+    const rawPatchStatus = typeof patchData.status === 'string' ? patchData.status : '';
+    const patchStatus = rawPatchStatus === 'filesystem_changed_since_preview'
+        ? 'stale_preview'
+        : !patchSucceeded
+            ? 'rejected'
+            : changed && payloadTargetMatch && combinedSideEffects.length === 0
+                ? 'applied'
+                : changed
+                    ? 'partial'
+                    : 'rejected';
     const patchMessage = (() => {
         if (patchStatus === 'applied') {
             return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
                 ? patchData.message
-                : 'Patch applied successfully';
+                : `${contracts_1.STATUS_TERMS.safePatchApplied}`;
         }
         if (patchStatus === 'partial') {
             if (!payloadTargetMatch) {
-                return 'Patch target mismatch detected. Requested file and daemon payload file differ.';
+                return `${contracts_1.STATUS_TERMS.patchRejected}: patch target mismatch detected between requested file and daemon payload file.`;
             }
-            if (sideEffects.length > 0) {
-                return `Patch introduced side effects in ${sideEffects.length} additional file(s).`;
+            if (combinedSideEffects.length > 0) {
+                return `${contracts_1.STATUS_TERMS.patchRejected}: patch introduced side effects in ${combinedSideEffects.length} additional file(s).`;
             }
-            return 'Patch applied but requires manual review.';
+            return `${contracts_1.STATUS_TERMS.safePatchApplied}. ${contracts_1.STATUS_TERMS.manualReviewRecommended}.`;
+        }
+        if (patchStatus === 'stale_preview') {
+            return `${contracts_1.STATUS_TERMS.filesystemChangedSincePreview}. Regenerate patch preview and retry. ${contracts_1.STATUS_TERMS.retrySafe}.`;
         }
         return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
             ? patchData.message
-            : 'Patch rejected; no deterministic file-scoped change applied';
+            : `${contracts_1.STATUS_TERMS.patchRejected}; no deterministic file-scoped change applied`;
     })();
+    const reverifyRequired = patchStatus === 'applied' || patchStatus === 'partial';
+    const stateLabel = patchStatus === 'stale_preview'
+        ? contracts_1.STATUS_TERMS.filesystemChangedSincePreview.toLowerCase()
+        : (0, contracts_1.toPatchStateLabel)(patchStatus).toLowerCase();
+    recordPatchOutcome(patchStatus);
     const normalizedVerifyPayload = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
     success(res, {
         patch: {
@@ -685,10 +1135,122 @@ async function handlePatch(req, res) {
             changed,
             status: patchStatus,
             targetMatch: payloadTargetMatch,
-            sideEffects,
+            sideEffects: combinedSideEffects,
             message: patchMessage,
+            reverifyRequired,
+            stateLabel,
+            previewTokenUsed: previewToken ? true : false,
         },
         verify: normalizedVerifyPayload ?? null,
+        execution: run.execution,
+    });
+}
+async function handlePatchRollback(req, res) {
+    let body = {};
+    try {
+        body = JSON.parse(await readBody(req));
+    }
+    catch {
+        failure(res, 'Invalid JSON body', 400);
+        return;
+    }
+    const file = body.file;
+    const receiptId = typeof body.receiptId === 'string' ? body.receiptId.trim() : '';
+    if (!file || typeof file !== 'string' || file.includes('..')) {
+        failure(res, 'Missing or unsafe "file" field', 400);
+        return;
+    }
+    if (!receiptId) {
+        failure(res, 'Missing "receiptId" field', 400);
+        return;
+    }
+    const cwd = process.cwd();
+    const targetPath = file.trim();
+    const absPath = path.resolve(cwd, targetPath);
+    const beforeDirtyPaths = captureGitDirtyPaths(cwd);
+    const beforeDirtyFingerprints = captureDirtyFileFingerprints(cwd);
+    let contentBefore = null;
+    try {
+        contentBefore = fs.readFileSync(absPath, 'utf-8');
+    }
+    catch { /* file may not exist */ }
+    const run = await (0, execution_bus_1.runExecution)({
+        type: 'patch',
+        source: toSource(req),
+        actor: toActor(req),
+        target: targetPath,
+        cwd,
+        reverify: true,
+        primaryArgs: ['patch', '--file', targetPath, '--rollback-receipt', receiptId, '--json'],
+    });
+    const patchData = run.primaryPayload ?? {
+        success: false,
+        file: targetPath,
+        message: run.execution.result?.message || 'No rollback receipt could be applied',
+    };
+    let changed = false;
+    if (patchData.success && contentBefore !== null) {
+        try {
+            const contentAfter = fs.readFileSync(absPath, 'utf-8');
+            changed = contentAfter !== contentBefore;
+        }
+        catch {
+            // ignore read error
+        }
+    }
+    const afterDirtyPaths = captureGitDirtyPaths(cwd);
+    const afterDirtyFingerprints = captureDirtyFileFingerprints(cwd);
+    const sideEffects = collectUnexpectedPatchSideEffects(beforeDirtyPaths, afterDirtyPaths, absPath, cwd);
+    const mutatedSideEffects = collectUnexpectedPatchMutations(beforeDirtyFingerprints, afterDirtyFingerprints, absPath, cwd);
+    const combinedSideEffects = [...new Set([...sideEffects, ...mutatedSideEffects])].sort();
+    const payloadFile = typeof patchData.file === 'string' ? patchData.file : '';
+    const payloadTargetMatch = payloadFile.length > 0
+        ? path.resolve(cwd, payloadFile) === absPath
+        : true;
+    const rawStatus = typeof patchData.status === 'string' ? patchData.status : '';
+    const rollbackStatus = rawStatus === 'rollback_applied'
+        ? 'rollback_applied'
+        : rawStatus === 'rollback_stale' || rawStatus === 'filesystem_changed_since_patch'
+            ? 'rollback_stale'
+            : 'rollback_rejected';
+    const rollbackSucceeded = patchData.success === true && rollbackStatus === 'rollback_applied' && payloadTargetMatch && combinedSideEffects.length === 0;
+    const rollbackMessage = (() => {
+        if (rollbackSucceeded) {
+            return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
+                ? patchData.message
+                : contracts_1.STATUS_TERMS.rollbackApplied;
+        }
+        if (!payloadTargetMatch) {
+            return `${contracts_1.STATUS_TERMS.patchRejected}: rollback receipt target mismatch detected.`;
+        }
+        if (combinedSideEffects.length > 0) {
+            return `${contracts_1.STATUS_TERMS.patchRejected}: rollback side effects detected in ${combinedSideEffects.length} additional file(s).`;
+        }
+        return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
+            ? patchData.message
+            : contracts_1.STATUS_TERMS.patchRejected;
+    })();
+    recordPatchOutcome(rollbackStatus);
+    success(res, {
+        patch: {
+            ...patchData,
+            file: payloadFile || targetPath,
+            success: rollbackSucceeded,
+            rawSuccess: patchData.success === true,
+            changed,
+            status: rollbackStatus,
+            targetMatch: payloadTargetMatch,
+            sideEffects: combinedSideEffects,
+            message: rollbackMessage,
+            reverifyRequired: rollbackSucceeded,
+            stateLabel: rollbackSucceeded
+                ? contracts_1.STATUS_TERMS.rollbackApplied.toLowerCase()
+                : rollbackStatus === 'rollback_stale'
+                    ? contracts_1.STATUS_TERMS.filesystemChangedSincePreview.toLowerCase()
+                    : contracts_1.STATUS_TERMS.patchRejected.toLowerCase(),
+            previewTokenUsed: false,
+        },
+        verify: normalizeVerifyPayloadForLegacyClients(run.verificationPayload) ?? null,
         execution: run.execution,
     });
 }
@@ -730,23 +1292,56 @@ async function handlePatchPreview(req, res) {
             changed: false,
             patternKind: null,
             patchConfidence: null,
+            patchHash: null,
+            previewToken: null,
+            validation: null,
+            recipe: null,
+            pattern: null,
+            whatChanges: null,
+            rollbackPreviewDiff: null,
+            whySafe: null,
+            manualReviewRequired: true,
+            supportedDeterministicPattern: false,
             reasoning: null,
         });
         return;
     }
     const reasoning = buildPatchPreviewReasoning(preview.patternKind, targetPath, contentBefore);
-    if (preview.patchConfidence === 'low') {
+    const rollbackPreviewDiff = (0, diff_1.generateUnifiedDiff)(targetPath, preview.updatedContent, contentBefore);
+    const changeSummary = summarizeDiff(preview.diff);
+    const manualReviewRequired = preview.patchConfidence === 'low'
+        || preview.validation.safe !== true
+        || preview.recipe.requiresManualReview === true;
+    const pattern = patternDescriptor(preview.patternKind, preview.patchConfidence, manualReviewRequired);
+    const whySafe = {
+        deterministic: true,
+        validationPassed: preview.validation.safe === true,
+        confidence: preview.patchConfidence,
+        checks: preview.validation.checks,
+        reasonCodes: preview.validation.reasonCodes,
+    };
+    if (!preview.validation.safe) {
         success(res, {
             success: false,
             file: targetPath,
             status: 'rejected',
-            message: `Low-confidence advisory patch (${preview.patternKind}) rejected for deterministic apply. Use neurcode fix guidance and patch manually.`,
+            message: `Patch preview rejected by deterministic safety validation (${preview.validation.reasonCodes.join(', ') || 'unknown'}).`,
             beforeContent: contentBefore,
             afterContent: null,
             diff: preview.diff,
             changed: false,
             patternKind: preview.patternKind,
             patchConfidence: preview.patchConfidence,
+            patchHash: preview.patchHash,
+            previewToken: preview.previewToken,
+            validation: preview.validation,
+            recipe: preview.recipe,
+            pattern,
+            whatChanges: changeSummary,
+            rollbackPreviewDiff,
+            whySafe,
+            manualReviewRequired,
+            supportedDeterministicPattern: true,
             reasoning,
         });
         return;
@@ -762,6 +1357,16 @@ async function handlePatchPreview(req, res) {
         changed: contentBefore !== preview.updatedContent,
         patternKind: preview.patternKind,
         patchConfidence: preview.patchConfidence,
+        patchHash: preview.patchHash,
+        previewToken: preview.previewToken,
+        validation: preview.validation,
+        recipe: preview.recipe,
+        pattern,
+        whatChanges: changeSummary,
+        rollbackPreviewDiff,
+        whySafe,
+        manualReviewRequired,
+        supportedDeterministicPattern: true,
         reasoning,
     });
 }
@@ -1273,6 +1878,15 @@ async function handleRuntimeEventStream(req, res) {
 // ── Server factory ─────────────────────────────────────────────────────────────
 function createDaemonServer() {
     const server = http.createServer(async (req, res) => {
+        const incomingRequestIdRaw = req.headers[REQUEST_ID_HEADER];
+        const incomingRequestId = Array.isArray(incomingRequestIdRaw)
+            ? incomingRequestIdRaw[0]
+            : incomingRequestIdRaw;
+        const requestId = (typeof incomingRequestId === 'string'
+            && incomingRequestId.trim().length > 0)
+            ? incomingRequestId.trim().slice(0, 128)
+            : `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+        res.setHeader(REQUEST_ID_HEADER, requestId);
         addCorsHeaders(res, req);
         if (req.method === 'OPTIONS') {
             res.writeHead(204);
@@ -1285,6 +1899,9 @@ function createDaemonServer() {
         }
         const url = req.url ?? '/';
         const method = req.method ?? 'GET';
+        const normalizedRoutePath = normalizeRoutePath(url);
+        recordDaemonRequest(normalizedRoutePath, method);
+        res.__neurcodeRoutePath = normalizedRoutePath;
         try {
             if (method === 'GET' && url === '/health') {
                 let version = '0.0.0';
@@ -1293,10 +1910,12 @@ function createDaemonServer() {
                     version = JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version ?? version;
                 }
                 catch { /* ignore */ }
+                const operational = buildDaemonOperationalSummary(process.cwd());
                 send(res, 200, {
                     ok: true,
                     version,
                     cwd: process.cwd(),
+                    operational,
                     executionBus: {
                         schemaVersion: 'neurcode.execution.v1',
                         supportedActions: ['verify', 'fix', 'patch', 'apply-safe', 'reverify', 'policy-sync', 'intent-update'],
@@ -1304,6 +1923,11 @@ function createDaemonServer() {
                     runtimeEvents: {
                         schemaVersion: 'neurcode.runtime-event.v1',
                         streamPath: '/events/stream',
+                    },
+                    compatibility: {
+                        runtimeContractVersion: contracts_1.RUNTIME_COMPATIBILITY_CONTRACT_VERSION,
+                        cliJsonContractVersion: contracts_1.CLI_JSON_CONTRACT_VERSION,
+                        statusVocabularyVersion: contracts_1.STATUS_VOCABULARY_VERSION,
                     },
                     controlPlane: {
                         schemaVersion: 'neurcode.control-plane.v1',
@@ -1317,6 +1941,14 @@ function createDaemonServer() {
                         schemaVersion: 'neurcode.replay.state.v1',
                         path: '/replay/state',
                     },
+                });
+                return;
+            }
+            if (method === 'GET' && (url === '/ops/summary' || url.startsWith('/ops/summary?'))) {
+                success(res, {
+                    schemaVersion: 'neurcode.daemon.ops.v1',
+                    generatedAt: new Date().toISOString(),
+                    operational: buildDaemonOperationalSummary(process.cwd()),
                 });
                 return;
             }
@@ -1455,6 +2087,10 @@ function createDaemonServer() {
                 await handlePatchPreview(req, res);
                 return;
             }
+            if (method === 'POST' && (url === '/patch/rollback' || url.startsWith('/patch/rollback?'))) {
+                await handlePatchRollback(req, res);
+                return;
+            }
             if (method === 'POST' && (url === '/patch' || url.startsWith('/patch?'))) {
                 await handlePatch(req, res);
                 return;
@@ -1462,15 +2098,68 @@ function createDaemonServer() {
             failure(res, `No route for ${method} ${url}`, 404);
         }
         catch (err) {
-            failure(res, err instanceof Error ? err.message : String(err), 500);
+            const message = err instanceof Error ? err.message : String(err);
+            if (/execution lock busy|EEXIST: file already exists, open '.*\/\.lock'/.test(message)) {
+                failure(res, 'Execution lock busy. Another daemon action is running; retry this request.', 409, {
+                    code: 'daemon.execution_lock_busy',
+                    retriable: true,
+                    details: { cause: message },
+                });
+                return;
+            }
+            failure(res, message, 500);
         }
     });
     return server;
 }
 // ── Start function ─────────────────────────────────────────────────────────────
+function validateDaemonStartup(cwd) {
+    const errors = [];
+    const warnings = [];
+    const nodeMajor = Number.parseInt(process.versions.node.split('.')[0] || '0', 10);
+    if (!Number.isFinite(nodeMajor) || nodeMajor < 18) {
+        errors.push(`Node.js >= 18 is required (detected ${process.versions.node}).`);
+    }
+    try {
+        const stat = fs.statSync(cwd);
+        if (!stat.isDirectory()) {
+            errors.push(`Current working directory is not a directory: ${cwd}`);
+        }
+    }
+    catch (error) {
+        errors.push(`Cannot access working directory ${cwd}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+        const runtimeDir = path.resolve(cwd, '.neurcode');
+        fs.mkdirSync(runtimeDir, { recursive: true });
+        fs.accessSync(runtimeDir, fs.constants.R_OK | fs.constants.W_OK);
+    }
+    catch (error) {
+        errors.push(`Runtime state directory .neurcode is not writable in ${cwd}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const apiUrl = process.env.NEURCODE_API_URL || process.env.VITE_API_URL;
+    if (!apiUrl) {
+        warnings.push('NEURCODE_API_URL is not set; cloud compatibility probes may rely on default localhost API settings.');
+    }
+    if (ALLOW_NON_LOOPBACK) {
+        warnings.push('Remote daemon access is enabled via NEURCODE_DAEMON_ALLOW_REMOTE. Ensure network access is restricted and trusted.');
+    }
+    return { errors, warnings };
+}
 function startDaemon() {
+    const cwd = process.cwd();
+    const startupValidation = validateDaemonStartup(cwd);
+    for (const warning of startupValidation.warnings) {
+        console.warn(`⚠️  Daemon startup warning: ${warning}`);
+    }
+    if (startupValidation.errors.length > 0) {
+        for (const error of startupValidation.errors) {
+            console.error(`❌ Daemon startup validation error: ${error}`);
+        }
+        process.exit(1);
+    }
     const server = createDaemonServer();
-    startRuntimeEventTailer(process.cwd());
+    startRuntimeEventTailer(cwd);
     if (!runtimeEventUnsubscribe) {
         runtimeEventUnsubscribe = (0, runtime_events_1.onRuntimeEvent)((event) => {
             broadcastRuntimeEvent(event);
@@ -1493,6 +2182,7 @@ function startDaemon() {
         console.log(`  POST /fix            → execution bus: fix + reverify`);
         console.log(`  POST /fix/apply-safe → execution bus: apply-safe + reverify`);
         console.log(`  POST /patch/preview  → deterministic patch preview (before/after diff)`);
+        console.log(`  POST /patch/rollback → deterministic rollback apply by receipt`);
         console.log(`  POST /patch          → execution bus: patch + reverify`);
         console.log(`  POST /execute        → unified execution endpoint`);
         console.log(`  GET  /executions     → execution history`);
@@ -1501,6 +2191,7 @@ function startDaemon() {
         console.log(`  GET  /executions/:id/diff     → verification + patch inspection`);
         console.log(`  GET  /events         → runtime event history`);
         console.log(`  GET  /events/stream  → SSE deterministic governance runtime`);
+        console.log(`  GET  /ops/summary    → daemon operational health + reliability metrics`);
         console.log(`  GET  /control-plane  → governance control-plane state + snapshots`);
         console.log(`  POST /control-plane/preview → deterministic config impact preview`);
         console.log(`  PUT  /control-plane  → apply deterministic governance config update`);
@@ -1517,7 +2208,7 @@ function startDaemon() {
         console.log(`  GET  /replay/execution/:id → deterministic execution replay`);
         console.log(`  GET  /replay/workspace/:id → deterministic workspace replay`);
         console.log(`  GET  /replay/timeline → deterministic governance timeline replay`);
-        console.log(`\n  CWD: ${process.cwd()}`);
+        console.log(`\n  CWD: ${cwd}`);
         console.log(`  Press Ctrl+C to stop.\n`);
     });
     const stop = () => {

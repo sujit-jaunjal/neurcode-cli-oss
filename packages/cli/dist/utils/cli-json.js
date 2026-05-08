@@ -30,24 +30,92 @@ function stripAnsi(value) {
  */
 function extractLastJsonObject(output) {
     const clean = stripAnsi(output).trim();
-    const end = clean.lastIndexOf('}');
-    if (end === -1)
+    if (!clean)
         return null;
-    for (let start = end; start >= 0; start -= 1) {
-        if (clean[start] !== '{')
-            continue;
-        const candidate = clean.slice(start, end + 1);
-        try {
-            const parsed = JSON.parse(candidate);
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                return parsed;
+    const parsedCandidates = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < clean.length; i += 1) {
+        const ch = clean[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+                continue;
             }
+            if (ch === '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch === '"') {
+                inString = false;
+            }
+            continue;
         }
-        catch {
-            // Keep searching until a parseable JSON object is found.
+        if (ch === '"') {
+            inString = true;
+            continue;
+        }
+        if (ch === '{') {
+            if (depth === 0) {
+                start = i;
+            }
+            depth += 1;
+            continue;
+        }
+        if (ch === '}') {
+            if (depth === 0)
+                continue;
+            depth -= 1;
+            if (depth !== 0 || start === -1)
+                continue;
+            const candidate = clean.slice(start, i + 1);
+            try {
+                const parsed = JSON.parse(candidate);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    parsedCandidates.push({
+                        parsed: parsed,
+                        length: candidate.length,
+                        index: start,
+                    });
+                }
+            }
+            catch {
+                // Ignore malformed candidate and keep scanning.
+            }
+            start = -1;
         }
     }
-    return null;
+    if (parsedCandidates.length === 0)
+        return null;
+    const scoreCandidate = (candidate) => {
+        // Prefer canonical verify/fix payloads over small incidental JSON fragments.
+        let score = 0;
+        if (typeof candidate.verdict === 'string')
+            score += 200;
+        if (Array.isArray(candidate.violations))
+            score += 150;
+        if (Array.isArray(candidate.warnings))
+            score += 100;
+        if (Array.isArray(candidate.suggestions))
+            score += 120;
+        if (typeof candidate.grade === 'string')
+            score += 80;
+        if (typeof candidate.success === 'boolean')
+            score += 40;
+        return score;
+    };
+    const sorted = [...parsedCandidates].sort((left, right) => {
+        const scoreDelta = scoreCandidate(right.parsed) - scoreCandidate(left.parsed);
+        if (scoreDelta !== 0)
+            return scoreDelta;
+        const lengthDelta = right.length - left.length;
+        if (lengthDelta !== 0)
+            return lengthDelta;
+        return right.index - left.index;
+    });
+    return sorted[0].parsed;
 }
 /* -------------------------------------------------------------------------- */
 /*  Typed helpers                                                             */

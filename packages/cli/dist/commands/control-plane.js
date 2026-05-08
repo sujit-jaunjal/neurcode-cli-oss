@@ -62,10 +62,10 @@ function toExecutionSource(input) {
 function controlPlaneCommand(program) {
     const root = program
         .command('control-plane')
-        .description('Inspect and update deterministic governance control-plane configuration');
+        .description('Inspect and update deterministic governance settings');
     root
         .command('show')
-        .description('Show current control-plane state and snapshot metadata')
+        .description('Show current governance settings and snapshot metadata')
         .option('--json', 'Output JSON')
         .action((options) => {
         const state = (0, control_plane_1.readControlPlaneState)(process.cwd());
@@ -74,7 +74,7 @@ function controlPlaneCommand(program) {
             console.log(asPrettyJson({ state, snapshots }));
             return;
         }
-        console.log('\nGovernance Control Plane\n');
+        console.log('\nGovernance Settings\n');
         console.log(`Schema: ${state.schemaVersion}`);
         console.log(`Generated: ${state.generatedAt}`);
         console.log(`Root: ${state.rootDir}`);
@@ -88,7 +88,7 @@ function controlPlaneCommand(program) {
     });
     root
         .command('preview')
-        .description('Preview deterministic impact of a control-plane patch')
+        .description('Preview deterministic impact of a governance settings patch')
         .option('--patch <json>', 'Inline JSON patch object')
         .option('--patch-file <path>', 'Path to JSON patch file')
         .option('--json', 'Output JSON')
@@ -100,7 +100,7 @@ function controlPlaneCommand(program) {
                 console.log(asPrettyJson(preview));
                 return;
             }
-            console.log('\nControl-plane impact preview\n');
+            console.log('\nGovernance settings impact preview\n');
             console.log(`Risk level: ${preview.impact.riskLevel}`);
             console.log(`Changed sections: ${preview.impact.changedSections.join(', ') || 'none'}`);
             console.log(`Changed keys: ${preview.impact.changedKeys.length}`);
@@ -123,7 +123,7 @@ function controlPlaneCommand(program) {
     });
     root
         .command('apply')
-        .description('Apply control-plane patch, snapshot changes, and emit governance execution records')
+        .description('Apply governance settings patch, snapshot changes, and emit activity records')
         .option('--patch <json>', 'Inline JSON patch object')
         .option('--patch-file <path>', 'Path to JSON patch file')
         .option('--reason <text>', 'Audit reason for this configuration change')
@@ -143,7 +143,7 @@ function controlPlaneCommand(program) {
                 console.log(asPrettyJson(result));
                 return;
             }
-            console.log('\n✅ Control-plane update applied\n');
+            console.log('\n✅ Governance settings update applied\n');
             console.log(`Snapshot: ${result.snapshotId || 'n/a'}`);
             if (result.snapshotPath)
                 console.log(`Snapshot path: ${result.snapshotPath}`);

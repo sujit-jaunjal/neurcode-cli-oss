@@ -12,7 +12,8 @@ const DB_IMPORT_PATTERN = /import\s+.*from\s+['"][^'"]*\/(db|database|prisma|kne
 const DB_CALL_PATTERN = /\b(db|prisma|knex|sequelize|drizzle|pool|client)\s*\.\s*(query|execute|findMany|findOne|findFirst|findUnique|create|update|delete|upsert|raw|select|insert)\s*\(/;
 const UI_PATH_PATTERN = /(\/|^)(components?|pages?|views?|screens?|containers?|app|ui)[/\\]|\.tsx$/i;
 const VALIDATION_PATTERN = /\b(zod|joi|yup|valibot|ajv|class-validator|express-validator|validate|sanitize|schema\.parse|\.validate\()\b/i;
-const REQ_BODY_PATTERN = /\breq\.body\b/;
+const DETERMINISTIC_REQUEST_GUARD_PATTERN = /\bif\s*\(\s*!\s*(?:req|request)\.(?:body|params|query)\b|\bArray\.isArray\s*\(\s*(?:req|request)\.(?:body|params|query)\s*\)|\btypeof\s+(?:req|request)\.(?:body|params|query)\s*!==\s*['"]object['"]/i;
+const REQ_BODY_PATTERN = /\b(?:req|request)\.body\b/;
 const API_PATH_PATTERN = /(\/|^)(routes?|controllers?|handlers?|api|endpoints?)[/\\]/i;
 const DEFAULT_THRESHOLDS = {
     maxAddedTodoFixme: 0,
@@ -270,7 +271,9 @@ function detectArchitecturalViolations(diffFiles) {
         }
         // missing_validation: API handler file that reads req.body without any validation library
         if (API_PATH_PATTERN.test(filePath) || filePath.endsWith('.ts') || filePath.endsWith('.js')) {
-            if (REQ_BODY_PATTERN.test(addedText) && !VALIDATION_PATTERN.test(addedText)) {
+            if (REQ_BODY_PATTERN.test(addedText)
+                && !VALIDATION_PATTERN.test(addedText)
+                && !DETERMINISTIC_REQUEST_GUARD_PATTERN.test(addedText)) {
                 missingValidationFiles.push(filePath);
             }
         }

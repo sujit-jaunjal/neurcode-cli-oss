@@ -21,6 +21,8 @@ const COMPONENT_SIGNALS = {
         weak: [
             /\.validate\s*\(|\.sanitize\s*\(/i,
             /\bschema\s*=\s*\{|const\s+\w+Schema\b/i,
+            /\bif\s*\(\s*!\s*(?:req|request)\.(?:body|params|query)\b/i,
+            /\btypeof\s+(?:req|request)\.(?:body|params|query)\s*!==\s*['"]object['"]/i,
         ],
     },
     'token-generation': {

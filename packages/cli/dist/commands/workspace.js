@@ -105,10 +105,10 @@ function parseWorkspaceRepositories(options) {
 function workspaceCommand(program) {
     const root = program
         .command('workspace')
-        .description('Deterministic multi-repository workspace governance orchestration');
+        .description('Deterministic team governance across multiple repositories');
     root
         .command('list')
-        .description('List configured governance workspaces')
+        .description('List configured team workspaces')
         .option('--json', 'Output JSON')
         .action((options) => {
         const items = (0, workspace_runtime_1.listWorkspaces)(process.cwd());
@@ -126,7 +126,7 @@ function workspaceCommand(program) {
             console.log('  neurcode workspace create --name "My Workspace"\n');
             return;
         }
-        console.log('\nGovernance Workspaces\n');
+        console.log('\nTeam Workspaces\n');
         for (const workspace of items) {
             const target = workspace.posture.targetRisk;
             const enforcement = workspace.posture.enforcement;
@@ -136,7 +136,7 @@ function workspaceCommand(program) {
     });
     root
         .command('show [workspaceId]')
-        .description('Show workspace runtime posture, cross-repo health matrix, hotspots, and runtime activity')
+        .description('Show team posture, cross-repo health matrix, hotspots, and recent activity')
         .option('--actor <actor>', 'Actor for role resolution')
         .option('--json', 'Output JSON')
         .action((workspaceId, options) => {
@@ -156,7 +156,7 @@ function workspaceCommand(program) {
             return;
         }
         const posture = snapshot.posture;
-        console.log(`\nWorkspace Runtime · ${snapshot.workspace.name} (${snapshot.workspace.id})\n`);
+        console.log(`\nTeam Governance · ${snapshot.workspace.name} (${snapshot.workspace.id})\n`);
         console.log(`Role: ${snapshot.activeWorkspaceRole}`);
         if (posture) {
             console.log(`Risk: ${posture.overallRiskLevel} (${posture.overallRiskScore})`);
@@ -172,7 +172,7 @@ function workspaceCommand(program) {
     });
     root
         .command('create')
-        .description('Create workspace model with repository topology and governance posture defaults')
+        .description('Create a team workspace with repository topology and governance defaults')
         .requiredOption('--name <name>', 'Workspace display name')
         .option('--id <id>', 'Optional workspace id slug')
         .option('--description <text>', 'Optional workspace description')
@@ -228,7 +228,7 @@ function workspaceCommand(program) {
     });
     root
         .command('activate <workspaceId>')
-        .description('Set active workspace context for CLI, daemon, and dashboard runtime views')
+        .description('Set active team workspace context for CLI, daemon, and dashboard views')
         .option('--source <source>', 'Execution source attribution', 'cli')
         .option('--actor <actor>', 'Execution actor attribution')
         .option('--json', 'Output JSON')

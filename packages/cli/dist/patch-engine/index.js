@@ -6,62 +6,122 @@ exports.generatePatchForSuggestion = generatePatchForSuggestion;
 const patterns_1 = require("./patterns");
 const generator_1 = require("./generator");
 const diff_1 = require("./diff");
-// Patterns that must appear in original content for a patch to be considered safe.
-const PATCHABLE_PATTERN_RE = /db\.(query|execute|run|find[A-Za-z]*)\b|prisma\.\w+\.\w+\b|new\s+Pool\s*\(|knex\s*\(|TODO|FIXME|\bvalidat|(?:req|request)\.(?:body|params|query)\b/i;
-/**
- * A patch is safe when:
- *  - updated content is non-empty
- *  - the diff is non-empty (something actually changed)
- *  - total added + removed lines stays under deterministic thresholds
- *    (≤12 for missing_validation, ≤5 for other transforms)
- *  - the original file contains at least one recognizable patchable pattern
- */
-function isPatchSafe(original, updated, kind) {
-    if (!updated || !updated.trim())
-        return false;
-    const diff = (0, diff_1.generateUnifiedDiff)('', original, updated);
-    if (!diff)
-        return false;
-    let changed = 0;
-    for (const line of diff.split('\n')) {
-        if (line.startsWith('-') && !line.startsWith('---'))
-            changed++;
-        if (line.startsWith('+') && !line.startsWith('+++'))
-            changed++;
-    }
-    const maxChangedLines = kind === 'missing_validation' ? 12 : 5;
-    if (changed > maxChangedLines)
-        return false;
-    if (!PATCHABLE_PATTERN_RE.test(original))
-        return false;
-    return true;
-}
+const transaction_1 = require("./transaction");
+const safety_1 = require("./safety");
 function scorePatchConfidence(kind) {
-    if (kind === 'missing_validation')
-        return 'high';
-    // db_in_ui auto-transform is advisory-only; deterministic but not production-safe
-    // without human review, so keep confidence low to prevent blind auto-apply.
-    if (kind === 'db_in_ui')
-        return 'low';
-    return 'low'; // todo_fixme — simple removal, lowest confidence
+    switch (kind) {
+        case 'missing_validation':
+        case 'missing_timeout_handling':
+        case 'unsafe_inner_html_usage':
+            return 'high';
+        case 'missing_auth_middleware':
+        case 'missing_rate_limiting':
+        case 'unsafe_fetch_without_retries':
+        case 'missing_idempotency_keys':
+        case 'unsafe_file_uploads':
+        case 'missing_token_expiry':
+        case 'unsafe_sensitive_logging':
+            return 'medium';
+        case 'db_in_ui':
+        case 'todo_fixme':
+            return 'low';
+        default:
+            return 'low';
+    }
+}
+function patchPriorityKinds() {
+    return [
+        'missing_validation',
+        'missing_timeout_handling',
+        'unsafe_fetch_without_retries',
+        'missing_idempotency_keys',
+        'unsafe_file_uploads',
+        'unsafe_inner_html_usage',
+        'missing_token_expiry',
+        'missing_auth_middleware',
+        'missing_rate_limiting',
+        'unsafe_sensitive_logging',
+        'db_in_ui',
+        'todo_fixme',
+    ];
+}
+function buildPatchTokenPayload(input) {
+    return {
+        schemaVersion: 'neurcode.patch-preview-token.v1',
+        file: input.filePath,
+        createdAt: new Date().toISOString(),
+        beforeHash: input.beforeHash,
+        afterHash: input.afterHash,
+        diffHash: input.diffHash,
+        patchHash: input.patchHash,
+        patternKind: input.patternKind,
+        confidence: input.patchConfidence,
+    };
+}
+function buildPatchBundle(input) {
+    const generated = (0, generator_1.generatePatch)({
+        filePath: input.filePath,
+        issue: '',
+        policy: '',
+        fileContent: input.fileContent,
+        patternKind: input.patternKind,
+    });
+    if (!generated)
+        return null;
+    const diff = (0, diff_1.generateUnifiedDiff)(input.filePath, input.fileContent, generated.updatedContent);
+    if (!diff)
+        return null;
+    const patchConfidence = scorePatchConfidence(input.patternKind);
+    const validation = (0, safety_1.validatePatchCandidate)({
+        originalContent: input.fileContent,
+        updatedContent: generated.updatedContent,
+        diff,
+        kind: input.patternKind,
+        confidence: patchConfidence,
+    });
+    const beforeHash = (0, transaction_1.hashPatchValue)(input.fileContent);
+    const afterHash = (0, transaction_1.hashPatchValue)(generated.updatedContent);
+    const patchHash = (0, transaction_1.buildPatchHash)({
+        file: input.filePath,
+        beforeHash,
+        afterHash,
+        diffHash: validation.diffHash,
+        patternKind: input.patternKind,
+    });
+    const previewToken = (0, transaction_1.createPatchPreviewToken)(buildPatchTokenPayload({
+        filePath: input.filePath,
+        patternKind: input.patternKind,
+        patchConfidence,
+        beforeHash,
+        afterHash,
+        diffHash: validation.diffHash,
+        patchHash,
+    }));
+    return {
+        updatedContent: generated.updatedContent,
+        patternKind: input.patternKind,
+        patchConfidence,
+        diff,
+        validation,
+        previewToken,
+        patchHash,
+        recipe: generated.metadata,
+        beforeHash,
+        afterHash,
+    };
 }
 /**
  * Apply a unified diff (as produced by generateUnifiedDiff) to fileContent.
  *
- * Parses the single-hunk diff format, verifies every context and removal line
- * matches the current file, then reconstructs the updated content.
- *
- * Returns null when:
- *  - no hunk header found
- *  - a context or removal line does not match current file content (file changed)
+ * Parses a single-hunk diff format, verifies every context/removal line matches
+ * the current file, then reconstructs updated content.
  */
 function applyUnifiedDiff(fileContent, diff) {
     if (!diff)
         return null;
     const diffLines = diff.split('\n');
-    // Locate the hunk header (skip --- / +++ file headers)
     let hunkIdx = -1;
-    for (let i = 0; i < diffLines.length; i++) {
+    for (let i = 0; i < diffLines.length; i += 1) {
         if (diffLines[i].startsWith('@@')) {
             hunkIdx = i;
             break;
@@ -69,119 +129,101 @@ function applyUnifiedDiff(fileContent, diff) {
     }
     if (hunkIdx === -1)
         return null;
-    // Parse @@ -oldStart[,oldCount] +newStart[,newCount] @@
     const match = diffLines[hunkIdx].match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (!match)
         return null;
-    // Diff uses 1-indexed lines; convert to 0-indexed
     const origStart = parseInt(match[1], 10) - 1;
     const origLines = fileContent.split('\n');
     const output = [];
-    // Lines before the hunk are copied unchanged
-    for (let i = 0; i < origStart; i++) {
+    for (let i = 0; i < origStart; i += 1) {
         output.push(origLines[i] ?? '');
     }
     let origIdx = origStart;
-    for (let i = hunkIdx + 1; i < diffLines.length; i++) {
+    for (let i = hunkIdx + 1; i < diffLines.length; i += 1) {
         const line = diffLines[i];
-        // A trailing empty string from split('\n') signals end of diff
         if (line.length === 0 && i === diffLines.length - 1)
             break;
         const prefix = line[0];
         const content = line.slice(1);
         if (prefix === ' ') {
-            // Context: must match current file — abort on mismatch (file changed)
             if (origIdx >= origLines.length || origLines[origIdx] !== content)
                 return null;
             output.push(content);
-            origIdx++;
+            origIdx += 1;
         }
         else if (prefix === '-') {
-            // Removal: must match current file — abort on mismatch
             if (origIdx >= origLines.length || origLines[origIdx] !== content)
                 return null;
-            origIdx++; // consume original line without adding to output
+            origIdx += 1;
         }
         else if (prefix === '+') {
-            // Addition: inject into output without consuming original
             output.push(content);
         }
         else {
-            break; // unexpected prefix — stop hunk processing
+            break;
         }
     }
-    // Copy remaining original lines after the hunk
     while (origIdx < origLines.length) {
         output.push(origLines[origIdx]);
-        origIdx++;
+        origIdx += 1;
     }
     return output.join('\n');
 }
 /**
- * Detect the first matching patchable pattern in fileContent and return the
- * updated content. Tries patterns in priority order: db_in_ui → missing_validation
- * → todo_fixme. Validates safety before returning.
+ * Deterministically build a patch bundle for the first matching remediation kind.
  *
- * Used by `neurcode patch --file` to apply a patch without needing suggestion metadata.
+ * Returns null when no deterministic recipe matches the target file.
  */
 function applyFirstMatchingPatch(filePath, fileContent) {
-    const kinds = ['db_in_ui', 'missing_validation', 'todo_fixme'];
-    for (const kind of kinds) {
-        const result = (0, generator_1.generatePatch)({
+    for (const kind of patchPriorityKinds()) {
+        const bundle = buildPatchBundle({
             filePath,
-            issue: '',
-            policy: '',
             fileContent,
             patternKind: kind,
         });
-        if (!result)
+        if (!bundle)
             continue;
-        const diff = (0, diff_1.generateUnifiedDiff)(filePath, fileContent, result.updatedContent);
-        if (!diff)
-            continue;
-        if (!isPatchSafe(fileContent, result.updatedContent, kind))
-            continue;
-        return {
-            updatedContent: result.updatedContent,
-            patternKind: kind,
-            patchConfidence: scorePatchConfidence(kind),
-            diff,
-        };
+        return bundle;
     }
     return null;
 }
 /**
- * Given a fix suggestion and the current content of suggestion.file,
- * attempts to generate a deterministic, safety-validated code patch.
- *
- * Returns null when:
- *  - the violation type has no patchable pattern
- *  - the pattern is not found in the file content
- *  - the generated patch produces no diff
- *  - the patch fails the safety gate (isPatchSafe)
+ * Generate a deterministic patch for a specific verify/fix suggestion.
  */
 function generatePatchForSuggestion(suggestion, fileContent) {
     const kind = (0, patterns_1.classifyViolation)(suggestion.issue, suggestion.policy);
     if (!kind)
         return null;
-    const result = (0, generator_1.generatePatch)({
+    const generated = (0, generator_1.generatePatch)({
         filePath: suggestion.file,
         issue: suggestion.issue,
         policy: suggestion.policy,
         fileContent,
         patternKind: kind,
     });
-    if (!result)
+    if (!generated)
         return null;
-    const diff = (0, diff_1.generateUnifiedDiff)(suggestion.file, fileContent, result.updatedContent);
+    const diff = (0, diff_1.generateUnifiedDiff)(suggestion.file, fileContent, generated.updatedContent);
     if (!diff)
         return null;
-    if (!isPatchSafe(fileContent, result.updatedContent, kind))
+    const patchConfidence = scorePatchConfidence(kind);
+    const validation = (0, safety_1.validatePatchCandidate)({
+        originalContent: fileContent,
+        updatedContent: generated.updatedContent,
+        diff,
+        kind,
+        confidence: patchConfidence,
+    });
+    // Keep low-confidence / unsafe transforms out of auto-fix suggestions.
+    if (!validation.safe)
         return null;
     return {
         file: suggestion.file,
         diff,
-        patchConfidence: scorePatchConfidence(kind),
+        patchConfidence,
+        patternKind: kind,
+        validation,
+        recipe: generated.metadata,
     };
 }
 //# sourceMappingURL=index.js.map

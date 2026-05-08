@@ -1292,6 +1292,8 @@ function extractDiffPreview(payload) {
 function buildExecutionDiffInspection(record) {
     const payload = record.result?.payload ?? null;
     const patchPayload = asObject(payload?.patch) ?? payload;
+    const receiptPayload = asObject(patchPayload?.receipt);
+    const validationPayload = asObject(patchPayload?.validation);
     const patchDiff = extractDiffPreview(payload);
     const before = record.verification.diff.before ?? null;
     const after = record.verification.diff.after ?? null;
@@ -1325,9 +1327,23 @@ function buildExecutionDiffInspection(record) {
             changed: typeof patchPayload?.changed === 'boolean'
                 ? patchPayload.changed
                 : null,
+            status: asString(patchPayload?.status) || null,
             confidence: asString(patchPayload?.patchConfidence) || null,
             patternKind: asString(patchPayload?.patternKind) || null,
             diffPreview: patchDiff,
+            diffHash: asString(validationPayload?.diffHash)
+                || asString(receiptPayload?.diffHash)
+                || null,
+            receipt: receiptPayload
+                ? {
+                    transactionId: asString(receiptPayload.transactionId),
+                    transactionHash: asString(receiptPayload.transactionHash),
+                    rollbackSnapshotId: asString(receiptPayload.rollbackSnapshotId),
+                    rollbackAvailable: typeof receiptPayload.rollbackAvailable === 'boolean' ? receiptPayload.rollbackAvailable : null,
+                    stalePreviewRejected: typeof receiptPayload.stalePreviewRejected === 'boolean' ? receiptPayload.stalePreviewRejected : null,
+                    staleReason: asString(receiptPayload.staleReason),
+                }
+                : null,
         },
     };
 }

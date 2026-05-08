@@ -12,6 +12,16 @@ neurcode patch --file <path>
 neurcode verify
 ```
 
+Manual workflow:
+
+`intent → verify → fix → patch → verify`
+
+Autonomous workflow:
+
+`start → generate/export plan → agent execution → verify → fix → patch → verify → CI`
+
+Deterministic remediation is the default engine. AI-assisted remediation proposals are optional, advisory-only, and must be reviewed before apply.
+
 ## Core Command Reference
 
 ### `neurcode start "<intent>"`
@@ -23,8 +33,8 @@ neurcode start "Add JWT authentication with role checks"
 ```
 
 Options:
-- `--json` — output machine-readable onboarding metadata
-- `--run-init` — run `neurcode init` immediately after showing the guide
+- `--json` - output machine-readable onboarding metadata
+- `--run-init` - run `neurcode init` immediately after showing the guide
 
 ### `neurcode verify`
 
@@ -55,24 +65,44 @@ neurcode fix --json                        # machine-readable output
 
 ### `neurcode patch --file <path>`
 
-Apply a deterministic fix to a specific file from `neurcode fix` suggestions. Safe, idempotent, does not rewrite surrounding context.
+Apply a deterministic fix to a specific file from `neurcode fix` suggestions. Patch application is transactional and emits a deterministic receipt for replay and audit.
 
 ```bash
 neurcode patch --file src/auth/middleware.ts
 neurcode patch --file src/auth/middleware.ts --json
+neurcode patch --file src/auth/middleware.ts --preview-token <token>
+neurcode patch --file src/auth/middleware.ts --rollback-receipt <receipt-id>
 ```
+
+Patch JSON now includes:
+
+- `status`: `applied`, `partial`, `rejected`, `stale_preview`, `rollback_applied`, `rollback_rejected`, or `rollback_stale`
+- `validation`: deterministic patch safety report
+- `receipt`: transaction metadata (`transactionId`, hashes, rollback/stale flags)
+- `reverifyRequired`: whether a follow-up verify is required
 
 ### `neurcode daemon`
 
-Start a local HTTP bridge on `http://localhost:4321` so the Neurcode dashboard can trigger `fix` and `patch` actions without leaving the browser.
+Start a local HTTP bridge on `http://localhost:4321` so the dashboard can run `verify`, `fix`, `patch`, and rollback actions without leaving the browser.
 
 ```bash
 neurcode daemon
 ```
 
+Daemon environment options:
+
+- `NEURCODE_DAEMON_HOST` (default `127.0.0.1`)
+- `NEURCODE_DAEMON_PORT` (default `4321`)
+- `NEURCODE_DAEMON_ALLOW_REMOTE` (default `false`, set only for trusted internal networks)
+
+Operational endpoints:
+
+- `GET /health` - daemon capability + runtime summary
+- `GET /ops/summary` - reliability counters (patch success, rollback stats, retries, lock visibility)
+
 ### `neurcode execute <type>`
 
-Run actions through the unified deterministic execution pipeline and persist execution records.
+Run deterministic actions with receipts, evidence linkage, and activity history.
 
 ```bash
 neurcode execute verify --source cli
@@ -90,7 +120,7 @@ Useful options:
 
 ### `neurcode control-plane`
 
-Inspect and update centralized deterministic governance configuration.
+Inspect and update centralized governance settings.
 
 ```bash
 neurcode control-plane show
@@ -100,13 +130,13 @@ neurcode control-plane apply --patch-file ./control-plane.patch.json --reason "E
 
 Subcommands:
 
-- `show` — current state + snapshot metadata
-- `preview` — deterministic impact preview (no write)
-- `apply` — apply patch, persist snapshot, emit runtime governance update event
+- `show` - current state + snapshot metadata
+- `preview` - deterministic impact preview (no write)
+- `apply` - apply patch, persist snapshot, emit activity update event
 
 ### `neurcode workspace`
 
-Operate deterministic multi-repository workspace governance orchestration.
+Operate deterministic team governance across multiple repositories.
 
 ```bash
 neurcode workspace list
@@ -119,17 +149,17 @@ neurcode workspace execute verify --workspace <workspace-id> --ci
 
 Subcommands:
 
-- `list` — list workspace catalog and posture targets
-- `show` — runtime posture snapshot with matrix/hotspots/activity
-- `create` — create workspace definition
-- `activate` — set active workspace pointer
-- `add-repo` — add repository/service node into workspace topology
-- `update` — deterministic definition patch update
-- `execute` — workspace-scoped execution bus orchestration across repositories
+- `list` - list workspace catalog and posture targets
+- `show` - team posture snapshot with matrix/hotspots/activity
+- `create` - create workspace definition
+- `activate` - set active workspace pointer
+- `add-repo` - add repository/service node into workspace topology
+- `update` - deterministic definition patch update
+- `execute` - workspace-scoped deterministic actions across repositories
 
 ### `neurcode executions`
 
-Inspect execution history from `.neurcode/executions/`.
+Inspect activity history from `.neurcode/executions/`.
 
 ```bash
 neurcode executions --limit 20
@@ -138,7 +168,7 @@ neurcode executions --id <execution-id> --json
 
 ### `neurcode replay`
 
-Deterministically reconstruct governance state from immutable artifacts.
+Deterministically reconstruct change history from immutable artifacts.
 
 ```bash
 neurcode replay --at "2026-05-01T10:00:00Z"

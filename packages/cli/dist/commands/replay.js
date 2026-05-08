@@ -42,7 +42,7 @@ function writeDeterministicExport(filePath, payload) {
     return resolved;
 }
 function printStateSummary(state) {
-    console.log('\nGovernance Replay State\n');
+    console.log('\nReplay State\n');
     console.log(`As of: ${state.asOf}`);
     console.log(`Artifact hash: ${state.determinism.artifactHash}`);
     console.log(`Inputs: executions ${state.determinism.inputs.executionRecords}, evidence ${state.determinism.inputs.evidenceArtifacts}, events ${state.determinism.inputs.runtimeEvents}`);
@@ -100,7 +100,7 @@ function printWorkspaceSummary(detail) {
     console.log('');
 }
 function printTimelineSummary(result) {
-    console.log('\nGovernance Replay Timeline\n');
+    console.log('\nReplay Timeline\n');
     console.log(`Range: ${result.from || 'beginning'} -> ${result.to || 'latest'}`);
     console.log(`Workspace: ${result.workspaceId || 'all'}`);
     console.log(`Items: ${result.count}`);
@@ -123,7 +123,7 @@ function printTimelineSummary(result) {
 function replayCommand(program) {
     const root = program
         .command('replay')
-        .description('Deterministic governance replay and time-travel reconstruction');
+        .description('Deterministic replay and change-history reconstruction');
     root
         .option('--at <timestamp>', 'ISO timestamp to reconstruct governance state')
         .option('--workspace <workspaceId>', 'Workspace scope for replay')
@@ -192,7 +192,7 @@ function replayCommand(program) {
     });
     root
         .command('workspace [workspaceId]')
-        .description('Replay deterministic workspace posture and execution history')
+        .description('Replay deterministic team posture and activity history')
         .option('--at <timestamp>', 'ISO timestamp for workspace reconstruction')
         .option('--json', 'Output JSON')
         .option('--export <path>', 'Write deterministic replay output to file')
@@ -226,7 +226,7 @@ function replayCommand(program) {
     });
     root
         .command('timeline')
-        .description('Replay deterministic governance timeline across executions/events/evidence/snapshots')
+        .description('Replay deterministic timeline across activity, events, evidence, and snapshots')
         .option('--workspace <workspaceId>', 'Workspace scope')
         .option('--from <timestamp>', 'ISO start timestamp')
         .option('--to <timestamp>', 'ISO end timestamp')

@@ -190,9 +190,19 @@ export interface ExecutionDiffInspection {
         available: boolean;
         file: string | null;
         changed: boolean | null;
+        status: string | null;
         confidence: string | null;
         patternKind: string | null;
         diffPreview: string | null;
+        diffHash: string | null;
+        receipt: {
+            transactionId: string | null;
+            transactionHash: string | null;
+            rollbackSnapshotId: string | null;
+            rollbackAvailable: boolean | null;
+            stalePreviewRejected: boolean | null;
+            staleReason: string | null;
+        } | null;
     };
 }
 export declare function runExecution(request: ExecutionRequest): Promise<RunExecutionResult>;

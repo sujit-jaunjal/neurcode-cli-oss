@@ -1101,7 +1101,29 @@ function toCanonicalVerifyOutput(payload) {
 function emitCanonicalVerifyJson(payload, onEmit) {
     const canonical = toCanonicalVerifyOutput(payload);
     onEmit?.(canonical);
-    console.log(JSON.stringify(canonical, null, 2));
+    // Use sync stdout write so immediate process.exit paths do not truncate JSON.
+    const serialized = Buffer.from(`${JSON.stringify(canonical, null, 2)}\n`, 'utf-8');
+    try {
+        let offset = 0;
+        while (offset < serialized.length) {
+            try {
+                const written = (0, fs_1.writeSync)(1, serialized, offset, serialized.length - offset);
+                if (written <= 0)
+                    break;
+                offset += written;
+            }
+            catch (error) {
+                const code = error.code;
+                if (code === 'EAGAIN' || code === 'EWOULDBLOCK') {
+                    continue;
+                }
+                throw error;
+            }
+        }
+    }
+    catch {
+        process.stdout.write(serialized.toString('utf-8'));
+    }
 }
 function buildDeterministicLayerSummary(payload) {
     const verdict = asStringValue(payload.verdict) || 'UNKNOWN';
