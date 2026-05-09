@@ -36,6 +36,16 @@ function serializeDeterministicRule(rule) {
         statement: rule.statement,
         displayName: rule.displayName,
         matchToken: rule.matchToken,
+        ...(rule.provenance
+            ? {
+                provenance: {
+                    why: rule.provenance.why,
+                    evidence: [...rule.provenance.evidence],
+                    contributingGraphPaths: [...rule.provenance.contributingGraphPaths],
+                    trustBoundaries: [...rule.provenance.trustBoundaries],
+                },
+            }
+            : {}),
         pattern: {
             source: rule.pattern.source,
             flags: rule.pattern.flags,
@@ -85,6 +95,16 @@ function hydrateDeterministicRule(record) {
             statement: record.statement,
             displayName: record.displayName,
             matchToken: record.matchToken,
+            ...(record.provenance
+                ? {
+                    provenance: {
+                        why: record.provenance.why,
+                        evidence: [...record.provenance.evidence],
+                        contributingGraphPaths: [...record.provenance.contributingGraphPaths],
+                        trustBoundaries: [...record.provenance.trustBoundaries],
+                    },
+                }
+                : {}),
             pattern: new RegExp(record.pattern.source, record.pattern.flags),
             ...(Array.isArray(record.pathIncludePatterns) && record.pathIncludePatterns.length > 0
                 ? { pathIncludePatterns: [...record.pathIncludePatterns] }

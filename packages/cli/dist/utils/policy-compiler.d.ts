@@ -6,6 +6,12 @@ export interface CompiledDeterministicRuleRecord {
     statement: string;
     displayName: string;
     matchToken: string;
+    provenance?: {
+        why: string;
+        evidence: string[];
+        contributingGraphPaths: string[];
+        trustBoundaries: string[];
+    };
     pattern: {
         source: string;
         flags: string;

@@ -5106,6 +5106,12 @@ function printAdvisorySignals(signals, demoMode) {
         const severityLabel = signal.severity === 'warn' ? chalk.yellow('[warn]') : chalk.dim('[info]');
         console.log(`${severityLabel} ${signal.title}`);
         console.log(chalk.dim(`  ${signal.detail}`));
+        console.log(chalk.dim(`  Confidence: ${signal.confidence.toUpperCase()} (advisory-only)`));
+        if (signal.evidence.length > 0) {
+            console.log(chalk.dim(`  Evidence: ${signal.evidence.join(', ')}`));
+        }
+        console.log(chalk.dim(`  Structural gap: ${signal.structuralCoverageGap}`));
+        console.log(chalk.dim(`  Uncertainty: ${signal.uncertainty}`));
         signal.files.forEach((file) => {
             console.log(chalk.dim(`  - ${file}`));
         });

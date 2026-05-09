@@ -6,6 +6,11 @@ export interface AdvisorySignal {
     title: string;
     detail: string;
     files: string[];
+    advisoryOnly: true;
+    confidence: 'low' | 'medium';
+    evidence: string[];
+    uncertainty: string;
+    structuralCoverageGap: string;
 }
 interface AdvisoryInput {
     diffFiles: DiffFile[];
