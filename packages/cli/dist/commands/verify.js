@@ -70,7 +70,10 @@ const advisory_signals_1 = require("../utils/advisory-signals");
 const structural_rules_1 = require("../structural-rules");
 const canonical_pipeline_1 = require("../governance/canonical-pipeline");
 const structural_on_diff_1 = require("../governance/structural-on-diff");
-const structural_policy_merge_1 = require("../governance/structural-policy-merge");
+// NOTE: mergeStructuralIntoPolicyViolations is intentionally NOT imported.
+// Structural violations flow exclusively through payload.structuralViolations
+// into the canonical pipeline. Merging them into policyViolations caused
+// duplicate GovernanceFinding objects (fixed in Phase 1 canonical graph hardening).
 const telemetry_1 = require("@neurcode-ai/telemetry");
 const governance_provenance_1 = require("../utils/governance-provenance");
 const pilot_metrics_1 = require("../utils/pilot-metrics");
@@ -80,6 +83,7 @@ const artifact_signature_1 = require("../utils/artifact-signature");
 const policy_1 = require("@neurcode-ai/policy");
 const ai_debt_budget_1 = require("../utils/ai-debt-budget");
 const verification_evidence_1 = require("../utils/verification-evidence");
+const verify_runtime_stability_1 = require("../utils/verify-runtime-stability");
 // Import chalk with fallback
 let chalk;
 try {
@@ -1932,7 +1936,9 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         });
     }
     const policyOnlyStructural = (0, structural_on_diff_1.runStructuralOnDiffFiles)(projectRoot, diffFilesForPolicy);
-    (0, structural_policy_merge_1.mergeStructuralIntoPolicyViolations)(policyViolations, policyOnlyStructural.violations);
+    // Structural violations are passed to the canonical pipeline via payload.structuralViolations
+    // (see line ~2584). Do NOT merge them into policyViolations — that would create structural:*
+    // duplicates that contaminate the canonical finding graph.
     policyDecision = resolvePolicyDecisionFromViolations(policyViolations);
     const effectiveVerdict = policyDecision === 'block' ? 'FAIL' : policyDecision === 'warn' ? 'WARN' : 'PASS';
     const grade = effectiveVerdict === 'PASS' ? 'A' : effectiveVerdict === 'WARN' ? 'C' : 'F';
@@ -2092,6 +2098,13 @@ async function verifyCommand(options) {
         let lastCanonicalOutput = null;
         let lastEvidenceFallbackOutput = null;
         let evidenceFinalizeAttempted = false;
+        // ── Phase 1 Runtime Stability: create context early so all subsystems share it ──
+        // Structural governance is NEVER gated by this context — it always runs.
+        const runtimeCtx = (0, verify_runtime_stability_1.createVerifyRuntimeContext)(ciModeEnabled);
+        // Large repo detection: sets largeRepoMode and emits cache-build recommendation.
+        (0, verify_runtime_stability_1.applyLargeRepoProtection)(runtimeCtx, projectRoot);
+        // Initial memory pressure check at entry.
+        (0, verify_runtime_stability_1.applyMemoryPressureDegradation)(runtimeCtx);
         if (ciModeEnabled) {
             options.policyOnly = true;
             options.requirePlan = false;
@@ -2163,6 +2176,9 @@ async function verifyCommand(options) {
         let structuralRulesApplied = [];
         let structuralSuppressedCount = 0;
         const emitVerifyJson = (payload) => {
+            // Check memory pressure immediately before emission (may have changed during long verify)
+            (0, verify_runtime_stability_1.applyMemoryPressureDegradation)(runtimeCtx);
+            const runtimeStabilityReport = (0, verify_runtime_stability_1.buildVerifyRuntimeReport)(runtimeCtx);
             const enrichedPayload = {
                 ...payload,
                 ciMode: payload.ciMode ?? ciModeEnabled,
@@ -2178,6 +2194,8 @@ async function verifyCommand(options) {
                 structuralViolations: payload.structuralViolations ?? structuralViolations,
                 structuralRulesApplied: payload.structuralRulesApplied ?? structuralRulesApplied,
                 structuralSuppressedCount: payload.structuralSuppressedCount ?? structuralSuppressedCount,
+                // Runtime stability transparency — always present
+                runtimeStabilityReport,
             };
             lastEvidenceFallbackOutput = enrichedPayload;
             emitCanonicalVerifyJson(enrichedPayload, (canonical) => {
@@ -2622,8 +2640,19 @@ async function verifyCommand(options) {
             try {
                 let contextNote = note;
                 if (Array.isArray(changedFiles) && changedFiles.length > 0) {
-                    const refreshed = (0, brain_context_1.refreshBrainContextForFiles)(projectRoot, brainScope, changedFiles);
-                    contextNote = `${contextNote};indexed=${refreshed.indexed};removed=${refreshed.removed};skipped=${refreshed.skipped}`;
+                    // Runtime stability: skip brain context refresh if semantic layer is degraded
+                    // (memory pressure or time pressure). Structural verification is unaffected.
+                    if ((0, verify_runtime_stability_1.shouldSkipSemanticLayer)(runtimeCtx)) {
+                        contextNote = `${contextNote};semantic_skipped=runtime_pressure`;
+                        if (!ciModeEnabled && runtimeCtx.degradationReasons.length > 0) {
+                            console.log(chalk.yellow(`\n⚠️  Brain context refresh skipped: ${runtimeCtx.degradationReasons[runtimeCtx.degradationReasons.length - 1]}`));
+                            console.log(chalk.dim('   Deterministic structural governance continues unaffected.\n'));
+                        }
+                    }
+                    else {
+                        const refreshed = (0, brain_context_1.refreshBrainContextForFiles)(projectRoot, brainScope, changedFiles);
+                        contextNote = `${contextNote};indexed=${refreshed.indexed};removed=${refreshed.removed};skipped=${refreshed.skipped}`;
+                    }
                 }
                 (0, brain_context_1.recordBrainProgressEvent)(projectRoot, brainScope, {
                     type: 'verify',
@@ -3216,10 +3245,14 @@ async function verifyCommand(options) {
             }
             const message = 'No plan linked yet. Ran advisory verification for quick first-run experience. ' +
                 'Use `neurcode plan` and `neurcode contract import --auto-detect --write-change-contract` for full enforcement.';
-            const advisorySignals = (0, advisory_signals_1.evaluateAdvisorySignals)({
-                diffFiles,
-                summary,
-            });
+            // Runtime stability: skip advisory signals if advisory layer is degraded.
+            // Structural rules always run regardless.
+            const advisorySignals = (0, verify_runtime_stability_1.shouldSkipAdvisoryLayer)(runtimeCtx)
+                ? []
+                : (0, advisory_signals_1.evaluateAdvisorySignals)({ diffFiles, summary });
+            if ((0, verify_runtime_stability_1.shouldSkipAdvisoryLayer)(runtimeCtx) && !options.json) {
+                console.log(chalk.dim('   Advisory signals skipped (runtime pressure — structural governance unaffected).'));
+            }
             const advisoryWarnCount = advisorySignals.filter((item) => item.severity === 'warn').length;
             // ── Advisory-first: always run structural rules, downgrade scope issues to advisory ──
             // Structural rules are deterministic and local — they MUST always run regardless of plan.
@@ -3971,7 +4004,9 @@ async function verifyCommand(options) {
                 message: `Policy audit chain is invalid: ${auditIntegrityStatus.issues.join('; ') || 'unknown issue'}`,
             });
         }
-        (0, structural_policy_merge_1.mergeStructuralIntoPolicyViolations)(policyViolations, structuralViolations);
+        // Structural violations are passed to the canonical pipeline via payload.structuralViolations
+        // (see line ~5281). Do NOT merge them into policyViolations — that would create structural:*
+        // duplicates that contaminate the canonical finding graph.
         policyDecision = resolvePolicyDecisionFromViolations(policyViolations);
         const policyExceptionsSummary = {
             sourceMode: policyExceptionResolution.mode,

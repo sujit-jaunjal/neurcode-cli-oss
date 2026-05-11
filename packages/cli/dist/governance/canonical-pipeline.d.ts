@@ -4,6 +4,13 @@ import type { IntentIssue } from '../intent-engine/matcher';
 import type { FlowIssue } from '../intent-engine/flow-validator';
 import type { RegressionIssue } from '../intent-engine/regression';
 import type { RuleViolation } from '@neurcode-ai/policy-engine';
+/**
+ * Strip structural:* prefixed violations from the policy-engine row list.
+ * These are already represented in structuralViolations — keeping them in
+ * policyViolations causes cross-source duplicate GovernanceFinding objects.
+ * Called by attachCanonicalGovernance before building the envelope.
+ */
+export declare function stripStructuralPolicyRows(violations: RuleViolation[]): RuleViolation[];
 export declare function findingFromStructural(v: StructuralViolation): GovernanceFinding;
 export declare function findingFromPolicyEngine(v: RuleViolation): GovernanceFinding;
 export declare function findingFromIntentIssue(i: IntentIssue): GovernanceFinding;

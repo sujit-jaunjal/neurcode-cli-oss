@@ -26,6 +26,7 @@ const policy_packs_1 = require("../utils/policy-packs");
 const project_root_1 = require("../utils/project-root");
 const runtime_guard_1 = require("../utils/runtime-guard");
 const messages_1 = require("../utils/messages");
+const structural_rules_1 = require("../structural-rules");
 function summarizeChecks(checks) {
     const summary = {
         total: checks.length,
@@ -331,6 +332,87 @@ async function doctorCommand(options = {}) {
         recommendation: runtimeGuard.artifact && runtimeGuard.artifact.active
             ? undefined
             : 'Run `neurcode guard start --strict` before coding sessions.',
+    });
+    // ── LOCAL-ONLY CHECKS (no network required) ────────────────────────────────
+    // Node version check
+    const nodeVersion = process.version.replace(/^v/, '');
+    const nodeRequiredMajor = 18;
+    const nodeMajor = parseInt(nodeVersion.split('.')[0], 10);
+    checks.push({
+        id: 'local.node_version',
+        label: 'Node.js version',
+        status: nodeMajor >= nodeRequiredMajor ? 'pass' : 'fail',
+        message: nodeMajor >= nodeRequiredMajor
+            ? `Node ${nodeVersion} meets minimum requirement (>= ${nodeRequiredMajor}).`
+            : `Node ${nodeVersion} is below minimum (>= ${nodeRequiredMajor}).`,
+        recommendation: nodeMajor >= nodeRequiredMajor ? undefined : `Upgrade Node.js to v${nodeRequiredMajor} or later.`,
+    });
+    // Structural rule engine availability
+    let structuralRuleStatus = 'pass';
+    let structuralRuleMessage = '';
+    let structuralRuleCount = 0;
+    try {
+        const engine = (0, structural_rules_1.createDefaultStructuralRuleEngine)();
+        structuralRuleCount = engine.getRuleIds().length;
+        structuralRuleMessage = `Structural rule engine initialized (${structuralRuleCount} rules available).`;
+    }
+    catch (err) {
+        structuralRuleStatus = 'fail';
+        structuralRuleMessage = `Structural rule engine failed to initialize: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    checks.push({
+        id: 'local.structural_rules',
+        label: 'Structural rule engine',
+        status: structuralRuleStatus,
+        message: structuralRuleMessage,
+        recommendation: structuralRuleStatus === 'fail' ? 'Check CLI installation integrity. Try reinstalling @neurcode-ai/cli.' : undefined,
+    });
+    // Structural cache status
+    const cachePath = (0, path_1.join)(rootTrace.projectRoot, '.neurcode', 'structural-cache.json');
+    let cacheStatus = 'warn';
+    let cacheMessage = 'Structural cache not found (first-run cold cache).';
+    let cacheDetails = [];
+    if ((0, fs_1.existsSync)(cachePath)) {
+        try {
+            const cacheRaw = JSON.parse((0, fs_1.readFileSync)(cachePath, 'utf-8'));
+            const entries = Object.keys(cacheRaw.entries ?? {}).length;
+            const staleCount = typeof cacheRaw.staleRiskEntryCount === 'number' ? cacheRaw.staleRiskEntryCount : 0;
+            cacheStatus = 'pass';
+            cacheMessage = `Structural cache present (${entries} entries${staleCount > 0 ? `, ${staleCount} stale-risk` : ''}).`;
+            try {
+                const st = (0, fs_1.statSync)(cachePath);
+                const ageMs = Date.now() - st.mtimeMs;
+                const ageHours = Math.round(ageMs / 3_600_000);
+                cacheDetails = [`age: ${ageHours}h`, `path: ${cachePath}`];
+                if (ageHours > 168) {
+                    cacheStatus = 'warn';
+                    cacheMessage += ' Cache is older than 7 days.';
+                }
+            }
+            catch { /* non-fatal */ }
+        }
+        catch (err) {
+            cacheStatus = 'fail';
+            cacheMessage = `Structural cache exists but could not be read: ${err instanceof Error ? err.message : String(err)}`;
+        }
+    }
+    checks.push({
+        id: 'local.structural_cache',
+        label: 'Structural rule cache',
+        status: cacheStatus,
+        message: cacheMessage,
+        details: cacheDetails.length > 0 ? cacheDetails : undefined,
+        recommendation: cacheStatus === 'warn' ? 'Run `neurcode verify --local-only` to warm up the structural cache.' : undefined,
+    });
+    // Local-only mode availability
+    checks.push({
+        id: 'local.local_only_mode',
+        label: 'Local-only governance mode',
+        status: structuralRuleStatus === 'pass' ? 'pass' : 'fail',
+        message: structuralRuleStatus === 'pass'
+            ? `Local-only mode available (${structuralRuleCount} deterministic rules, no network required).`
+            : 'Local-only mode unavailable because structural rule engine failed to initialize.',
+        recommendation: structuralRuleStatus !== 'pass' ? 'Repair structural rule engine first.' : undefined,
     });
     const healthProbe = await probeHealth(apiUrl);
     checks.push({

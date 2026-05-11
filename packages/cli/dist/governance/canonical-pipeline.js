@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.stripStructuralPolicyRows = stripStructuralPolicyRows;
 exports.findingFromStructural = findingFromStructural;
 exports.findingFromPolicyEngine = findingFromPolicyEngine;
 exports.findingFromIntentIssue = findingFromIntentIssue;
@@ -12,8 +13,19 @@ exports.attachCanonicalGovernance = attachCanonicalGovernance;
 exports.evaluateGovernanceReplayIntegrity = evaluateGovernanceReplayIntegrity;
 const crypto_1 = require("crypto");
 const contracts_1 = require("@neurcode-ai/contracts");
+const canonical_invariants_1 = require("./canonical-invariants");
+const canonical_ordering_1 = require("./canonical-ordering");
 function stableFindingId(parts) {
     return (0, crypto_1.createHash)('sha256').update(parts.join('\x1e')).digest('hex').slice(0, 32);
+}
+/**
+ * Strip structural:* prefixed violations from the policy-engine row list.
+ * These are already represented in structuralViolations — keeping them in
+ * policyViolations causes cross-source duplicate GovernanceFinding objects.
+ * Called by attachCanonicalGovernance before building the envelope.
+ */
+function stripStructuralPolicyRows(violations) {
+    return violations.filter(v => !String(v.rule ?? '').startsWith('structural:'));
 }
 function rankDeterminism(d) {
     switch (d) {
@@ -198,19 +210,60 @@ function behavioralClusterKey(finding) {
     return 'operational-governance-risk';
 }
 function compressByLocation(findings) {
-    const buckets = new Map();
+    // ── Pass 1: build a ruleId-aware identity map for structural findings ─────
+    // Key: filePath + line + ruleId (from structuralMetadata)
+    // This ensures that when the same structural violation appears from both
+    // the structural-rules source AND a policy-engine structural:* row,
+    // we can identify and absorb the duplicate before bucket compression.
+    const structuralById = new Map();
     for (const f of findings) {
+        if (f.sourceSystem === 'structural-rules' && f.structuralMetadata?.ruleId) {
+            const key = `${f.evidence.filePath ?? ''}\x00${f.evidence.line ?? 0}\x00${f.structuralMetadata.ruleId}`;
+            structuralById.set(key, f);
+        }
+    }
+    // ── Pass 2: bucket by location + behavior, absorb structural duplicates ───
+    const buckets = new Map();
+    let duplicateCount = 0;
+    for (const f of findings) {
+        // If this is a policy-engine row that mirrors a structural finding, absorb it
+        if (f.sourceSystem === 'policy-engine') {
+            const ruleId = String(f.structuralMetadata?.ruleId ?? f.title.match(/^Policy · structural:(.+)$/)?.[1] ?? '');
+            if (ruleId) {
+                const structKey = `${f.evidence.filePath ?? ''}\x00${f.evidence.line ?? 0}\x00${ruleId}`;
+                const primary = structuralById.get(structKey);
+                if (primary) {
+                    // Absorb into structural primary's mergedFrom — do not add to buckets
+                    const mergedFrom = [...(primary.mergedFrom ?? [primary.id]), f.id];
+                    structuralById.set(structKey, { ...primary, mergedFrom });
+                    duplicateCount++;
+                    continue;
+                }
+            }
+        }
         const fp = f.evidence.filePath ?? 'unknown';
         const ln = f.evidence.line ?? 0;
         const sev = f.severity;
+        const ruleKey = f.structuralMetadata?.ruleId ?? '';
         const behavior = behavioralClusterKey(f);
-        const key = `${fp}\x00${ln}\x00${sev}\x00${behavior}`;
+        // Include ruleId in the bucket key so distinct rules at the same line
+        // are never merged — only identical-rule duplicates across source systems.
+        const key = `${fp}\x00${ln}\x00${sev}\x00${ruleKey}\x00${behavior}`;
         const list = buckets.get(key) ?? [];
         list.push(f);
         buckets.set(key, list);
     }
+    // ── Pass 3: replace bucket entries with absorbed structural findings ───────
+    // Update bucket entries to use the absorbed (mergedFrom-enriched) versions
+    for (const [key, group] of buckets) {
+        buckets.set(key, group.map(f => {
+            if (f.sourceSystem !== 'structural-rules' || !f.structuralMetadata?.ruleId)
+                return f;
+            const structKey = `${f.evidence.filePath ?? ''}\x00${f.evidence.line ?? 0}\x00${f.structuralMetadata.ruleId}`;
+            return structuralById.get(structKey) ?? f;
+        }));
+    }
     const merged = [];
-    let duplicateCount = 0;
     for (const [, group] of buckets) {
         if (group.length === 1) {
             merged.push(group[0]);
@@ -273,7 +326,11 @@ function buildGovernanceVerificationEnvelope(input) {
     for (const v of input.structuralViolations ?? []) {
         raw.push(findingFromStructural(v));
     }
-    for (const v of input.policyViolations ?? []) {
+    // Strip structural:* policy rows — they duplicate structuralViolations entries.
+    // The canonical dedup in compressByLocation handles any that slip through,
+    // but stripping here prevents them from appearing as independent findings.
+    const filteredPolicyViolations = stripStructuralPolicyRows(input.policyViolations ?? []);
+    for (const v of filteredPolicyViolations) {
         raw.push(findingFromPolicyEngine(v));
     }
     for (const i of input.intentIssues ?? []) {
@@ -291,17 +348,38 @@ function buildGovernanceVerificationEnvelope(input) {
     for (const c of input.constraintMessages ?? []) {
         raw.push(findingFromGovernanceConstraint(c.message, c.file ?? '.neurcode/policy-compiled'));
     }
-    for (const f of raw) {
+    // NOTE: provenance is assigned after canonical sort below (post compressByLocation).
+    const { merged: rawMerged, duplicateCount } = compressByLocation(raw);
+    // Phase 1: Apply canonical deterministic ordering BEFORE checksum, provenance,
+    // and envelope emission. This is the single authoritative sort point.
+    // sortCanonicalFindingsStable is pure, never mutates input.
+    const merged = (0, canonical_ordering_1.sortCanonicalFindingsStable)(rawMerged);
+    // Phase 1: Validate that the sort produced a correctly ordered array.
+    // If ordering drift is detected, emit warning but do NOT throw.
+    (0, canonical_ordering_1.validateCanonicalOrder)(merged, 'buildGovernanceVerificationEnvelope');
+    // Phase 3: Assign provenance AFTER ordering so that provenance assignment
+    // order matches the canonical finding order.
+    for (const f of merged) {
         if (input.provenance && !f.provenanceMetadata) {
             f.provenanceMetadata = { ...input.provenance };
         }
     }
-    const { merged, duplicateCount } = compressByLocation(raw);
+    // legacyDebt findings: those demoted from BLOCKING to ADVISORY due to
+    // diff-scope enforcement (Phase 2). Count separately for observability.
+    const legacyDebtCount = merged.filter(f => f.legacyDebt === true).length;
+    // Phase 3: Compute deterministic replay checksum over the canonically ordered finding set.
+    // Input is already sorted by sortCanonicalFindingsStable — checksum is stable.
+    const replayChecksum = (0, canonical_invariants_1.computeCanonicalFindingChecksum)(merged);
+    // Phase 1 invariant guard: warn if any structural:* policy rows leaked through.
+    (0, canonical_invariants_1.assertNoStructuralPolicyRows)(input.policyViolations ?? [], 'buildGovernanceVerificationEnvelope');
     return {
         schemaVersion: contracts_1.GOVERNANCE_FINDINGS_SCHEMA_VERSION,
         generatedAt: new Date().toISOString(),
         findings: merged,
         compressedDuplicateCount: duplicateCount,
+        deduplicatedFindingCount: duplicateCount,
+        legacyDebtFindingCount: legacyDebtCount,
+        replayChecksum,
         reviewerSummary: buildReviewerSummary(merged),
     };
 }
@@ -363,7 +441,9 @@ function scopeHintsFromPayload(payload) {
  */
 function attachCanonicalGovernance(payload) {
     const structuralViolations = asStructuralViolations(payload.structuralViolations);
-    const policyViolations = asRuleViolationsFromPayloadViolations(payload);
+    // Strip structural:* rows before building the envelope — these are echoed
+    // from mergeStructuralIntoPolicyViolations() and would cause duplicates.
+    const policyViolations = stripStructuralPolicyRows(asRuleViolationsFromPayloadViolations(payload));
     const intentIssues = Array.isArray(payload.intentIssues) ? payload.intentIssues : [];
     const flowIssues = Array.isArray(payload.flowIssues) ? payload.flowIssues : [];
     const regressions = Array.isArray(payload.regressions) ? payload.regressions : [];
@@ -395,6 +475,7 @@ function evaluateGovernanceReplayIntegrity(input) {
     const graphMismatches = [];
     const semanticTruncationMismatches = [];
     const notes = [];
+    const driftReasons = new Set();
     const ev = input.evidencePayload.governanceVerification;
     const rec = input.reconstructedPayload?.governanceVerification;
     if (!ev && !rec) {
@@ -406,23 +487,101 @@ function evaluateGovernanceReplayIntegrity(input) {
             graphMismatches,
             semanticTruncationMismatches,
             notes,
+            driftReasons: [],
         };
     }
     if (ev && !rec) {
         missingArtifacts.push('governanceVerification missing from reconstructed payload');
     }
     else if (ev && rec) {
+        // ── 1. Schema version ──────────────────────────────────────────────────────
         if (ev.schemaVersion !== rec.schemaVersion) {
             provenanceMismatches.push(`schemaVersion drift: evidence=${ev.schemaVersion} replay=${rec.schemaVersion}`);
+            driftReasons.add('provenance-drift');
         }
+        // ── 2. Finding count equality ──────────────────────────────────────────────
         if (ev.findings.length !== rec.findings.length) {
             provenanceMismatches.push(`findings count drift: evidence=${ev.findings.length} replay=${rec.findings.length}`);
         }
-        const evIds = new Set(ev.findings.map((f) => f.id));
-        for (const f of rec.findings) {
-            if (!evIds.has(f.id)) {
-                provenanceMismatches.push(`unexpected finding id in replay: ${f.id}`);
+        // ── 3. Missing / extra findings ────────────────────────────────────────────
+        const evById = new Map(ev.findings.map(f => [f.id, f]));
+        const recById = new Map(rec.findings.map(f => [f.id, f]));
+        for (const [id] of evById) {
+            if (!recById.has(id)) {
+                graphMismatches.push(`missing-finding in replay: ${id}`);
+                driftReasons.add('missing-finding');
             }
+        }
+        for (const [id] of recById) {
+            if (!evById.has(id)) {
+                graphMismatches.push(`extra-finding in replay: ${id}`);
+                driftReasons.add('extra-finding');
+            }
+        }
+        // ── 4. Per-finding semantic equality (severity, determinism, provenance, suppression) ──
+        for (const [id, evF] of evById) {
+            const recF = recById.get(id);
+            if (!recF)
+                continue; // already reported as missing above
+            if (evF.severity !== recF.severity) {
+                graphMismatches.push(`severity-drift on ${id}: evidence=${evF.severity} replay=${recF.severity}`);
+                driftReasons.add('severity-drift');
+            }
+            if (evF.determinismClassification !== recF.determinismClassification) {
+                graphMismatches.push(`determinism-drift on ${id}: ` +
+                    `evidence=${evF.determinismClassification} replay=${recF.determinismClassification}`);
+                driftReasons.add('determinism-drift');
+            }
+            // Provenance: compare planId if present
+            const evProv = evF.provenanceMetadata;
+            const recProv = recF.provenanceMetadata;
+            if (evProv && recProv) {
+                if (evProv.planId !== recProv.planId) {
+                    provenanceMismatches.push(`provenance planId drift on ${id}: evidence=${evProv.planId} replay=${recProv.planId}`);
+                    driftReasons.add('provenance-drift');
+                }
+            }
+            else if (evProv && !recProv) {
+                provenanceMismatches.push(`provenance-drift on ${id}: evidence has provenanceMetadata, replay does not`);
+                driftReasons.add('provenance-drift');
+            }
+            // Structural policyRef: compare via structuralMetadata
+            const evSM = evF.structuralMetadata;
+            const recSM = recF.structuralMetadata;
+            if (evSM && recSM && evSM.policyRef !== recSM.policyRef) {
+                provenanceMismatches.push(`policyRef drift on ${id}: evidence=${evSM.policyRef} replay=${recSM.policyRef}`);
+                driftReasons.add('provenance-drift');
+            }
+            // Suppression: compare suppressionMetadata presence
+            const evSupp = evF.suppressionMetadata;
+            const recSupp = recF.suppressionMetadata;
+            if (Boolean(evSupp) !== Boolean(recSupp)) {
+                graphMismatches.push(`suppression-drift on ${id}: ` +
+                    `evidence ${evSupp ? 'suppressed' : 'not-suppressed'} vs ` +
+                    `replay ${recSupp ? 'suppressed' : 'not-suppressed'}`);
+                driftReasons.add('suppression-drift');
+            }
+        }
+        // ── 5. Canonical ordering equality ────────────────────────────────────────
+        // Both arrays should be in canonical order. Compare the ordered ID sequences.
+        const evOrderedIds = ev.findings.map(f => f.id).join('\x00');
+        const recOrderedIds = rec.findings.map(f => f.id).join('\x00');
+        if (evOrderedIds !== recOrderedIds && ev.findings.length === rec.findings.length) {
+            graphMismatches.push('finding-order-drift: canonical ordering differs between evidence and replay');
+            driftReasons.add('finding-order-drift');
+        }
+        // ── 6. Checksum equality ───────────────────────────────────────────────────
+        if (ev.replayChecksum && rec.replayChecksum) {
+            if (ev.replayChecksum !== rec.replayChecksum) {
+                const comparison = (0, canonical_invariants_1.compareForReplayEquivalence)(ev.findings, rec.findings);
+                graphMismatches.push(`checksum-drift: evidence=${ev.replayChecksum.slice(0, 16)} ` +
+                    `replay=${rec.replayChecksum.slice(0, 16)}` +
+                    (comparison.driftDetails ? ` (${comparison.driftDetails})` : ''));
+                driftReasons.add('checksum-drift');
+            }
+        }
+        else if (ev.replayChecksum && !rec.replayChecksum) {
+            notes.push('Replay envelope missing replayChecksum (older CLI version); falling back to per-field comparison.');
         }
     }
     const trunc = input.evidencePayload.semanticTruncation
@@ -430,12 +589,20 @@ function evaluateGovernanceReplayIntegrity(input) {
     if (trunc === true) {
         semanticTruncationMismatches.push('Semantic or index truncation flagged on payload');
     }
-    const status = missingArtifacts.length === 0
-        && provenanceMismatches.length === 0
-        && graphMismatches.length === 0
-        && semanticTruncationMismatches.length === 0
-        ? 'exact'
-        : 'bounded-degradation';
+    const hasDrift = driftReasons.size > 0 && (driftReasons.has('checksum-drift') ||
+        driftReasons.has('severity-drift') ||
+        driftReasons.has('determinism-drift') ||
+        driftReasons.has('finding-order-drift') ||
+        driftReasons.has('missing-finding') ||
+        driftReasons.has('extra-finding'));
+    const status = hasDrift
+        ? 'drift-detected'
+        : missingArtifacts.length === 0
+            && provenanceMismatches.length === 0
+            && graphMismatches.length === 0
+            && semanticTruncationMismatches.length === 0
+            ? 'exact'
+            : 'bounded-degradation';
     return {
         status,
         missingArtifacts,
@@ -443,6 +610,7 @@ function evaluateGovernanceReplayIntegrity(input) {
         graphMismatches,
         semanticTruncationMismatches,
         notes,
+        driftReasons: [...driftReasons].sort(),
     };
 }
 //# sourceMappingURL=canonical-pipeline.js.map

@@ -52,6 +52,8 @@ const contract_1 = require("./commands/contract");
 const feedback_1 = require("./commands/feedback");
 const guard_1 = require("./commands/guard");
 const bootstrap_1 = require("./commands/bootstrap");
+const quickstart_1 = require("./commands/quickstart");
+const bootstrap_policy_1 = require("./commands/bootstrap-policy");
 const messages_1 = require("./utils/messages");
 const config_2 = require("./config");
 const start_intent_1 = require("./commands/start-intent");
@@ -337,6 +339,32 @@ program
     (0, doctor_1.doctorCommand)({
         json: options.json,
         cliVersion: version,
+    });
+});
+program
+    .command('quickstart')
+    .description('Guided onboarding — first deterministic finding in under 2 minutes (no network required)')
+    .option('--force', 'Overwrite existing starter files')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, quickstart_1.quickstartCommand)({
+        force: options.force === true,
+        json: options.json === true,
+    });
+});
+program
+    .command('bootstrap-policy')
+    .description('Generate deterministic enterprise policies based on detected repo ecosystem (no network, no LLM)')
+    .option('--force', 'Overwrite existing policy file')
+    .option('--ecosystem <type>', 'Override detected ecosystem (typescript|python|go|java|infra|mixed)')
+    .option('--profile <type>', 'Override detected profile (backend-service|auth-payment|queue-workflow|infra|general)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, bootstrap_policy_1.bootstrapPolicyCommand)({
+        force: options.force === true,
+        ecosystem: options.ecosystem,
+        profile: options.profile,
+        json: options.json === true,
     });
 });
 program

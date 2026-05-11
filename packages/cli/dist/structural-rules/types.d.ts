@@ -19,6 +19,18 @@ export interface StructuralViolation {
     determinism: DeterminismLevel;
     confidence: number;
     language: RuleLanguage;
+    /**
+     * Phase 2 — Diff-scoped enforcement.
+     * true  → violation is on a line modified in the current diff (BLOCKING eligible)
+     * false → violation is on an untouched historical line (demoted to ADVISORY + legacyDebt)
+     * undefined → diff-scope not applied (e.g. --strict-full-file mode)
+     */
+    introducedOnModifiedLine?: boolean;
+    /**
+     * true when the violation is demoted from BLOCKING to ADVISORY because it
+     * exists on an unmodified line. Tagged for reviewer visibility and telemetry.
+     */
+    legacyDebt?: boolean;
 }
 export interface StructuralRuleResult {
     violations: StructuralViolation[];
