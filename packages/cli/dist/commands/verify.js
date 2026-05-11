@@ -67,6 +67,14 @@ const policy_compiler_1 = require("../utils/policy-compiler");
 const change_contract_1 = require("../utils/change-contract");
 const diff_symbols_1 = require("../utils/diff-symbols");
 const advisory_signals_1 = require("../utils/advisory-signals");
+const structural_rules_1 = require("../structural-rules");
+const canonical_pipeline_1 = require("../governance/canonical-pipeline");
+const structural_on_diff_1 = require("../governance/structural-on-diff");
+const structural_policy_merge_1 = require("../governance/structural-policy-merge");
+const telemetry_1 = require("@neurcode-ai/telemetry");
+const governance_provenance_1 = require("../utils/governance-provenance");
+const pilot_metrics_1 = require("../utils/pilot-metrics");
+const explainability_1 = require("../explainability");
 const runtime_guard_1 = require("../utils/runtime-guard");
 const artifact_signature_1 = require("../utils/artifact-signature");
 const policy_1 = require("@neurcode-ai/policy");
@@ -1080,10 +1088,17 @@ function toCanonicalVerifyOutput(payload) {
         'policyDecision',
         'policyPack',
         'changeContractViolations',
+        'governanceVerification',
+        'governanceFindings',
+        'structuralViolations',
+        'structuralRulesApplied',
+        'structuralSuppressedCount',
     ];
+    const canonicalMutable = canonical;
     for (const key of passthroughKeys) {
-        if (Object.prototype.hasOwnProperty.call(payload, key) && payload[key] !== undefined) {
-            canonical[key] = payload[key];
+        const v = payload[key];
+        if (Object.prototype.hasOwnProperty.call(payload, key) && v !== undefined && v !== null) {
+            canonicalMutable[key] = v;
         }
     }
     // Backward-compatibility alias: older integrations and tests expect `rule`
@@ -1099,7 +1114,7 @@ function toCanonicalVerifyOutput(payload) {
     return canonical;
 }
 function emitCanonicalVerifyJson(payload, onEmit) {
-    const canonical = toCanonicalVerifyOutput(payload);
+    const canonical = toCanonicalVerifyOutput((0, canonical_pipeline_1.attachCanonicalGovernance)(payload));
     onEmit?.(canonical);
     // Use sync stdout write so immediate process.exit paths do not truncate JSON.
     const serialized = Buffer.from(`${JSON.stringify(canonical, null, 2)}\n`, 'utf-8');
@@ -1916,6 +1931,8 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
             message: `Policy audit chain is invalid: ${auditIntegrityStatus.issues.join('; ') || 'unknown issue'}`,
         });
     }
+    const policyOnlyStructural = (0, structural_on_diff_1.runStructuralOnDiffFiles)(projectRoot, diffFilesForPolicy);
+    (0, structural_policy_merge_1.mergeStructuralIntoPolicyViolations)(policyViolations, policyOnlyStructural.violations);
     policyDecision = resolvePolicyDecisionFromViolations(policyViolations);
     const effectiveVerdict = policyDecision === 'block' ? 'FAIL' : policyDecision === 'warn' ? 'WARN' : 'PASS';
     const grade = effectiveVerdict === 'PASS' ? 'A' : effectiveVerdict === 'WARN' ? 'C' : 'F';
@@ -1984,6 +2001,9 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         plannedFilesModified: 0,
         totalPlannedFiles: 0,
         adherenceScore: score,
+        structuralViolations: policyOnlyStructural.violations,
+        structuralRulesApplied: policyOnlyStructural.rulesApplied,
+        structuralSuppressedCount: policyOnlyStructural.suppressedCount,
         mode: 'policy_only',
         policyOnly: true,
         policyOnlySource: source,
@@ -2067,6 +2087,8 @@ async function verifyCommand(options) {
         const evidenceEnabled = options.evidence === true || isEnabledFlag(process.env.NEURCODE_VERIFY_EVIDENCE);
         const verifyStartedAtMs = Date.now();
         const evidenceCiContext = collectCIContext();
+        /** Set when provenance is written (human path); JSON early-exit may leave null. */
+        let lastProvenanceRunId = null;
         let lastCanonicalOutput = null;
         let lastEvidenceFallbackOutput = null;
         let evidenceFinalizeAttempted = false;
@@ -2120,6 +2142,12 @@ async function verifyCommand(options) {
         };
         const exitWithEvidence = (exitCode) => {
             finalizeEvidence(exitCode);
+            try {
+                (0, telemetry_1.appendVerifyCompletedFromCanonical)(projectRoot, lastCanonicalOutput, lastProvenanceRunId);
+            }
+            catch {
+                // calibration must never affect exit
+            }
             process.exit(exitCode);
         };
         exitWithEvidenceFromTry = exitWithEvidence;
@@ -2130,6 +2158,10 @@ async function verifyCommand(options) {
         let intentEngineSummary = null;
         let intentEngineFlowIssues = [];
         let intentEngineRegressions = [];
+        // Structural rule engine results — AST-level deterministic violations
+        let structuralViolations = [];
+        let structuralRulesApplied = [];
+        let structuralSuppressedCount = 0;
         const emitVerifyJson = (payload) => {
             const enrichedPayload = {
                 ...payload,
@@ -2143,6 +2175,9 @@ async function verifyCommand(options) {
                 flowIssues: payload.flowIssues ?? intentEngineFlowIssues,
                 // V6: regressions always injected
                 regressions: payload.regressions ?? intentEngineRegressions,
+                structuralViolations: payload.structuralViolations ?? structuralViolations,
+                structuralRulesApplied: payload.structuralRulesApplied ?? structuralRulesApplied,
+                structuralSuppressedCount: payload.structuralSuppressedCount ?? structuralSuppressedCount,
             };
             lastEvidenceFallbackOutput = enrichedPayload;
             emitCanonicalVerifyJson(enrichedPayload, (canonical) => {
@@ -2461,10 +2496,14 @@ async function verifyCommand(options) {
                 console.log(chalk.dim('   CI mode: deterministic local verification enabled (policy-only, non-interactive).'));
             }
         }
-        const enforceCompatibilityHandshake = isEnabledFlag(process.env.NEURCODE_VERIFY_ENFORCE_COMPAT_HANDSHAKE)
-            || strictArtifactMode
-            || (process.env.CI === 'true' && Boolean(config.apiKey));
-        if (config.apiKey && config.apiUrl) {
+        // NEURCODE_VERIFY_LOCAL_ONLY=1 or --local-only: skip API entirely, run structural-only
+        const localOnlyMode = isEnabledFlag(process.env.NEURCODE_VERIFY_LOCAL_ONLY)
+            || options.localOnly === true;
+        const enforceCompatibilityHandshake = !localOnlyMode
+            && (isEnabledFlag(process.env.NEURCODE_VERIFY_ENFORCE_COMPAT_HANDSHAKE)
+                || strictArtifactMode
+                || (process.env.CI === 'true' && Boolean(config.apiKey)));
+        if (!localOnlyMode && config.apiKey && config.apiUrl) {
             const compatibilityProbe = await probeApiRuntimeCompatibility(config.apiUrl);
             if (compatibilityProbe.status !== 'ok' && enforceCompatibilityHandshake) {
                 const failureMessages = compatibilityProbe.messages.length > 0
@@ -2493,6 +2532,7 @@ async function verifyCommand(options) {
                         mode: 'runtime_compatibility_failed',
                         policyOnly: options.policyOnly === true,
                         changeContract: changeContractSummary,
+                        offlineFallbackHint: 'Run with NEURCODE_VERIFY_LOCAL_ONLY=1 or --local-only for offline structural verification.',
                         ...(compiledPolicyMetadata ? { policyCompilation: compiledPolicyMetadata } : {}),
                     });
                 }
@@ -2507,6 +2547,7 @@ async function verifyCommand(options) {
                     }
                     console.log(chalk.dim(`   CLI version: ${CLI_COMPONENT_VERSION}`));
                     console.log(chalk.dim('   Upgrade/downgrade CLI, Action, or API to satisfy the runtime compatibility contract before running verify.\n'));
+                    console.log(chalk.dim('   Tip: Use --local-only to run offline deterministic structural verification without the API.\n'));
                 }
                 exitWithEvidence(2);
             }
@@ -2726,6 +2767,62 @@ async function verifyCommand(options) {
             const excludeOldPath = file.oldPath ? isExcludedFile(file.oldPath) : false;
             return !excludePath && !excludeOldPath;
         });
+        // ── Local-only mode (Part 8): run structural analysis and exit, no API calls ──
+        // Triggered by NEURCODE_VERIFY_LOCAL_ONLY=1 or --local-only.
+        // Deterministic structural governance MUST work offline, with zero API dependency.
+        if (localOnlyMode) {
+            if (!options.json) {
+                console.log(chalk.cyan('\n🔍 Local-only mode: deterministic structural verification (no API required)...'));
+            }
+            const localStructural = (0, structural_on_diff_1.runStructuralOnDiffFiles)(projectRoot, diffFiles);
+            const blockingViolations = localStructural.violations.filter((v) => v.severity === 'BLOCKING');
+            const localVerdict = blockingViolations.length > 0 ? 'FAIL' : 'PASS';
+            const localGrade = blockingViolations.length > 0 ? 'F' : 'B';
+            const localScore = blockingViolations.length > 0 ? 0 : 70;
+            if (options.json) {
+                emitVerifyJson({
+                    grade: localGrade,
+                    score: localScore,
+                    verdict: localVerdict,
+                    violations: localStructural.violations.map((v) => ({
+                        file: v.filePath,
+                        rule: v.ruleId,
+                        severity: v.severity === 'BLOCKING' ? 'block' : 'warn',
+                        message: `${v.ruleName}: ${v.evidence.slice(0, 120)}`,
+                    })),
+                    adherenceScore: localScore,
+                    bloatCount: 0,
+                    bloatFiles: [],
+                    plannedFilesModified: 0,
+                    totalPlannedFiles: 0,
+                    message: `Local-only structural verification: ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking.`,
+                    scopeGuardPassed: true,
+                    mode: 'local_only_structural',
+                    policyOnly: true,
+                    structuralViolations: localStructural.violations,
+                    structuralBlockingCount: blockingViolations.length,
+                    structuralRulesApplied: localStructural.rulesApplied,
+                    changeContract: changeContractSummary,
+                });
+            }
+            else {
+                if (localStructural.violations.length === 0) {
+                    console.log(chalk.green('\n✅ No structural violations found (local-only mode).'));
+                }
+                else {
+                    localStructural.violations.forEach((v) => {
+                        const prefix = v.severity === 'BLOCKING' ? chalk.red('  ⛔ BLOCKING') : chalk.yellow('  ⚠  ADVISORY');
+                        console.log(`${prefix}  ${v.ruleId} — ${v.filePath}:${v.line}`);
+                        console.log(chalk.dim(`     ${v.ruleName}`));
+                        console.log(chalk.dim(`     ${v.evidence.slice(0, 100)}`));
+                    });
+                }
+                console.log(chalk.dim(`\n[Local-only] ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking. ` +
+                    `Remove --local-only for full governance verification.\n`));
+            }
+            recordVerifyEvent(localVerdict, `local_only;structural=${localStructural.violations.length}`, diffFiles.map((f) => f.path));
+            exitWithEvidence(blockingViolations.length > 0 ? 2 : 0);
+        }
         const summary = (0, diff_parser_1.getDiffSummary)(diffFiles);
         if (diffFiles.length === 0) {
             if (!options.json) {
@@ -3124,15 +3221,50 @@ async function verifyCommand(options) {
                 summary,
             });
             const advisoryWarnCount = advisorySignals.filter((item) => item.severity === 'warn').length;
-            const advisoryVerdict = advisoryWarnCount > 0 ? 'WARN' : 'PASS';
-            const advisoryGrade = advisoryWarnCount > 0 ? 'C' : 'B';
-            const advisoryScore = advisoryWarnCount > 0 ? 60 : 70;
-            const advisoryViolations = advisorySignals.map((item) => ({
-                file: item.files[0] || '.',
-                rule: `advisory:${item.code.toLowerCase()}`,
-                severity: item.severity === 'warn' ? 'warn' : 'allow',
-                message: `${item.title}: ${item.detail}`,
-            }));
+            // ── Advisory-first: always run structural rules, downgrade scope issues to advisory ──
+            // Structural rules are deterministic and local — they MUST always run regardless of plan.
+            let advisoryStructuralViolations = [];
+            let advisoryStructuralBlockingCount = 0;
+            try {
+                if (!options.json) {
+                    console.log(chalk.cyan('🔍 Running deterministic structural analysis (advisory mode — no plan)...'));
+                }
+                const structuralResult = (0, structural_on_diff_1.runStructuralOnDiffFiles)(projectRoot, diffFiles);
+                advisoryStructuralViolations = structuralResult.violations;
+                // In advisory mode (no plan), BLOCKING structural violations are downgraded to advisory warnings.
+                // They are still surfaced — engineers must review them — but they do not block the verify exit.
+                advisoryStructuralBlockingCount = structuralResult.violations.filter((v) => v.severity === 'BLOCKING').length;
+                if (!options.json && advisoryStructuralViolations.length > 0) {
+                    console.log(chalk.yellow(`\n⚠  Structural findings (advisory — link a plan to enable enforcement):`));
+                    advisoryStructuralViolations.forEach((v) => {
+                        const prefix = v.severity === 'BLOCKING' ? chalk.yellow('  ⚠ BLOCKING (advisory)') : chalk.dim('  ℹ ADVISORY');
+                        console.log(`${prefix}  ${v.ruleId} — ${v.filePath}:${v.line}`);
+                        console.log(chalk.dim(`     ${v.ruleName}`));
+                        console.log(chalk.dim(`     ${v.evidence.slice(0, 100)}`));
+                    });
+                    console.log(chalk.dim(`\n  To enforce these findings: run \`neurcode plan "<intent>"\` to link a plan.\n`));
+                }
+            }
+            catch {
+                // Structural engine failure must never block advisory verify
+            }
+            const advisoryVerdict = advisoryWarnCount > 0 || advisoryStructuralBlockingCount > 0 ? 'WARN' : 'PASS';
+            const advisoryGrade = advisoryWarnCount > 0 || advisoryStructuralBlockingCount > 0 ? 'C' : 'B';
+            const advisoryScore = advisoryWarnCount > 0 || advisoryStructuralBlockingCount > 0 ? 60 : 70;
+            const advisoryViolations = [
+                ...advisorySignals.map((item) => ({
+                    file: item.files[0] || '.',
+                    rule: `advisory:${item.code.toLowerCase()}`,
+                    severity: item.severity === 'warn' ? 'warn' : 'allow',
+                    message: `${item.title}: ${item.detail}`,
+                })),
+                ...advisoryStructuralViolations.map((v) => ({
+                    file: v.filePath,
+                    rule: `structural-advisory:${v.ruleId.toLowerCase()}`,
+                    severity: 'warn',
+                    message: `${v.ruleId} ${v.ruleName}: ${v.evidence.slice(0, 100)} (advisory — link plan to enforce)`,
+                })),
+            ];
             recordVerifyEvent(advisoryVerdict, `advisory_missing_plan;signals=${advisorySignals.length};warn=${advisoryWarnCount}`, diffFiles.map((f) => f.path));
             if (options.json) {
                 emitVerifyJson({
@@ -3150,6 +3282,11 @@ async function verifyCommand(options) {
                     mode: 'advisory_missing_plan',
                     advisoryMode: true,
                     advisorySignals,
+                    structuralViolations: advisoryStructuralViolations,
+                    structuralBlockingCount: advisoryStructuralBlockingCount,
+                    structuralNote: advisoryStructuralBlockingCount > 0
+                        ? `${advisoryStructuralBlockingCount} structural finding(s) surfaced in advisory mode. Link a plan to enforce.`
+                        : undefined,
                     policyOnly: true,
                     policyOnlySource: 'fallback_missing_plan',
                     ...(autoContractPath
@@ -3253,6 +3390,36 @@ async function verifyCommand(options) {
                 }
                 catch {
                     // Non-fatal: intent engine errors must never break verification
+                }
+            }
+            // ── Structural Rule Engine ──────────────────────────────────────────────
+            // AST-level deterministic analysis against changed files.
+            // Reads file contents from disk; never throws — errors are isolated per file.
+            if (diffFiles.length > 0) {
+                try {
+                    const structuralEngine = (0, structural_rules_1.createDefaultStructuralRuleEngine)();
+                    const filesToAnalyze = [];
+                    for (const df of diffFiles) {
+                        const absPath = (0, path_1.join)(projectRoot, df.path);
+                        if ((0, fs_1.existsSync)(absPath)) {
+                            try {
+                                const sourceText = (0, fs_1.readFileSync)(absPath, 'utf-8');
+                                filesToAnalyze.push({ filePath: df.path, sourceText });
+                            }
+                            catch {
+                                // Skip unreadable files
+                            }
+                        }
+                    }
+                    if (filesToAnalyze.length > 0) {
+                        const structuralResult = structuralEngine.analyze(filesToAnalyze);
+                        structuralViolations = structuralResult.violations;
+                        structuralRulesApplied = structuralResult.rulesApplied;
+                        structuralSuppressedCount = structuralResult.suppressedCount;
+                    }
+                }
+                catch {
+                    // Non-fatal: structural engine errors must never break verification
                 }
             }
             governanceResult = (0, governance_1.evaluateGovernance)({
@@ -3804,6 +3971,7 @@ async function verifyCommand(options) {
                 message: `Policy audit chain is invalid: ${auditIntegrityStatus.issues.join('; ') || 'unknown issue'}`,
             });
         }
+        (0, structural_policy_merge_1.mergeStructuralIntoPolicyViolations)(policyViolations, structuralViolations);
         policyDecision = resolvePolicyDecisionFromViolations(policyViolations);
         const policyExceptionsSummary = {
             sourceMode: policyExceptionResolution.mode,
@@ -4251,6 +4419,9 @@ async function verifyCommand(options) {
                 plannedFilesModified: verifyResult.plannedFilesModified,
                 totalPlannedFiles: verifyResult.totalPlannedFiles,
                 verificationSource: verifySource,
+                structuralViolations,
+                structuralRulesApplied,
+                structuralSuppressedCount,
                 mode: 'plan_enforced',
                 policyOnly: false,
                 aiDebt: aiDebtSummary,
@@ -4322,7 +4493,7 @@ async function verifyCommand(options) {
                     message: effectiveMessage,
                     bloatFiles: displayBloatFiles,
                     bloatCount: displayBloatFiles.length,
-                }, policyViolations, expediteModeEnabled, intentEngineIssues, intentEngineSummary, intentEngineFlowIssues, intentEngineRegressions);
+                }, policyViolations, expediteModeEnabled, intentEngineIssues, intentEngineSummary, intentEngineFlowIssues, intentEngineRegressions, structuralViolations);
                 if (governanceResult) {
                     displayGovernanceInsights(governanceResult, { explain: options.explain });
                 }
@@ -4385,6 +4556,58 @@ async function verifyCommand(options) {
                         console.log(chalk.dim('   Intent proof repo scan reached configured file/byte limit (truncated).'));
                     }
                 }
+            }
+            // ── Governance Provenance Chain + Pilot Metrics ───────────────────────
+            // Best-effort: never throws, never changes the verification outcome.
+            try {
+                const structuralBlocking = structuralViolations.filter(v => v.severity === 'BLOCKING').length;
+                const structuralAdvisory = structuralViolations.filter(v => v.severity === 'ADVISORY').length;
+                const deterministicSigs = structuralViolations.filter(v => v.determinism === 'deterministic-structural').length;
+                const heuristicSigs = structuralViolations.filter(v => v.determinism === 'heuristic-advisory').length;
+                const trustScore = structuralViolations.length > 0
+                    ? Math.round((deterministicSigs / structuralViolations.length) * 100)
+                    : 100;
+                const prov = (0, governance_provenance_1.buildProvenanceRecord)({
+                    repoRoot: projectRoot,
+                    filesAnalyzed: diffFiles.length,
+                    diffContext: `${options.base || 'HEAD'} vs working tree`,
+                    planId: finalPlanId || null,
+                    intentHash: null,
+                    policyHash: null,
+                    ruleIds: structuralRulesApplied,
+                    blockingCount: policyViolations.filter((v) => v.severity === 'block').length + structuralBlocking,
+                    advisoryCount: policyViolations.filter((v) => v.severity !== 'block').length + structuralAdvisory,
+                    suppressedCount: structuralSuppressedCount,
+                    structuralBlockingCount: structuralBlocking,
+                    structuralAdvisoryCount: structuralAdvisory,
+                    deterministicSignals: deterministicSigs,
+                    heuristicSignals: heuristicSigs,
+                    overallTrustScore: trustScore,
+                    verdict: effectiveVerdict,
+                    governanceDecision: governanceResult?.governanceDecision?.summary || 'automatic',
+                });
+                (0, governance_provenance_1.saveProvenanceRecord)(projectRoot, prov);
+                lastProvenanceRunId = prov.runId;
+                // Tally per-rule counts for pilot metrics
+                const ruleCounts = {};
+                for (const v of structuralViolations) {
+                    ruleCounts[v.ruleId] = (ruleCounts[v.ruleId] ?? 0) + 1;
+                }
+                (0, pilot_metrics_1.recordVerifyRun)(projectRoot, {
+                    planCount: 0,
+                    verifyCount: 1,
+                    passCount: effectiveVerdict === 'PASS' ? 1 : 0,
+                    failCount: effectiveVerdict === 'FAIL' ? 1 : 0,
+                    blockingCaught: prov.blockingCount,
+                    advisoryCaught: prov.advisoryCount,
+                    suppressions: structuralSuppressedCount,
+                    structuralCaught: structuralViolations.length,
+                    aiDebtDelta: aiDebtSummary?.score ?? 0,
+                    ruleCounts,
+                });
+            }
+            catch {
+                // Never break verification
             }
             // Report to Neurcode Cloud if --record flag is set
             const filteredBloatForReport = (verifyResult.bloatFiles || []).filter((f) => !shouldIgnore(f));
@@ -4855,7 +5078,7 @@ function displayChangeContractDrift(summary, options = { advisory: false }) {
 /**
  * Display verification results in a formatted report card
  */
-function displayVerifyResults(result, policyViolations, expediteModeUsed = false, intentIssuesForDisplay = [], intentSummaryForDisplay = null, flowIssuesForDisplay = [], regressionsForDisplay = []) {
+function displayVerifyResults(result, policyViolations, expediteModeUsed = false, intentIssuesForDisplay = [], intentSummaryForDisplay = null, flowIssuesForDisplay = [], regressionsForDisplay = [], structuralViolationsForDisplay = []) {
     // ── Header ────────────────────────────────────────────────────────────────
     const headerLabel = result.verdict === 'PASS'
         ? chalk.bold.green('\n✅ VERIFICATION PASSED')
@@ -4937,6 +5160,19 @@ function displayVerifyResults(result, policyViolations, expediteModeUsed = false
         policy: item.rule || 'policy_violation',
         severity: item.severity,
     }));
+    // Structural rule violations — split by severity
+    const structuralBlocking = structuralViolationsForDisplay
+        .filter((v) => v.severity === 'BLOCKING')
+        .map((v) => ({
+        file: v.filePath,
+        message: `${v.ruleId} · ${v.ruleName} (line ${v.line}) — ${v.operationalRisk}`,
+    }));
+    const structuralAdvisory = structuralViolationsForDisplay
+        .filter((v) => v.severity === 'ADVISORY')
+        .map((v) => ({
+        file: v.filePath,
+        message: `${v.ruleId} · ${v.ruleName} (line ${v.line}) — ${v.operationalRisk}`,
+    }));
     let blockingItems = [
         ...scopeItems.map((item) => ({
             file: item.file,
@@ -4948,13 +5184,17 @@ function displayVerifyResults(result, policyViolations, expediteModeUsed = false
             file: item.file,
             message: item.message,
         })),
+        ...structuralBlocking,
     ];
-    let advisoryItems = policyTriageItems
-        .filter((item) => !isBlockingSeverity(item.severity))
-        .map((item) => ({
-        file: item.file,
-        message: item.message,
-    }));
+    let advisoryItems = [
+        ...policyTriageItems
+            .filter((item) => !isBlockingSeverity(item.severity))
+            .map((item) => ({
+            file: item.file,
+            message: item.message,
+        })),
+        ...structuralAdvisory,
+    ];
     let expediteItems = [];
     if (expediteModeUsed) {
         blockingItems = [
@@ -5065,6 +5305,49 @@ function displayVerifyResults(result, policyViolations, expediteModeUsed = false
             console.log(`  ${chalk.red('[REGRESSION]')} ${icon} ${reg.message}`);
         });
         console.log(chalk.bold.red('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+    }
+    // ── Structural Rule Engine ─────────────────────────────────────────────────
+    // Display detailed structural violations with AST evidence and determinism labels.
+    if (structuralViolationsForDisplay.length > 0) {
+        try {
+            const report = (0, explainability_1.buildViolationReport)(structuralViolationsForDisplay, '');
+            const formatter = new explainability_1.ViolationFormatter();
+            const blocking = report.blocking;
+            const advisory = report.advisory;
+            if (blocking.length > 0 || advisory.length > 0) {
+                console.log(chalk.bold('\n━━━ STRUCTURAL ANALYSIS ━━━━━━━━━━━━━━━━━'));
+                blocking.slice(0, 5).forEach((v) => {
+                    const detLabel = v.determinism === 'deterministic-structural'
+                        ? chalk.cyan('⚙ AST-verified')
+                        : chalk.yellow('⚡ heuristic');
+                    console.log(chalk.red(`\n  ● ${v.ruleId} [BLOCKING] ${detLabel} · confidence ${Math.round(v.confidence * 100)}%`));
+                    console.log(chalk.bold(`    ${v.filePath}:${v.line}`));
+                    console.log(chalk.dim(`    Pattern: ${v.evidence.matchReason}`));
+                    if (v.evidence.codeSnippet) {
+                        console.log(chalk.dim(`    Code:    ${v.evidence.codeSnippet.slice(0, 100)}`));
+                    }
+                    console.log(chalk.yellow(`    Risk:    ${v.operationalRisk}`));
+                    console.log(chalk.green(`    Fix:     ${v.remediation}`));
+                });
+                if (blocking.length > 5) {
+                    console.log(chalk.dim(`\n  ... ${blocking.length - 5} more blocking structural violations`));
+                }
+                advisory.slice(0, 3).forEach((v) => {
+                    console.log(chalk.yellow(`\n  ○ ${v.ruleId} [ADVISORY] ⚡ heuristic · confidence ${Math.round(v.confidence * 100)}%`));
+                    console.log(chalk.dim(`    ${v.filePath}:${v.line} — ${v.operationalRisk}`));
+                });
+                if (advisory.length > 3) {
+                    console.log(chalk.dim(`  ... ${advisory.length - 3} more advisory structural violations`));
+                }
+                const deterministicCount = report.deterministicCount;
+                const heuristicCount = report.heuristicCount;
+                console.log(chalk.dim(`\n  Determinism: ${deterministicCount} AST-verified · ${heuristicCount} heuristic`));
+                console.log(chalk.bold('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+            }
+        }
+        catch {
+            // Non-fatal: explainability rendering must never break verification display
+        }
     }
     const hasAnyIssue = blockingItems.length > 0 ||
         advisoryItems.length > 0 ||

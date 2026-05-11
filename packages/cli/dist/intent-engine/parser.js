@@ -6,6 +6,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseIntent = parseIntent;
+const domain_taxonomy_1 = require("./domain-taxonomy");
 // ── Domain keyword map ────────────────────────────────────────────────────────
 const DOMAIN_KEYWORDS = {
     auth: ['auth', 'login', 'logout', 'jwt', 'token', 'session', 'password',
@@ -24,6 +25,22 @@ const DOMAIN_KEYWORDS = {
     notification: ['notification', 'email', 'sms', 'push', 'alert', 'message'],
     file: ['file', 'upload', 'download', 'storage', 's3', 'blob', 'attachment', 'media'],
     testing: ['test', 'spec', 'mock', 'unit', 'integration', 'e2e', 'coverage'],
+    // ── New domains ─────────────────────────────────────────────────────────────
+    resilience: ['circuit', 'breaker', 'bulkhead', 'retry', 'backoff', 'fallback',
+        'timeout', 'half-open', 'coalesce', 'throttle', 'jitter', 'probe',
+        'resilience', 'shed'],
+    infrastructure: ['middleware', 'proxy', 'gateway', 'kubernetes', 'docker',
+        'container', 'deployment', 'health', 'liveness', 'readiness'],
+    concurrency: ['concurrent', 'async', 'await', 'promise', 'race', 'mutex',
+        'semaphore', 'lock', 'atomic', 'deadlock', 'goroutine', 'asyncio',
+        'thread'],
+    observability: ['metric', 'trace', 'span', 'telemetry', 'prometheus', 'grafana',
+        'datadog', 'alert', 'dashboard', 'monitor'],
+    caching: ['cache', 'redis', 'memcached', 'ttl', 'eviction', 'lru', 'invalidat'],
+    messaging: ['queue', 'topic', 'kafka', 'rabbitmq', 'sqs', 'sns', 'pubsub',
+        'publish', 'subscribe', 'consumer'],
+    'ml-inference': ['model', 'inference', 'embedding', 'vector', 'tensor', 'llm',
+        'gpu', 'cuda', 'onnx'],
 };
 // ── Domain → expected patterns ────────────────────────────────────────────────
 const DOMAIN_PATTERNS = {
@@ -41,6 +58,17 @@ const DOMAIN_PATTERNS = {
     notification: ['retry logic', 'delivery confirmation', 'template validation'],
     file: ['file type validation', 'size limits', 'virus scanning', 'access control'],
     testing: ['coverage thresholds', 'mock boundaries', 'assertion completeness'],
+    // ── New domains ─────────────────────────────────────────────────────────────
+    resilience: ['single-probe half-open gate', 'bounded retry with backoff',
+        'circuit state hooks', 'fallback handler', 'timeout propagation'],
+    infrastructure: ['health endpoint', 'graceful shutdown', 'config validation',
+        'middleware chain'],
+    concurrency: ['abort signal propagation', 'cancellation token',
+        'bounded concurrency', 'timer cleanup'],
+    observability: ['structured logging', 'span creation', 'metric emission',
+        'alert threshold'],
+    caching: ['TTL eviction', 'bounded cache size', 'cache invalidation',
+        'stale-while-revalidate'],
 };
 // ── Domain → critical rules ───────────────────────────────────────────────────
 const DOMAIN_RULES = {
@@ -57,6 +85,12 @@ const DOMAIN_RULES = {
     notification: ['validate-recipients', 'rate-limit-sends'],
     file: ['validate-file-type', 'enforce-size-limit', 'sanitize-filename'],
     testing: ['no-test-skips', 'no-only-blocks'],
+    // ── New domains ─────────────────────────────────────────────────────────────
+    resilience: ['single-probe-halfopen', 'bounded-retry', 'circuit-hooks',
+        'timer-cleanup', 'abort-signal'],
+    infrastructure: ['validate-config', 'graceful-shutdown', 'health-endpoint'],
+    concurrency: ['propagate-abort-signal', 'bounded-concurrency', 'cleanup-timers'],
+    caching: ['bound-cache-size', 'ttl-eviction', 'invalidation-strategy'],
 };
 // ── Public API ────────────────────────────────────────────────────────────────
 function parseIntent(intent) {
@@ -67,12 +101,25 @@ function parseIntent(intent) {
     const words = lower.split(/\W+/).filter(Boolean);
     const wordSet = new Set(words);
     const matchedDomains = new Set();
+    // Step 1: keyword-heuristic matching (existing approach)
     for (const [domain, keywords] of Object.entries(DOMAIN_KEYWORDS)) {
         for (const keyword of keywords) {
             if (lower.includes(keyword) || wordSet.has(keyword)) {
                 matchedDomains.add(domain);
                 break;
             }
+        }
+    }
+    // Step 2: taxonomy-based classification — merge primary domains into results
+    const taxonomyResult = (0, domain_taxonomy_1.classifyDomains)(intent);
+    for (const domainId of taxonomyResult.primary) {
+        // Normalise data-access → database for backward compatibility with
+        // existing DOMAIN_PATTERNS / DOMAIN_RULES keys
+        if (domainId === 'data-access') {
+            matchedDomains.add('database');
+        }
+        else {
+            matchedDomains.add(domainId);
         }
     }
     const domains = [...matchedDomains];

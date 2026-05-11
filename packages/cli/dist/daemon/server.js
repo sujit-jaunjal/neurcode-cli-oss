@@ -47,8 +47,14 @@ const execution_bus_1 = require("../utils/execution-bus");
 const runtime_events_1 = require("../utils/runtime-events");
 const control_plane_1 = require("../utils/control-plane");
 const workspace_runtime_1 = require("../utils/workspace-runtime");
+const workspace_1 = require("../workspace");
+const semantic_1 = require("../semantic");
+const intent_engine_1 = require("../intent-engine");
 const replay_runtime_1 = require("../utils/replay-runtime");
 const contracts_1 = require("@neurcode-ai/contracts");
+const telemetry_1 = require("@neurcode-ai/telemetry");
+const governance_provenance_1 = require("../utils/governance-provenance");
+const pilot_metrics_1 = require("../utils/pilot-metrics");
 // ── Configuration ──────────────────────────────────────────────────────────────
 exports.DAEMON_PORT = Number.parseInt(process.env.NEURCODE_DAEMON_PORT || '4321', 10) || 4321;
 exports.DAEMON_HOST = process.env.NEURCODE_DAEMON_HOST || '127.0.0.1';
@@ -1767,6 +1773,243 @@ async function handleExecuteWorkspace(req, res) {
     });
     success(res, result);
 }
+// ── Semantic Search Handlers ──────────────────────────────────────────────────
+/**
+ * POST /workspaces/:id/semantic-search
+ *
+ * Body: { query: string, limit?: number, minScore?: number }
+ * Returns: { results: SemanticSearchResult[], totalIndexed: number }
+ *
+ * Performs TF-IDF vector similarity search over the brain context index.
+ * Fully deterministic — zero LLM calls, zero external dependencies.
+ */
+async function handleSemanticSearch(req, res, workspaceId) {
+    const workspace = (0, workspace_runtime_1.getWorkspaceById)(workspaceId, process.cwd());
+    if (!workspace) {
+        failure(res, `Workspace not found: ${workspaceId}`, 404, { code: 'workspace.not_found' });
+        return;
+    }
+    let body;
+    try {
+        body = JSON.parse(await readBody(req));
+    }
+    catch {
+        failure(res, 'Invalid JSON body', 400, { code: 'bad_request' });
+        return;
+    }
+    const query = typeof body.query === 'string' ? body.query.trim() : '';
+    if (!query) {
+        failure(res, 'Missing required field: query', 400, { code: 'bad_request' });
+        return;
+    }
+    const limit = typeof body.limit === 'number' ? Math.min(50, Math.max(1, body.limit)) : 10;
+    const minScore = typeof body.minScore === 'number' ? Math.max(0, body.minScore) : 0.01;
+    // Use the first enabled repo root, or fall back to process.cwd()
+    const rootPath = workspace.repositories.find((r) => r.enabled)?.rootPath ?? process.cwd();
+    const scope = { orgId: null, projectId: null };
+    const stats = (0, semantic_1.getSemanticIndexStats)(rootPath, scope);
+    // Auto-build index if it doesn't exist yet
+    if (!stats.exists || stats.documentCount === 0) {
+        (0, semantic_1.buildSemanticIndex)(rootPath, scope);
+    }
+    const results = (0, semantic_1.semanticSearch)(rootPath, scope, query, { limit, minScore });
+    const updatedStats = (0, semantic_1.getSemanticIndexStats)(rootPath, scope);
+    success(res, {
+        schemaVersion: 'neurcode.semantic-search.v1',
+        workspaceId,
+        workspaceName: workspace.name,
+        query,
+        results,
+        totalIndexed: updatedStats.documentCount,
+        indexBuiltAt: updatedStats.builtAt,
+    });
+}
+/**
+ * POST /workspaces/:id/semantic-index/build
+ *
+ * Forces a full semantic index rebuild from the current brain context.
+ * Returns: { documentsIndexed: number, builtAt: string }
+ */
+async function handleBuildSemanticIndex(_req, res, workspaceId) {
+    const workspace = (0, workspace_runtime_1.getWorkspaceById)(workspaceId, process.cwd());
+    if (!workspace) {
+        failure(res, `Workspace not found: ${workspaceId}`, 404, { code: 'workspace.not_found' });
+        return;
+    }
+    const rootPath = workspace.repositories.find((r) => r.enabled)?.rootPath ?? process.cwd();
+    const scope = { orgId: null, projectId: null };
+    const count = (0, semantic_1.buildSemanticIndex)(rootPath, scope);
+    const stats = (0, semantic_1.getSemanticIndexStats)(rootPath, scope);
+    success(res, {
+        schemaVersion: 'neurcode.semantic-index.v1',
+        workspaceId,
+        workspaceName: workspace.name,
+        documentsIndexed: count,
+        builtAt: stats.builtAt,
+        sizeBytes: stats.sizeBytes,
+    });
+}
+/**
+ * POST /workspaces/:id/intent-expand
+ *
+ * Body: { intent: string, forceRefresh?: boolean }
+ *
+ * Returns a rich semantic governance artifact for the given intent.
+ * The artifact is HMAC-signed and cached — subsequent calls return
+ * the stored artifact without calling the LLM again.
+ *
+ * expansionMethod='llm'              → LLM was called (first time only)
+ * expansionMethod='keyword-fallback' → no LLM key configured
+ * signature present                  → tamper-evident, auditable
+ */
+async function handleIntentExpand(req, res, workspaceId) {
+    const workspace = (0, workspace_runtime_1.getWorkspaceById)(workspaceId, process.cwd());
+    if (!workspace) {
+        failure(res, `Workspace not found: ${workspaceId}`, 404, { code: 'workspace.not_found' });
+        return;
+    }
+    let body;
+    try {
+        body = JSON.parse(await readBody(req));
+    }
+    catch {
+        failure(res, 'Invalid JSON body', 400, { code: 'bad_request' });
+        return;
+    }
+    const intent = typeof body.intent === 'string' ? body.intent.trim() : '';
+    if (!intent) {
+        failure(res, 'Missing required field: intent', 400, { code: 'bad_request' });
+        return;
+    }
+    const forceRefresh = body.forceRefresh === true;
+    const rootPath = workspace.repositories.find((r) => r.enabled)?.rootPath ?? process.cwd();
+    // Check cache first (synchronous — no LLM call)
+    if (!forceRefresh) {
+        const cached = (0, intent_engine_1.loadCachedExpansion)(rootPath, intent);
+        if (cached) {
+            success(res, {
+                schemaVersion: 'neurcode.intent-expansion.v1',
+                workspaceId,
+                workspaceName: workspace.name,
+                cacheHit: true,
+                expansion: cached,
+                summary: (0, intent_engine_1.formatExpansionSummary)(cached),
+            });
+            return;
+        }
+    }
+    // Expand (may call LLM or use fallback)
+    try {
+        const expansion = await (0, intent_engine_1.expandIntent)(intent, { cwd: rootPath, forceRefresh });
+        success(res, {
+            schemaVersion: 'neurcode.intent-expansion.v1',
+            workspaceId,
+            workspaceName: workspace.name,
+            cacheHit: false,
+            expansion,
+            summary: (0, intent_engine_1.formatExpansionSummary)(expansion),
+        });
+    }
+    catch (err) {
+        failure(res, `Intent expansion failed: ${err instanceof Error ? err.message : String(err)}`, 500, { code: 'intent_expansion.failed' });
+    }
+}
+// ── Cross-Repo Context Handlers ──────────────────────────────────────────────
+/**
+ * GET /workspaces/:id/cross-repo-graph
+ *
+ * Returns the detected cross-repo dependency graph for all repos in a workspace.
+ * Used by Fix Center to show which services are coupled to the file being patched.
+ *
+ * Query params:
+ *   ?format=summary   — human-readable summary (default: full JSON)
+ */
+async function handleGetCrossRepoGraph(req, res, workspaceId) {
+    const workspace = (0, workspace_runtime_1.getWorkspaceById)(workspaceId, process.cwd());
+    if (!workspace) {
+        failure(res, `Workspace not found: ${workspaceId}`, 404, { code: 'workspace.not_found' });
+        return;
+    }
+    const repos = workspace.repositories.filter((r) => r.enabled);
+    if (repos.length === 0) {
+        success(res, {
+            schemaVersion: 'neurcode.cross-repo-graph.v1',
+            workspaceId,
+            workspaceName: workspace.name,
+            graph: { generatedAt: new Date().toISOString(), repos: [], edges: [], stats: { filesScanned: 0, edgesDetected: 0, byVia: {}, byConfidence: {} } },
+            edgeCount: 0,
+        });
+        return;
+    }
+    const graph = (0, workspace_1.buildCrossRepoGraph)({ repos });
+    success(res, {
+        schemaVersion: 'neurcode.cross-repo-graph.v1',
+        workspaceId,
+        workspaceName: workspace.name,
+        graph,
+        edgeCount: graph.edges.length,
+    });
+}
+/**
+ * POST /workspaces/:id/federated-context
+ *
+ * Builds the full federated context for a set of changed files in the primary repo.
+ * This is the multi-repo blast radius analysis endpoint.
+ *
+ * Body: { primaryRepo: string; changedFiles: string[] }
+ *
+ * Returns:
+ *   - affectedDownstreamRepos: services that call the changed code
+ *   - relevantUpstreamRepos: services the changed code calls
+ *   - federatedBlindSpots: structural coupling invisible to code scanning
+ *   - summary.requiresCoordinatedDeploy: true if any high-confidence edge exists
+ */
+async function handleGetFederatedContext(req, res, workspaceId) {
+    const workspace = (0, workspace_runtime_1.getWorkspaceById)(workspaceId, process.cwd());
+    if (!workspace) {
+        failure(res, `Workspace not found: ${workspaceId}`, 404, { code: 'workspace.not_found' });
+        return;
+    }
+    let body = {};
+    try {
+        body = JSON.parse(await readBody(req));
+    }
+    catch {
+        failure(res, 'Invalid JSON body', 400, { code: 'invalid_body' });
+        return;
+    }
+    const primaryRepo = asNonEmptyString(body.primaryRepo);
+    if (!primaryRepo) {
+        failure(res, 'Missing required field: primaryRepo', 400, { code: 'missing_field' });
+        return;
+    }
+    const changedFiles = Array.isArray(body.changedFiles)
+        ? body.changedFiles.filter((f) => typeof f === 'string')
+        : [];
+    if (changedFiles.length === 0) {
+        failure(res, 'changedFiles must be a non-empty array of strings', 400, { code: 'missing_field' });
+        return;
+    }
+    const repoExists = workspace.repositories.some((r) => r.name === primaryRepo);
+    if (!repoExists) {
+        failure(res, `Repo "${primaryRepo}" not found in workspace "${workspaceId}"`, 404, { code: 'repo.not_found' });
+        return;
+    }
+    const pkg = (0, workspace_1.buildFederatedContext)({
+        workspaceName: workspace.name,
+        repos: workspace.repositories,
+        primaryRepoName: primaryRepo,
+        changedFiles,
+    });
+    const { workspaceName: _wn, ...pkgRest } = pkg;
+    success(res, {
+        schemaVersion: 'neurcode.federated-context.v1',
+        workspaceId,
+        workspaceName: workspace.name,
+        ...pkgRest,
+        humanSummary: (0, workspace_1.formatFederatedContextSummary)(pkg),
+    });
+}
 async function handleReplayState(req, res) {
     const requestUrl = new URL(req.url || '/replay/state', 'http://localhost');
     const at = asNonEmptyString(requestUrl.searchParams.get('at')) || new Date().toISOString();
@@ -1874,6 +2117,770 @@ async function handleRuntimeEventStream(req, res) {
     req.on('close', cleanup);
     req.on('error', cleanup);
     res.on('close', cleanup);
+}
+// ── Governance findings handler ───────────────────────────────────────────────
+// ── Enterprise docs handlers ────────────────────────────────────────────────
+/** Returns a manifest of all enterprise docs with titles and slugs. */
+async function handleDocsManifest(res) {
+    // Resolve docs directory relative to repo root (two levels up from packages/cli/dist or src)
+    const possibleRoots = [
+        path.resolve(__dirname, '..', '..', '..', '..', 'docs', 'enterprise'),
+        path.resolve(process.cwd(), 'docs', 'enterprise'),
+    ];
+    let docsDir = '';
+    for (const candidate of possibleRoots) {
+        if (fs.existsSync(candidate)) {
+            docsDir = candidate;
+            break;
+        }
+    }
+    if (!docsDir) {
+        success(res, { docs: [], docsDir: null, error: 'docs/enterprise/ directory not found' });
+        return;
+    }
+    try {
+        const files = fs.readdirSync(docsDir).filter((f) => f.endsWith('.md')).sort();
+        const docs = files.map((filename) => {
+            const slug = filename.replace(/\.md$/, '');
+            let title = slug;
+            try {
+                const firstLine = fs.readFileSync(path.join(docsDir, filename), 'utf8').split('\n')[0] || '';
+                const match = firstLine.match(/^#+ (.+)/);
+                if (match)
+                    title = match[1].trim();
+            }
+            catch { /* use slug as title */ }
+            return { slug, filename, title };
+        });
+        success(res, { docs, docsDir });
+    }
+    catch (err) {
+        failure(res, err instanceof Error ? err.message : String(err), 500);
+    }
+}
+/** Returns the raw markdown content of a single enterprise doc file. */
+async function handleDocsContent(res, slug) {
+    // Sanitize: only allow alphanumeric, dash, underscore — no path traversal
+    if (!/^[\w-]+$/.test(slug)) {
+        failure(res, 'Invalid doc slug', 400);
+        return;
+    }
+    const possibleRoots = [
+        path.resolve(__dirname, '..', '..', '..', '..', 'docs', 'enterprise'),
+        path.resolve(process.cwd(), 'docs', 'enterprise'),
+    ];
+    let docFile = '';
+    for (const rootDir of possibleRoots) {
+        const candidate = path.join(rootDir, `${slug}.md`);
+        if (fs.existsSync(candidate)) {
+            docFile = candidate;
+            break;
+        }
+    }
+    if (!docFile) {
+        failure(res, `Doc not found: ${slug}`, 404);
+        return;
+    }
+    try {
+        const content = fs.readFileSync(docFile, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-cache' });
+        res.end(content);
+    }
+    catch (err) {
+        failure(res, err instanceof Error ? err.message : String(err), 500);
+    }
+}
+// ── End enterprise docs handlers ────────────────────────────────────────────
+async function handleGovernanceFindings(req, res) {
+    const cwd = process.cwd();
+    const requestUrl = new URL(req.url || '/governance/findings', 'http://localhost');
+    const limitRaw = parseInt(requestUrl.searchParams.get('limit') || '100', 10);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
+    const filterSeverity = requestUrl.searchParams.get('severity') || undefined;
+    const filterRule = requestUrl.searchParams.get('rule') || undefined;
+    const filterFile = requestUrl.searchParams.get('file') || undefined;
+    const filterDeterminism = requestUrl.searchParams.get('determinism') || undefined;
+    const candidatePaths = [
+        path.resolve(cwd, '.neurcode', 'last-verify-output.json'),
+        path.resolve(cwd, '.neurcode', 'verify-output.json'),
+    ];
+    let rawFindings = [];
+    let sourceFile = '';
+    let envelope = {};
+    for (const candidate of candidatePaths) {
+        try {
+            if (fs.existsSync(candidate)) {
+                const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+                if (parsed && typeof parsed === 'object') {
+                    envelope = parsed;
+                    const findings = parsed.findings;
+                    if (Array.isArray(findings)) {
+                        rawFindings = findings;
+                    }
+                    else {
+                        const violations = parsed.violations;
+                        if (Array.isArray(violations)) {
+                            rawFindings = violations.map((v) => ({
+                                findingId: v.ruleId || 'unknown',
+                                ruleId: v.ruleId || 'unknown',
+                                ruleName: v.message || 'Unknown finding',
+                                severity: v.severity || 'advisory',
+                                category: 'structural',
+                                determinism: 'deterministic-structural',
+                                file: v.file,
+                                line: v.line,
+                                message: v.message,
+                                explanation: v.explanation,
+                                source: 'structural-rule-engine',
+                                confidence: v.confidence || 1.0,
+                                remediable: true,
+                                remediationStatus: 'pending',
+                            }));
+                        }
+                    }
+                    sourceFile = candidate;
+                }
+                break;
+            }
+        }
+        catch {
+            // continue to next candidate
+        }
+    }
+    // Filter
+    let filtered = rawFindings;
+    if (filterSeverity) {
+        filtered = filtered.filter((f) => (f.severity || '') === filterSeverity);
+    }
+    if (filterRule) {
+        filtered = filtered.filter((f) => {
+            const ruleId = f.ruleId || '';
+            const ruleName = f.ruleName || '';
+            return ruleId.includes(filterRule) || ruleName.toLowerCase().includes(filterRule.toLowerCase());
+        });
+    }
+    if (filterFile) {
+        filtered = filtered.filter((f) => {
+            const filePath = f.file || '';
+            return filePath.includes(filterFile);
+        });
+    }
+    if (filterDeterminism) {
+        filtered = filtered.filter((f) => (f.determinism || '') === filterDeterminism);
+    }
+    const paginated = filtered.slice(0, limit);
+    const blockingCount = rawFindings.filter((f) => {
+        const sev = (f.severity || '').toLowerCase();
+        return sev === 'critical' || sev === 'high' || sev === 'blocking' || sev === 'block';
+    }).length;
+    const advisoryCount = rawFindings.length - blockingCount;
+    const meta = {
+        verdict: envelope.verdict || (rawFindings.length === 0 ? 'PASS' : blockingCount > 0 ? 'FAIL' : 'WARN'),
+        verifiedAt: envelope.verifiedAt || envelope.timestamp || null,
+        projectRoot: envelope.projectRoot || cwd,
+        planId: envelope.planId || null,
+        schemaVersion: envelope.schemaVersion || null,
+        fingerprint: envelope.fingerprint || null,
+        totalFindings: rawFindings.length,
+        blockingCount,
+        advisoryCount,
+        structuralCount: rawFindings.filter((f) => f.category === 'structural').length,
+        semanticCount: rawFindings.filter((f) => f.category === 'semantic').length,
+        sourceFile: sourceFile || null,
+        filtered: filtered.length,
+        returned: paginated.length,
+    };
+    success(res, { meta, findings: paginated });
+}
+// ── Governance overview handler ───────────────────────────────────────────────
+async function handleGovernanceOverview(_req, res) {
+    const cwd = process.cwd();
+    // Read last verify output
+    let lastVerifyMeta = {};
+    let lastVerifyFindings = [];
+    const verifyPath = path.resolve(cwd, '.neurcode', 'last-verify-output.json');
+    try {
+        if (fs.existsSync(verifyPath)) {
+            const parsed = JSON.parse(fs.readFileSync(verifyPath, 'utf8'));
+            if (parsed && typeof parsed === 'object') {
+                lastVerifyMeta = parsed;
+                const findings = parsed.findings;
+                const violations = parsed.violations;
+                if (Array.isArray(findings))
+                    lastVerifyFindings = findings;
+                else if (Array.isArray(violations))
+                    lastVerifyFindings = violations;
+            }
+        }
+    }
+    catch { /* ignore */ }
+    // Read provenance file for recent runs
+    const provenancePaths = [
+        path.resolve(cwd, '.neurcode', 'provenance.json'),
+        path.resolve(cwd, '.neurcode', 'provenance-chain.json'),
+    ];
+    let recentRuns = [];
+    for (const pp of provenancePaths) {
+        try {
+            if (fs.existsSync(pp)) {
+                const parsed = JSON.parse(fs.readFileSync(pp, 'utf8'));
+                if (Array.isArray(parsed)) {
+                    recentRuns = parsed.slice(-20).reverse();
+                }
+                else if (parsed && typeof parsed === 'object') {
+                    const records = parsed.records;
+                    if (Array.isArray(records))
+                        recentRuns = records.slice(-20).reverse();
+                }
+                break;
+            }
+        }
+        catch { /* ignore */ }
+    }
+    // Compute top triggered rules
+    const ruleFreq = {};
+    for (const f of lastVerifyFindings) {
+        const ruleId = f.ruleId || 'unknown';
+        ruleFreq[ruleId] = (ruleFreq[ruleId] || 0) + 1;
+    }
+    const topRules = Object.entries(ruleFreq)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([ruleId, count]) => ({ ruleId, count }));
+    // Read remediation artifacts
+    const remediationDir = path.resolve(cwd, '.neurcode', 'remediation');
+    let remediationCount = 0;
+    let remediationPending = 0;
+    let remediationValidated = 0;
+    try {
+        if (fs.existsSync(remediationDir)) {
+            const entries = fs.readdirSync(remediationDir);
+            for (const entry of entries) {
+                if (entry.endsWith('-request.json'))
+                    remediationCount++;
+                if (entry.endsWith('-receipt.json'))
+                    remediationValidated++;
+            }
+            remediationPending = remediationCount - remediationValidated;
+        }
+    }
+    catch { /* ignore */ }
+    const blockingCount = lastVerifyFindings.filter((f) => {
+        const sev = (f.severity || '').toLowerCase();
+        return sev === 'critical' || sev === 'high' || sev === 'blocking' || sev === 'block';
+    }).length;
+    success(res, {
+        lastVerify: {
+            verdict: lastVerifyMeta.verdict || (lastVerifyFindings.length === 0 ? 'PASS' : blockingCount > 0 ? 'FAIL' : 'WARN'),
+            verifiedAt: lastVerifyMeta.verifiedAt || lastVerifyMeta.timestamp || null,
+            planId: lastVerifyMeta.planId || null,
+            totalFindings: lastVerifyFindings.length,
+            blockingCount,
+            advisoryCount: lastVerifyFindings.length - blockingCount,
+            topRules,
+        },
+        recentRuns: recentRuns.slice(0, 10),
+        remediation: {
+            total: remediationCount,
+            pending: remediationPending,
+            validated: remediationValidated,
+        },
+        projectRoot: cwd,
+    });
+}
+// ── Brain cache status handler ────────────────────────────────────────────────
+async function handleBrainCacheStatus(_req, res) {
+    const cwd = process.cwd();
+    const brainDir = path.resolve(cwd, '.neurcode', 'brain-cache');
+    const manifestPath = path.resolve(brainDir, 'manifest.json');
+    let manifest = null;
+    let cacheSize = 0;
+    let fileCount = 0;
+    let staleCount = 0;
+    let cacheExists = false;
+    try {
+        cacheExists = fs.existsSync(brainDir);
+        if (cacheExists) {
+            const entries = fs.readdirSync(brainDir);
+            fileCount = entries.length;
+            for (const entry of entries) {
+                try {
+                    const stat = fs.statSync(path.resolve(brainDir, entry));
+                    cacheSize += stat.size;
+                }
+                catch { /* ignore */ }
+            }
+            if (fs.existsSync(manifestPath)) {
+                manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+                const files = manifest.files;
+                if (Array.isArray(files)) {
+                    const now = Date.now();
+                    for (const f of files) {
+                        const cachedAt = f.cachedAt;
+                        if (typeof cachedAt === 'string') {
+                            const age = now - new Date(cachedAt).getTime();
+                            if (age > 24 * 60 * 60 * 1000)
+                                staleCount++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    catch { /* ignore */ }
+    // Check semantic index
+    const semanticIndexPath = path.resolve(brainDir, 'semantic-index.json');
+    const hasSemanticIndex = fs.existsSync(semanticIndexPath);
+    let semanticIndexSize = 0;
+    let semanticIndexAt = null;
+    try {
+        if (hasSemanticIndex) {
+            const stat = fs.statSync(semanticIndexPath);
+            semanticIndexSize = stat.size;
+            const idx = JSON.parse(fs.readFileSync(semanticIndexPath, 'utf8'));
+            semanticIndexAt = idx.indexedAt || null;
+        }
+    }
+    catch { /* ignore */ }
+    success(res, {
+        cacheExists,
+        brainDir,
+        manifest: manifest
+            ? {
+                schemaVersion: manifest.schemaVersion,
+                createdAt: manifest.createdAt,
+                updatedAt: manifest.updatedAt,
+                projectId: manifest.projectId,
+                fileCount: Array.isArray(manifest.files) ? manifest.files.length : fileCount,
+                staleCount,
+                stalePercent: fileCount > 0 ? Math.round((staleCount / fileCount) * 100) : 0,
+            }
+            : null,
+        semanticIndex: {
+            exists: hasSemanticIndex,
+            sizeBytes: semanticIndexSize,
+            indexedAt: semanticIndexAt,
+        },
+        cacheDirSizeBytes: cacheSize,
+        cwd,
+    });
+}
+// ── Remediation status handler ────────────────────────────────────────────────
+async function handleRemediationStatus(_req, res) {
+    const cwd = process.cwd();
+    const remediationDir = path.resolve(cwd, '.neurcode', 'remediation');
+    const artifacts = [];
+    try {
+        if (fs.existsSync(remediationDir)) {
+            const entries = fs.readdirSync(remediationDir).sort().reverse();
+            for (const entry of entries.slice(0, 50)) {
+                if (!entry.endsWith('.json'))
+                    continue;
+                try {
+                    const fullPath = path.resolve(remediationDir, entry);
+                    const stat = fs.statSync(fullPath);
+                    const raw = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+                    const isReceipt = entry.endsWith('-receipt.json');
+                    const isRequest = entry.endsWith('-request.json');
+                    artifacts.push({
+                        filename: entry,
+                        type: isReceipt ? 'receipt' : isRequest ? 'request' : 'unknown',
+                        sizeBytes: stat.size,
+                        createdAt: stat.birthtime.toISOString(),
+                        modifiedAt: stat.mtime.toISOString(),
+                        findingId: raw.findingId || raw.requestId || null,
+                        ruleId: raw.ruleId || null,
+                        status: isReceipt
+                            ? (raw.overallStatus || 'validated')
+                            : 'pending',
+                        passed: isReceipt ? raw.passed || false : null,
+                    });
+                }
+                catch { /* ignore */ }
+            }
+        }
+    }
+    catch { /* ignore */ }
+    const requests = artifacts.filter((a) => a.type === 'request');
+    const receipts = artifacts.filter((a) => a.type === 'receipt');
+    const passedReceipts = receipts.filter((a) => a.passed === true);
+    success(res, {
+        remediationDir,
+        exists: fs.existsSync(remediationDir),
+        summary: {
+            total: requests.length,
+            pending: requests.length - receipts.length,
+            validated: receipts.length,
+            passed: passedReceipts.length,
+            failed: receipts.length - passedReceipts.length,
+        },
+        artifacts,
+        cwd,
+    });
+}
+// ── Pilot report handler ──────────────────────────────────────────────────────
+// Aggregates existing local artifacts only: governance JSONL telemetry, provenance
+// index/legacy chain, pilot-metrics.json, last-verify-output — same sources as
+// `neurcode pilot-report` (no new telemetry systems).
+function pilotReportWindowDays() {
+    return 7;
+}
+function pilotReportCutoffIso(days) {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    return d.toISOString().slice(0, 10);
+}
+function filterTelemetryByWindow(events, fromDate, toDate) {
+    return events.filter((ev) => {
+        const day = ev.emittedAt.slice(0, 10);
+        return day >= fromDate && day <= toDate;
+    });
+}
+function aggregateDeterministicFromTelemetry(events) {
+    let sumDeterministic = 0;
+    let sumFindings = 0;
+    for (const ev of events) {
+        if (ev.eventType !== 'governance.verify.completed')
+            continue;
+        const p = ev.payload;
+        const hist = p.determinismHistogram;
+        const count = p.governanceFindingCount;
+        if (!hist || typeof count !== 'number')
+            continue;
+        sumFindings += count;
+        sumDeterministic += hist['deterministic-structural'] ?? 0;
+    }
+    const deterministicPct = sumFindings > 0 ? sumDeterministic / sumFindings : 0;
+    return { deterministicPct, sumDeterministic, sumFindings };
+}
+function governanceTrustFromPct(deterministicPct) {
+    if (deterministicPct >= 0.7)
+        return 'HIGH';
+    if (deterministicPct >= 0.4)
+        return 'MEDIUM';
+    return 'LOW';
+}
+function advisoryCaughtInPilotWindow(cwd, from, to) {
+    try {
+        const p = path.join(cwd, '.neurcode', 'pilot-metrics.json');
+        if (!fs.existsSync(p))
+            return 0;
+        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (!Array.isArray(raw))
+            return 0;
+        return raw
+            .filter((e) => e.date >= from && e.date <= to)
+            .reduce((s, e) => s + (e.advisoryCaught ?? 0), 0);
+    }
+    catch {
+        return 0;
+    }
+}
+function summarizeTelemetryLine(ev) {
+    if (ev.eventType === 'governance.verify.completed') {
+        const p = ev.payload;
+        const verdict = String(p.verdict ?? '');
+        const n = Number(p.governanceFindingCount ?? 0);
+        const ri = p.replayIntegrityStatus;
+        return {
+            emittedAt: ev.emittedAt,
+            eventType: ev.eventType,
+            summary: `Verify ${verdict} · ${n} findings`,
+            verdict,
+            replayIntegrityStatus: ri ?? null,
+        };
+    }
+    if (ev.eventType === 'rule.trigger') {
+        const p = ev.payload;
+        return {
+            emittedAt: ev.emittedAt,
+            eventType: ev.eventType,
+            summary: `Rule ${p.ruleId ?? '?'} · ${p.count ?? 0}×`,
+        };
+    }
+    return {
+        emittedAt: ev.emittedAt,
+        eventType: ev.eventType,
+        summary: ev.eventType.replace(/\./g, ' '),
+    };
+}
+async function handlePilotReport(_req, res) {
+    const cwd = process.cwd();
+    const days = pilotReportWindowDays();
+    const periodTo = new Date().toISOString().slice(0, 10);
+    const periodFrom = pilotReportCutoffIso(days);
+    // Canonical governance telemetry (JSONL) — same reader as CLI pilot-report
+    const telemetryEnvelopes = (0, telemetry_1.readGovernanceTelemetryEvents)(cwd);
+    const telemetryWindow = filterTelemetryByWindow(telemetryEnvelopes, periodFrom, periodTo);
+    const verifyCompletedInWindow = telemetryWindow.filter((e) => e.eventType === 'governance.verify.completed');
+    // Legacy JSON telemetry (optional fallback counts for older repos)
+    const telemetryPaths = [
+        path.resolve(cwd, '.neurcode', 'telemetry.json'),
+        path.resolve(cwd, '.neurcode', 'telemetry-events.json'),
+    ];
+    let legacyEvents = [];
+    for (const tp of telemetryPaths) {
+        try {
+            if (fs.existsSync(tp)) {
+                const raw = JSON.parse(fs.readFileSync(tp, 'utf8'));
+                if (Array.isArray(raw))
+                    legacyEvents = raw;
+                else if (raw && typeof raw === 'object') {
+                    const evts = raw.events;
+                    if (Array.isArray(evts))
+                        legacyEvents = evts;
+                }
+                break;
+            }
+        }
+        catch { /* ignore */ }
+    }
+    const legacyVerifyEvents = legacyEvents.filter((e) => e.type === 'verify' || e.eventType === 'verify');
+    // Provenance index (preferred) + legacy flat chain files
+    const provIndex = (0, governance_provenance_1.loadProvenanceIndex)(cwd);
+    const provenancePaths = [
+        path.resolve(cwd, '.neurcode', 'provenance.json'),
+        path.resolve(cwd, '.neurcode', 'provenance-chain.json'),
+    ];
+    let legacyRuns = [];
+    for (const pp of provenancePaths) {
+        try {
+            if (fs.existsSync(pp)) {
+                const raw = JSON.parse(fs.readFileSync(pp, 'utf8'));
+                if (Array.isArray(raw))
+                    legacyRuns = raw;
+                else if (raw && typeof raw === 'object') {
+                    const records = raw.records;
+                    if (Array.isArray(records))
+                        legacyRuns = records;
+                }
+                break;
+            }
+        }
+        catch { /* ignore */ }
+    }
+    const indexRecords = [...provIndex.records].sort((a, b) => (a.runAt < b.runAt ? -1 : a.runAt > b.runAt ? 1 : 0));
+    const runsForRates = indexRecords.length > 0
+        ? indexRecords.map((r) => ({ verdict: r.verdict, verifiedAt: r.runAt, blockingCount: 0, fingerprint: r.fingerprint }))
+        : legacyRuns.map((r) => ({
+            verdict: r.verdict,
+            verifiedAt: r.verifiedAt || r.timestamp,
+            blockingCount: r.blockingCount || 0,
+            fingerprint: r.fingerprint,
+        }));
+    const passRuns = runsForRates.filter((r) => String(r.verdict).toUpperCase() === 'PASS');
+    const failRuns = runsForRates.filter((r) => {
+        const v = String(r.verdict).toUpperCase();
+        return v === 'FAIL' || v === 'BLOCK';
+    });
+    const warnRuns = runsForRates.filter((r) => String(r.verdict).toUpperCase() === 'WARN');
+    const total = runsForRates.length;
+    const passRate = total > 0 ? Math.round((passRuns.length / total) * 100) : 0;
+    const failRate = total > 0 ? Math.round((failRuns.length / total) * 100) : 0;
+    const warnRate = total > 0 ? Math.round((warnRuns.length / total) * 100) : 0;
+    // Top rules: legacy deep records + telemetry rollup (merged)
+    const globalRuleFreq = {};
+    for (const run of legacyRuns) {
+        const violations = run.violations;
+        const findings = run.findings;
+        const items = Array.isArray(violations) ? violations : Array.isArray(findings) ? findings : [];
+        for (const item of items) {
+            const ruleId = item.ruleId || 'unknown';
+            globalRuleFreq[ruleId] = (globalRuleFreq[ruleId] || 0) + 1;
+        }
+    }
+    const rollup = (0, telemetry_1.rollupRulePrecisionFromEvents)(telemetryWindow);
+    const telemetryTop = [...(0, telemetry_1.highTrustRuleLeaderboard)(rollup, 10)];
+    for (const r of telemetryTop) {
+        globalRuleFreq[r.ruleId] = (globalRuleFreq[r.ruleId] || 0) + r.triggerCount;
+    }
+    const topRules = Object.entries(globalRuleFreq)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([ruleId, count]) => ({ ruleId, count }));
+    const topRulesTelemetry = telemetryTop.map((r) => ({ ruleId: r.ruleId, triggerCount: r.triggerCount }));
+    // Last verify output for current state
+    let currentVerdict = 'UNKNOWN';
+    let lastVerifiedAt = null;
+    let deterministicFindingCount = 0;
+    const verifyPath = path.resolve(cwd, '.neurcode', 'last-verify-output.json');
+    try {
+        if (fs.existsSync(verifyPath)) {
+            const vf = JSON.parse(fs.readFileSync(verifyPath, 'utf8'));
+            currentVerdict = vf.verdict || 'UNKNOWN';
+            lastVerifiedAt = vf.verifiedAt || vf.timestamp || null;
+            const fArr = Array.isArray(vf.findings) ? vf.findings : [];
+            deterministicFindingCount = fArr.filter((f) => {
+                const det = f.determinism || '';
+                return det.startsWith('deterministic');
+            }).length;
+        }
+    }
+    catch { /* ignore */ }
+    // Trend: last 7 runs chronological (oldest → newest for charts)
+    const trendSource = indexRecords.length > 0 ? indexRecords : legacyRuns;
+    const recentSlice = trendSource.slice(-7);
+    const recentTrend = recentSlice.map((r) => {
+        if ('runAt' in r && typeof r.runAt === 'string') {
+            const row = r;
+            return {
+                verifiedAt: row.runAt,
+                verdict: row.verdict,
+                blockingCount: 0,
+                fingerprint: row.fingerprint,
+            };
+        }
+        const row = r;
+        return {
+            verifiedAt: row.verifiedAt || row.timestamp,
+            verdict: row.verdict,
+            blockingCount: row.blockingCount || 0,
+            fingerprint: row.fingerprint,
+        };
+    });
+    const { deterministicPct, sumDeterministic, sumFindings } = aggregateDeterministicFromTelemetry(telemetryWindow);
+    const deterministicRatioPct = Math.round(deterministicPct * 100);
+    const governanceTrust = governanceTrustFromPct(deterministicPct);
+    // Replay integrity distribution from verify.completed telemetry payloads
+    let replayExact = 0;
+    let replayBounded = 0;
+    let replayUnknown = 0;
+    let lastReplayIntegrityStatus = null;
+    for (const ev of verifyCompletedInWindow) {
+        const p = ev.payload;
+        const ri = p.replayIntegrityStatus;
+        if (ri === 'exact')
+            replayExact += 1;
+        else if (ri === 'bounded-degradation')
+            replayBounded += 1;
+        else
+            replayUnknown += 1;
+        if (!lastReplayIntegrityStatus && ri)
+            lastReplayIntegrityStatus = ri;
+    }
+    for (let i = verifyCompletedInWindow.length - 1; i >= 0; i--) {
+        const p = verifyCompletedInWindow[i].payload;
+        const ri = p.replayIntegrityStatus;
+        if (ri) {
+            lastReplayIntegrityStatus = ri;
+            break;
+        }
+    }
+    // Provenance fingerprint integrity sample (last N index entries)
+    const SAMPLE = 12;
+    let sampleOk = 0;
+    let sampleFail = 0;
+    let sampleTried = 0;
+    for (const entry of provIndex.records.slice(0, SAMPLE)) {
+        const rec = (0, governance_provenance_1.loadProvenanceRecord)(cwd, entry.runId);
+        if (!rec)
+            continue;
+        sampleTried += 1;
+        if ((0, governance_provenance_1.verifyProvenanceIntegrity)(rec))
+            sampleOk += 1;
+        else
+            sampleFail += 1;
+    }
+    const pilotSummary = (0, pilot_metrics_1.generatePilotSummary)(cwd, days);
+    const fingerprintedInWindow = provIndex.records.filter((r) => {
+        const d = r.runAt.slice(0, 10);
+        return d >= periodFrom && d <= periodTo;
+    }).length;
+    const recentGovernanceEvents = telemetryEnvelopes
+        .slice(-20)
+        .reverse()
+        .map(summarizeTelemetryLine);
+    const operationalRisks = [];
+    if (failRate >= 40) {
+        operationalRisks.push({ level: 'high', label: 'Elevated failure rate', detail: `${failRate}% of recorded governance runs failed or blocked in the provenance window.` });
+    }
+    else if (failRate >= 15) {
+        operationalRisks.push({ level: 'medium', label: 'Moderate failure rate', detail: `${failRate}% of runs failed or blocked — review top rules and intent scope.` });
+    }
+    if (pilotSummary.suppressionRate >= 0.25) {
+        operationalRisks.push({
+            level: 'medium',
+            label: 'Suppression activity',
+            detail: `Suppression rate ~${Math.round(pilotSummary.suppressionRate * 100)}% in pilot-metrics window — triage false positives vs policy.`,
+        });
+    }
+    if (deterministicRatioPct < 40 && sumFindings > 0) {
+        operationalRisks.push({
+            level: 'medium',
+            label: 'Deterministic signal mix',
+            detail: `${deterministicRatioPct}% of findings in telemetry window are deterministic-structural — semantic/advisory dominates.`,
+        });
+    }
+    if (replayBounded > replayExact && verifyCompletedInWindow.length >= 3) {
+        operationalRisks.push({
+            level: 'low',
+            label: 'Replay bounded degradation',
+            detail: 'Some verify completions reported bounded-degradation replay integrity — expected under truncation or large-repo limits.',
+        });
+    }
+    if (operationalRisks.length === 0) {
+        operationalRisks.push({
+            level: 'low',
+            label: 'No acute risk flags',
+            detail: 'Within normal bands for this snapshot — keep running verify and monitoring pilot-metrics.',
+        });
+    }
+    const verifyEventCount = verifyCompletedInWindow.length + legacyVerifyEvents.length;
+    const telemetryEventCount = telemetryEnvelopes.length;
+    success(res, {
+        period: { days, from: periodFrom, to: periodTo },
+        summary: {
+            currentVerdict,
+            lastVerifiedAt,
+            totalRuns: total,
+            passRate,
+            failRate,
+            warnRate,
+            deterministicFindingCount,
+            verifyEventCount,
+        },
+        deterministic: {
+            ratioPct: deterministicRatioPct,
+            sumDeterministic,
+            sumFindings,
+            windowDays: days,
+        },
+        governanceTrust,
+        pilotSummary: {
+            totalVerifyRuns: pilotSummary.totalVerifyRuns,
+            averagePassRate: pilotSummary.averagePassRate,
+            suppressionRate: pilotSummary.suppressionRate,
+            totalBlockingCaught: pilotSummary.totalBlockingCaught,
+            totalStructuralCaught: pilotSummary.totalStructuralCaught,
+            advisoryCaught: advisoryCaughtInPilotWindow(cwd, periodFrom, periodTo),
+            aiDebtTrend: pilotSummary.aiDebtTrend,
+            topViolatedRules: pilotSummary.topViolatedRules,
+        },
+        provenanceCoverage: {
+            indexedRuns: provIndex.records.length,
+            fingerprintedInWindow,
+            integritySampleVerified: sampleOk,
+            integritySampleFailed: sampleFail,
+            integritySampleTried: sampleTried,
+        },
+        replayIntegrity: {
+            exact: replayExact,
+            boundedDegradation: replayBounded,
+            unknown: replayUnknown,
+            lastStatus: lastReplayIntegrityStatus,
+        },
+        topRules,
+        topRulesTelemetry,
+        recentTrend,
+        recentGovernanceEvents,
+        operationalRisks,
+        governance: {
+            provenanceRecords: provIndex.records.length > 0 ? provIndex.records.length : legacyRuns.length,
+            telemetryEvents: telemetryEventCount,
+            legacyTelemetryEventCount: legacyEvents.length,
+            cwd,
+        },
+    });
 }
 // ── Server factory ─────────────────────────────────────────────────────────────
 function createDaemonServer() {
@@ -2014,6 +3021,12 @@ function createDaemonServer() {
                     await handleGetWorkspaceRuntime(req, res, decodeURIComponent(runtimeMatch[1]));
                     return;
                 }
+                // Cross-repo graph: GET /workspaces/:id/cross-repo-graph
+                const crossRepoGraphMatch = url.match(/^\/workspaces\/([^/]+)\/cross-repo-graph(?:\?.*)?$/);
+                if (crossRepoGraphMatch) {
+                    await handleGetCrossRepoGraph(req, res, decodeURIComponent(crossRepoGraphMatch[1]));
+                    return;
+                }
                 const detailMatch = url.match(/^\/workspaces\/([^/?]+)(?:\?.*)?$/);
                 if (detailMatch) {
                     await handleGetWorkspace(req, res, decodeURIComponent(detailMatch[1]));
@@ -2032,6 +3045,30 @@ function createDaemonServer() {
             const addRepoMatch = url.match(/^\/workspaces\/([^/]+)\/repositories(?:\?.*)?$/);
             if (method === 'POST' && addRepoMatch) {
                 await handleAddWorkspaceRepository(req, res, decodeURIComponent(addRepoMatch[1]));
+                return;
+            }
+            // Federated context: POST /workspaces/:id/federated-context
+            const federatedContextMatch = url.match(/^\/workspaces\/([^/]+)\/federated-context(?:\?.*)?$/);
+            if (method === 'POST' && federatedContextMatch) {
+                await handleGetFederatedContext(req, res, decodeURIComponent(federatedContextMatch[1]));
+                return;
+            }
+            // Semantic search: POST /workspaces/:id/semantic-search
+            const semanticSearchMatch = url.match(/^\/workspaces\/([^/]+)\/semantic-search(?:\?.*)?$/);
+            if (method === 'POST' && semanticSearchMatch) {
+                await handleSemanticSearch(req, res, decodeURIComponent(semanticSearchMatch[1]));
+                return;
+            }
+            // Semantic index build: POST /workspaces/:id/semantic-index/build
+            const semanticIndexBuildMatch = url.match(/^\/workspaces\/([^/]+)\/semantic-index\/build(?:\?.*)?$/);
+            if (method === 'POST' && semanticIndexBuildMatch) {
+                await handleBuildSemanticIndex(req, res, decodeURIComponent(semanticIndexBuildMatch[1]));
+                return;
+            }
+            // Intent expansion: POST /workspaces/:id/intent-expand
+            const intentExpandMatch = url.match(/^\/workspaces\/([^/]+)\/intent-expand(?:\?.*)?$/);
+            if (method === 'POST' && intentExpandMatch) {
+                await handleIntentExpand(req, res, decodeURIComponent(intentExpandMatch[1]));
                 return;
             }
             const updateWorkspaceMatch = url.match(/^\/workspaces\/([^/?]+)(?:\?.*)?$/);
@@ -2066,6 +3103,37 @@ function createDaemonServer() {
                     await handleReplayExecution(req, res, decodeURIComponent(replayExecutionMatch[1]));
                     return;
                 }
+            }
+            // ── Governance findings & overview (new surfaces) ───────────────────────
+            if (method === 'GET' && (url === '/governance/findings' || url.startsWith('/governance/findings?'))) {
+                await handleGovernanceFindings(req, res);
+                return;
+            }
+            if (method === 'GET' && (url === '/governance/overview' || url.startsWith('/governance/overview?'))) {
+                await handleGovernanceOverview(req, res);
+                return;
+            }
+            if (method === 'GET' && (url === '/brain/cache-status' || url.startsWith('/brain/cache-status?'))) {
+                await handleBrainCacheStatus(req, res);
+                return;
+            }
+            if (method === 'GET' && (url === '/remediation/status' || url.startsWith('/remediation/status?'))) {
+                await handleRemediationStatus(req, res);
+                return;
+            }
+            if (method === 'GET' && (url === '/pilot-report' || url.startsWith('/pilot-report?'))) {
+                await handlePilotReport(req, res);
+                return;
+            }
+            // ── Enterprise docs serving (renders from docs/enterprise/ on filesystem) ─
+            if (method === 'GET' && url === '/docs/enterprise') {
+                await handleDocsManifest(res);
+                return;
+            }
+            const docsContentMatch = url.match(/^\/docs\/enterprise\/([^/?]+)(?:\?.*)?$/);
+            if (method === 'GET' && docsContentMatch) {
+                await handleDocsContent(res, decodeURIComponent(docsContentMatch[1]));
+                return;
             }
             if (method === 'POST' && (url === '/execute' || url.startsWith('/execute?'))) {
                 await handleExecute(req, res);
@@ -2204,10 +3272,20 @@ function startDaemon() {
         console.log(`  POST /workspaces/:id/activate → set active workspace`);
         console.log(`  POST /workspaces/:id/repositories → add repository to workspace`);
         console.log(`  POST /workspaces/execute → workspace-scoped deterministic execution`);
+        console.log(`  GET  /workspaces/:id/cross-repo-graph → detected cross-repo dependency edges`);
+        console.log(`  POST /workspaces/:id/federated-context → multi-repo blast radius analysis`);
+        console.log(`  POST /workspaces/:id/semantic-search → TF-IDF vector similarity file search`);
+        console.log(`  POST /workspaces/:id/semantic-index/build → rebuild semantic index from brain context`);
+        console.log(`  POST /workspaces/:id/intent-expand → signed semantic intent governance artifact`);
         console.log(`  GET  /replay/state → deterministic governance state replay`);
         console.log(`  GET  /replay/execution/:id → deterministic execution replay`);
         console.log(`  GET  /replay/workspace/:id → deterministic workspace replay`);
         console.log(`  GET  /replay/timeline → deterministic governance timeline replay`);
+        console.log(`  GET  /governance/findings → canonical governance findings (last verify output)`);
+        console.log(`  GET  /governance/overview → governance posture summary`);
+        console.log(`  GET  /brain/cache-status → brain cache manifest and freshness`);
+        console.log(`  GET  /remediation/status → remediation artifacts and receipts`);
+        console.log(`  GET  /pilot-report       → governance health metrics and trend`);
         console.log(`\n  CWD: ${cwd}`);
         console.log(`  Press Ctrl+C to stop.\n`);
     });

@@ -4,6 +4,29 @@ declare const REPLAY_EXECUTION_SCHEMA: "neurcode.replay.execution.v1";
 declare const REPLAY_WORKSPACE_SCHEMA: "neurcode.replay.workspace.v1";
 declare const REPLAY_TIMELINE_SCHEMA: "neurcode.replay.timeline.v1";
 type ReplayRiskLevel = 'low' | 'medium' | 'high';
+type ReplayReconstructionStatus = 'exact' | 'bounded-degradation';
+interface ReplayConfidenceComponent {
+    score: number;
+    note: string;
+}
+interface ReplayGovernanceReport {
+    reconstructionStatus: ReplayReconstructionStatus;
+    canReconstructExactly: boolean;
+    missingArtifactSummaries: string[];
+    semanticDegradationSummaries: string[];
+    federationDegradationSummaries: string[];
+    graphMismatchSummaries: string[];
+    provenanceMismatchSummaries: string[];
+    confidenceDriftSummaries: string[];
+    confidence: {
+        overall: number;
+        provenance: ReplayConfidenceComponent;
+        graph: ReplayConfidenceComponent;
+        semantic: ReplayConfidenceComponent;
+        federation: ReplayConfidenceComponent;
+        artifacts: ReplayConfidenceComponent;
+    };
+}
 interface ReplayExecutionDigest {
     file: string;
     id: string;
@@ -46,6 +69,14 @@ interface ReplayEvidenceDigest {
     coverageScore: number | null;
     branch: string | null;
     commitSha: string | null;
+    governanceFindingsCount: number;
+    governanceDeterminismCounts: Record<string, number>;
+    semanticTruncationCount: number;
+    federationTruncationCount: number;
+    graphTruncationCount: number;
+    provenanceMissingCount: number;
+    governanceEnvelopePresent: boolean;
+    canonicalVerifyOutput: Record<string, unknown> | null;
 }
 interface ReplayWorkspaceSnapshotDigest {
     file: string;
@@ -108,6 +139,7 @@ export interface GovernanceReplayState {
             workspaceSnapshots: number;
         };
     };
+    reconstruction: ReplayGovernanceReport;
     controlPlane: {
         snapshotId: string | null;
         createdAt: string | null;
@@ -208,6 +240,7 @@ export interface ReplayExecutionDetail {
         regressionRate: number;
         latestVerdict: string | null;
     };
+    reconstruction: GovernanceReplayState['reconstruction'];
 }
 export interface ReplayWorkspaceDetail {
     schemaVersion: typeof REPLAY_WORKSPACE_SCHEMA;
@@ -239,6 +272,7 @@ export interface ReplayWorkspaceDetail {
         artifactHash: string;
         warnings: string[];
     };
+    reconstruction: GovernanceReplayState['reconstruction'];
 }
 export interface ReplayTimelineResult {
     schemaVersion: typeof REPLAY_TIMELINE_SCHEMA;

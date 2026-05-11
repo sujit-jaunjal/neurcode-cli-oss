@@ -159,18 +159,22 @@ const VALIDATION_PATTERNS = [
     /\bzod\s*\./,
     /\bajv\s*\.\s*compile/,
 ];
-const REQ_HANDLER_RE = /\b(?:req|request)\s*,\s*(?:res|response|reply)\b/;
+// Matches both JavaScript `(req, res)` and TypeScript `(req: Request, res: Response)`
+// TypeScript handlers include optional type annotations: (req: Type, res: Type)
+const REQ_HANDLER_RE = /\b(?:req|request)\s*(?::\s*\w+)?\s*,\s*(?:res|response|reply)\s*(?::\s*\w+)?\b/;
 const REQ_INPUT_RE = /\b(?:req|request)\.(?:body|params|query)\b/;
 const TODO_FIXME_RE = /\/\/\s*(?:TODO|FIXME)\b/;
-const ROUTE_WITHOUT_AUTH_RE = /\b(?:app|router)\.(?:get|post|put|patch|delete)\s*\(\s*[^,]+\s*,\s*(?:(?!requireAuth|authMiddleware|authenticate|withAuth).)*\b(?:async\s+)?\(?\s*(?:req|request)\s*,\s*(?:res|response|reply)/i;
-const ROUTE_WITHOUT_RATE_LIMIT_RE = /\b(?:app|router)\.(?:get|post|put|patch|delete)\s*\(\s*[^,]+\s*,\s*(?:(?!rateLimit|rateLimiter|throttle).)*\b(?:async\s+)?\(?\s*(?:req|request)\s*,\s*(?:res|response|reply)/i;
+// Updated to handle TypeScript-typed handler parameters (req: Request, res: Response)
+const ROUTE_WITHOUT_AUTH_RE = /\b(?:app|router)\.(?:get|post|put|patch|delete)\s*\(\s*[^,]+\s*,\s*(?:(?!requireAuth|authMiddleware|authenticate|withAuth).)*\b(?:async\s+)?\(?\s*(?:req|request)\s*(?::\s*\w+)?\s*,\s*(?:res|response|reply)/i;
+const ROUTE_WITHOUT_RATE_LIMIT_RE = /\b(?:app|router)\.(?:get|post|put|patch|delete)\s*\(\s*[^,]+\s*,\s*(?:(?!rateLimit|rateLimiter|throttle).)*\b(?:async\s+)?\(?\s*(?:req|request)\s*(?::\s*\w+)?\s*,\s*(?:res|response|reply)/i;
 const JWT_SIGN_NO_EXPIRY_RE = /\bjwt\.sign\s*\((?:(?!expiresIn).)*\)/i;
 const INNER_HTML_RE = /\.innerHTML\s*=/;
 const SENSITIVE_LOG_RE = /\bconsole\.(?:log|info|warn|error)\s*\([^\n]*(?:authorization|password|secret|token|apiKey|api_key)[^\n]*\)/i;
 const SQL_STRING_CONCAT_RE = /\b(?:query|execute|run)\s*\((?:\s*`[^`]*\$\{|[^\n]*\+[^\n]*)/i;
 const HARDCODED_SECRET_RE = /\b(?:password|secret|token|api[_-]?key)\b\s*[:=]\s*['"`][^'"`]+['"`]/i;
 const FETCH_WITHOUT_TIMEOUT_RE = /\bfetch\s*\((?![^\n]*signal:)/;
-const ROUTE_WITHOUT_TRY_CATCH_RE = /\b(?:async\s+)?\(?\s*(?:req|request)\s*,\s*(?:res|response|reply)\s*\)?\s*=>\s*\{/;
+// Handles both JS `(req, res) =>` and TS `(req: Request, res: Response) =>`
+const ROUTE_WITHOUT_TRY_CATCH_RE = /\b(?:async\s+)?\(?\s*(?:req|request)\s*(?::\s*\w+)?\s*,\s*(?:res|response|reply)\s*(?::\s*\w+)?\s*\)?\s*(?:,\s*\w+\s*(?::\s*\w+)?\s*)?\)?\s*(?:=>\s*\{|\{)/;
 const MISSING_AUDIT_LOG_RE = /\b(?:create|update|delete|remove|transfer|refund|charge)\b/i;
 const UNSAFE_ENV_USAGE_RE = /\bprocess\.env\.[A-Z0-9_]+\b/;
 const GENERIC_LINE_MATCHERS = {

@@ -45,6 +45,7 @@ exports.brainCommand = brainCommand;
 const child_process_1 = require("child_process");
 const fs_1 = require("fs");
 const path_1 = require("path");
+const brain_cache_1 = require("../utils/brain-cache");
 const config_1 = require("../config");
 const project_root_1 = require("../utils/project-root");
 const state_1 = require("../utils/state");
@@ -52,6 +53,7 @@ const neurcode_context_1 = require("../utils/neurcode-context");
 const plan_cache_1 = require("../utils/plan-cache");
 const messages_1 = require("../utils/messages");
 const brain_context_1 = require("../utils/brain-context");
+const semantic_1 = require("../semantic");
 const ask_cache_1 = require("../utils/ask-cache");
 // Import chalk with fallback
 let chalk;
@@ -1196,6 +1198,277 @@ function brainCommand(program) {
             // ignore
         }
         (0, messages_1.printSuccess)('Brain cleared', `Scope: ${scopeLabel}`);
+        // Also clear semantic index
+        (0, semantic_1.clearSemanticIndex)(brainScope.cwd);
+    });
+    // ── brain build ──────────────────────────────────────────────────────────────
+    brain
+        .command('build')
+        .description('Build the semantic search index from the current brain context')
+        .option('--project-id <id>', 'Project ID override')
+        .option('--json', 'Output as JSON')
+        .action(async (options) => {
+        const scope = getBrainScope(options.projectId);
+        const stats = (0, semantic_1.getSemanticIndexStats)(scope.cwd, {
+            orgId: scope.orgId,
+            projectId: scope.projectId,
+        });
+        const count = (0, semantic_1.buildSemanticIndex)(scope.cwd, {
+            orgId: scope.orgId,
+            projectId: scope.projectId,
+        });
+        const newStats = (0, semantic_1.getSemanticIndexStats)(scope.cwd, {
+            orgId: scope.orgId,
+            projectId: scope.projectId,
+        });
+        const payload = {
+            repoRoot: scope.cwd,
+            documentsIndexed: count,
+            previousDocuments: stats.documentCount,
+            builtAt: newStats.builtAt,
+            sizeBytes: newStats.sizeBytes,
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        await (0, messages_1.printSuccessBanner)('Neurcode Brain Build');
+        (0, messages_1.printSection)('Semantic Index', '🔍');
+        console.log(chalk.dim(`Repo Root:       ${scope.cwd}`));
+        console.log(chalk.dim(`Documents built: ${count}`));
+        if (newStats.builtAt) {
+            console.log(chalk.dim(`Built at:        ${new Date(newStats.builtAt).toLocaleString()}`));
+        }
+        if (newStats.sizeBytes !== null) {
+            console.log(chalk.dim(`Index size:      ${formatBytes(newStats.sizeBytes)}`));
+        }
+        if (count === 0) {
+            (0, messages_1.printWarning)('No documents indexed', 'Run `neurcode brain status` to check if brain context has been populated.\n' +
+                'The semantic index is built from existing brain-context entries.\n' +
+                'Try running neurcode in watch mode or using `neurcode apply` first.');
+        }
+        else {
+            (0, messages_1.printSuccess)('Semantic index built', `${count} documents indexed`);
+        }
+    });
+    // ── brain semantic-search ────────────────────────────────────────────────────
+    brain
+        .command('semantic-search <query...>')
+        .description('Search the codebase semantically using TF-IDF vector similarity')
+        .option('--project-id <id>', 'Project ID override')
+        .option('--limit <n>', 'Max results to return (default: 10)', (v) => parseInt(v, 10))
+        .option('--min-score <n>', 'Minimum similarity score 0-1 (default: 0.01)', (v) => parseFloat(v))
+        .option('--json', 'Output as JSON')
+        .option('--explain', 'Show how the query was tokenized')
+        .action(async (queryParts, options) => {
+        const scope = getBrainScope(options.projectId);
+        const query = queryParts.join(' ').trim();
+        if (!query) {
+            (0, messages_1.printError)('Missing query', 'Usage: neurcode brain semantic-search "<query>"');
+            process.exit(1);
+        }
+        const limit = Number.isFinite(options.limit) ? Math.min(50, Math.max(1, options.limit)) : 10;
+        const minScore = Number.isFinite(options.minScore) ? Math.max(0, options.minScore) : 0.01;
+        const indexStats = (0, semantic_1.getSemanticIndexStats)(scope.cwd, {
+            orgId: scope.orgId,
+            projectId: scope.projectId,
+        });
+        if (!indexStats.exists || indexStats.documentCount === 0) {
+            (0, messages_1.printWarning)('Semantic index not built', 'Run: neurcode brain build  — to build the semantic index first');
+            if (options.json)
+                console.log(JSON.stringify({ results: [], indexExists: false }));
+            return;
+        }
+        const results = (0, semantic_1.semanticSearch)(scope.cwd, { orgId: scope.orgId, projectId: scope.projectId }, query, { limit, minScore });
+        const tokenInfo = options.explain ? (0, semantic_1.explainQuery)(query) : null;
+        if (options.json) {
+            console.log(JSON.stringify({
+                query,
+                results,
+                totalIndexed: indexStats.documentCount,
+                tokenInfo,
+            }, null, 2));
+            return;
+        }
+        await (0, messages_1.printSuccessBanner)('Semantic Search');
+        console.log(chalk.dim(`Query: ${query}`));
+        console.log(chalk.dim(`Index: ${indexStats.documentCount} documents | score threshold: ${minScore}\n`));
+        if (options.explain && tokenInfo) {
+            console.log(chalk.bold.white('Query tokens:'));
+            console.log(chalk.dim(`  [${tokenInfo.tokens.join(', ')}]  (${tokenInfo.termCount} terms)\n`));
+        }
+        if (results.length === 0) {
+            (0, messages_1.printWarning)('No results', 'Try broadening the query or lowering --min-score');
+            return;
+        }
+        console.log(chalk.bold.white(`Top ${results.length} results:\n`));
+        results.forEach((r, idx) => {
+            const bar = '█'.repeat(Math.round(r.score * 20)).padEnd(20, '░');
+            const scoreStr = r.score.toFixed(4);
+            console.log(chalk.white(`  ${String(idx + 1).padStart(2)}. [${bar}] ${scoreStr}  ${r.filePath}`));
+            if (r.summary) {
+                console.log(chalk.dim(`       ${r.summary.slice(0, 120)}`));
+            }
+            if (r.symbols.length > 0) {
+                console.log(chalk.dim(`       symbols: ${r.symbols.slice(0, 6).join(', ')}`));
+            }
+        });
+    });
+    // ── brain cache-status ───────────────────────────────────────────────────────
+    brain
+        .command('cache-status')
+        .description('Show persistent brain cache status (content hashes, staleness, CI fingerprint)')
+        .option('--project-id <id>', 'Project ID override')
+        .option('--json', 'Output as JSON')
+        .action(async (options) => {
+        const scope = getBrainScope(options.projectId);
+        const status = (0, brain_cache_1.getBrainCacheStatus)(scope.cwd);
+        if (options.json) {
+            console.log(JSON.stringify(status, null, 2));
+            return;
+        }
+        await (0, messages_1.printSuccessBanner)('Brain Cache Status');
+        if (!status.exists) {
+            (0, messages_1.printWarning)('No cache found', 'Run `neurcode brain cache-build` to build the persistent brain cache.\n' +
+                'This accelerates semantic indexing on subsequent runs and CI builds.');
+            return;
+        }
+        const m = status.manifest;
+        (0, messages_1.printSection)('Cache Manifest', '📦');
+        console.log(chalk.dim(`Built:               ${m.builtAt}`));
+        console.log(chalk.dim(`Total files:         ${m.totalFiles}`));
+        console.log(chalk.dim(`Indexed files:       ${m.indexedFiles}`));
+        console.log(chalk.dim(`Fresh files:         ${status.freshFiles}`));
+        console.log(chalk.dim(`Stale files:         ${status.staleFiles.length}`));
+        console.log(chalk.dim(`Missing files:       ${status.missingFiles.length}`));
+        console.log(chalk.dim(`New (untracked):     ${status.newFiles.length}`));
+        console.log(chalk.dim(`Stale:               ${status.stalePercent}%`));
+        console.log(chalk.dim(`Cache size:          ${formatBytes(status.sizeBytes)}`));
+        console.log(chalk.dim(`Content fingerprint: ${m.contentFingerprint}`));
+        console.log(chalk.dim(`(Use fingerprint as CI cache key for layer-by-layer cache restoration)`));
+        if (status.needsRebuild) {
+            (0, messages_1.printWarning)('Cache rebuild recommended', `${status.staleFiles.length} stale + ${status.newFiles.length} new files detected.\n` +
+                'Run `neurcode brain cache-build` to refresh.');
+        }
+        else {
+            (0, messages_1.printSuccess)('Cache is fresh', `${status.freshFiles}/${status.totalFiles} files up-to-date`);
+        }
+    });
+    // ── brain cache-build ────────────────────────────────────────────────────────
+    brain
+        .command('cache-build')
+        .description('Build or refresh the persistent brain cache manifest. ' +
+        'Content-hash indexes all source files for fast incremental re-indexing. ' +
+        'Use --force to rebuild from scratch.')
+        .option('--project-id <id>', 'Project ID override')
+        .option('--force', 'Force full rebuild ignoring existing cache')
+        .option('--max-files <n>', 'Maximum files to index (default: 5000)', (v) => parseInt(v, 10))
+        .option('--export-artifact <path>', 'Export CI artifact after building (for CI cache upload)')
+        .option('--json', 'Output as JSON')
+        .action(async (options) => {
+        const scope = getBrainScope(options.projectId);
+        if (!options.json) {
+            console.log(chalk.cyan('\n⚙  Building brain cache...'));
+            console.log(chalk.dim(`   Repo: ${scope.cwd}`));
+            if (options.force)
+                console.log(chalk.dim('   Mode: full rebuild (--force)'));
+            console.log('');
+        }
+        let lastPrinted = -1;
+        const result = (0, brain_cache_1.buildBrainCache)({
+            projectRoot: scope.cwd,
+            maxFiles: options.maxFiles ?? 5000,
+            force: options.force === true,
+            onProgress: (indexed, total) => {
+                if (!options.json && Math.floor(indexed / 100) !== lastPrinted) {
+                    lastPrinted = Math.floor(indexed / 100);
+                    process.stdout.write(`\r   Scanning files: ${indexed}/${total}...`);
+                }
+            },
+        });
+        if (!options.json)
+            process.stdout.write('\n');
+        if (options.exportArtifact) {
+            const exported = (0, brain_cache_1.exportBrainCacheArtifact)(scope.cwd, options.exportArtifact);
+            if (!options.json) {
+                if (exported) {
+                    console.log(chalk.dim(`\n   CI artifact exported: ${options.exportArtifact}`));
+                }
+                else {
+                    console.log(chalk.yellow(`\n   ⚠  Failed to export CI artifact: ${options.exportArtifact}`));
+                }
+            }
+        }
+        const payload = {
+            repoRoot: scope.cwd,
+            totalFiles: result.manifest.totalFiles,
+            indexedFiles: result.manifest.indexedFiles,
+            builtFiles: result.builtFiles,
+            skippedFiles: result.skippedFiles,
+            updatedFiles: result.updatedFiles,
+            elapsedMs: result.elapsedMs,
+            builtAt: result.manifest.builtAt,
+            contentFingerprint: result.manifest.contentFingerprint,
+            manifestPath: (0, path_1.join)(scope.cwd, '.neurcode', 'brain', 'cache', 'manifest.json'),
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        await (0, messages_1.printSuccessBanner)('Brain Cache Built');
+        (0, messages_1.printSection)('Results', '📦');
+        console.log(chalk.dim(`Total files:         ${payload.totalFiles}`));
+        console.log(chalk.dim(`Built (new/changed): ${payload.builtFiles}`));
+        console.log(chalk.dim(`Skipped (unchanged): ${payload.skippedFiles}`));
+        console.log(chalk.dim(`Updated (rehashed):  ${payload.updatedFiles}`));
+        console.log(chalk.dim(`Elapsed:             ${payload.elapsedMs}ms`));
+        console.log(chalk.dim(`Content fingerprint: ${payload.contentFingerprint}`));
+        console.log(chalk.dim(`Manifest:            ${payload.manifestPath}`));
+        console.log('');
+        (0, messages_1.printSuccess)('Cache built', `${payload.totalFiles} files tracked`);
+        console.log(chalk.dim('\nTip: Add .neurcode/brain/cache/ to your CI cache configuration.'));
+        console.log(chalk.dim('     Use the content fingerprint as the cache key for layer invalidation.'));
+        console.log('');
+    });
+    // ── brain cache-restore ──────────────────────────────────────────────────────
+    brain
+        .command('cache-restore')
+        .description('Restore brain cache from a CI artifact file. ' +
+        'Use this in CI after downloading the cached .neurcode/brain/cache/ artifact.')
+        .requiredOption('--artifact <path>', 'Path to the CI cache artifact (manifest JSON exported by --export-artifact)')
+        .option('--project-id <id>', 'Project ID override')
+        .option('--json', 'Output as JSON')
+        .action(async (options) => {
+        const scope = getBrainScope(options.projectId);
+        const result = (0, brain_cache_1.restoreBrainCache)({
+            projectRoot: scope.cwd,
+            artifactPath: options.artifact,
+        });
+        if (options.json) {
+            console.log(JSON.stringify(result, null, 2));
+            process.exit(result.success ? 0 : 1);
+            return;
+        }
+        if (!result.success) {
+            (0, messages_1.printError)('Cache restore failed', result.message);
+            process.exit(1);
+        }
+        const m = result.manifest;
+        await (0, messages_1.printSuccessBanner)('Brain Cache Restored');
+        console.log(chalk.dim(result.message));
+        console.log('');
+        console.log(chalk.dim(`Files in cache:     ${m.totalFiles}`));
+        console.log(chalk.dim(`Built at:           ${m.builtAt}`));
+        console.log(chalk.dim(`Content fingerprint:${m.contentFingerprint}`));
+        if (result.staleAfterRestore > 0) {
+            (0, messages_1.printWarning)(`${result.staleAfterRestore} stale files after restore`, 'Some files have changed since the cache was built. ' +
+                'Run `neurcode brain cache-build` to update. ' +
+                'Governance correctness is not affected — only indexing speed.');
+        }
+        else {
+            (0, messages_1.printSuccess)('Cache is current', 'All sampled files match cache hashes.');
+        }
+        console.log('');
     });
 }
 //# sourceMappingURL=brain.js.map

@@ -1,4 +1,5 @@
 export { parseIntent, type ParsedIntent } from './parser';
+export { expandIntent, loadCachedExpansion, listCachedExpansions, formatExpansionSummary, type SemanticIntentExpansion, type ExpandIntentOptions, } from './semantic-expander';
 export { indexDiffFiles, type FileMeta, type FileLayer } from './indexer';
 export { matchIntentToCode, type IntentIssue, type MatchResult, type ComponentQualityLevel, } from './matcher';
 export { computeCoverage, computeIntentSummary, formatCoverageBar, formatComponentLabel, type DomainCoverage, type IntentSummary, type ConfidenceLevel, type SystemStatus, } from './coverage';

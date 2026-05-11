@@ -10,6 +10,7 @@ const crypto_1 = require("crypto");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const execution_bus_1 = require("./execution-bus");
+const canonical_pipeline_1 = require("../governance/canonical-pipeline");
 const REPLAY_STATE_SCHEMA = 'neurcode.replay.state.v1';
 const REPLAY_EXECUTION_SCHEMA = 'neurcode.replay.execution.v1';
 const REPLAY_WORKSPACE_SCHEMA = 'neurcode.replay.workspace.v1';
@@ -193,6 +194,38 @@ function parseEvidenceDigest(root, filePath) {
     const regressions = Array.isArray(parsed.regressions) ? parsed.regressions : [];
     const flowIssues = Array.isArray(parsed.flowIssues) ? parsed.flowIssues : [];
     const coverage = asNumber(canonical.driftScore) ?? asNumber(canonical.score);
+    const governanceVerification = asObject(canonical.governanceVerification);
+    const governanceFindingsRaw = Array.isArray(canonical.governanceFindings)
+        ? canonical.governanceFindings
+        : (Array.isArray(governanceVerification?.findings) ? governanceVerification?.findings : []);
+    const governanceFindings = governanceFindingsRaw.filter((entry) => {
+        const record = asObject(entry);
+        return Boolean(record);
+    });
+    const determinismCounts = {};
+    let semanticTruncationCount = 0;
+    let federationTruncationCount = 0;
+    let graphTruncationCount = 0;
+    let provenanceMissingCount = 0;
+    for (const finding of governanceFindings) {
+        const determinism = asString(finding.determinismClassification) || 'unknown';
+        determinismCounts[determinism] = (determinismCounts[determinism] ?? 0) + 1;
+        const semanticMetadata = asObject(finding.semanticMetadata);
+        const graphMetadata = asObject(finding.graphMetadata);
+        const provenanceMetadata = asObject(finding.provenanceMetadata);
+        if (asBoolean(semanticMetadata?.indexTruncated) === true)
+            semanticTruncationCount += 1;
+        if (asBoolean(graphMetadata?.truncated) === true) {
+            graphTruncationCount += 1;
+            const fromRepo = asString(graphMetadata?.fromRepo);
+            const toRepo = asString(graphMetadata?.toRepo);
+            if (fromRepo || toRepo) {
+                federationTruncationCount += 1;
+            }
+        }
+        if (!provenanceMetadata)
+            provenanceMissingCount += 1;
+    }
     return {
         file: toRelativeSafe(root, filePath),
         timestamp: asString(parsed.timestamp) || nowIso(),
@@ -208,6 +241,14 @@ function parseEvidenceDigest(root, filePath) {
         coverageScore: coverage === null ? null : clamp(Math.round(coverage * 100) / 100, 0, 100),
         branch: asString(git.branch),
         commitSha: asString(git.commitSha),
+        governanceFindingsCount: governanceFindings.length,
+        governanceDeterminismCounts: determinismCounts,
+        semanticTruncationCount,
+        federationTruncationCount,
+        graphTruncationCount,
+        provenanceMissingCount,
+        governanceEnvelopePresent: Boolean(governanceVerification),
+        canonicalVerifyOutput: asObject(parsed.canonicalVerifyOutput),
     };
 }
 function parseControlPlaneSnapshotDigest(root, filePath) {
@@ -557,6 +598,163 @@ function buildDeterminismWarnings(index, controlPlane, workspace) {
     }
     return warnings;
 }
+function clampScore(value) {
+    return clamp(Math.round(value), 0, 100);
+}
+function summarizeReplayGovernanceReport(input) {
+    const { warnings, evidences, controlPlane, workspace } = input;
+    const latestEvidence = evidences[evidences.length - 1] || null;
+    const missingArtifactSummaries = [];
+    const semanticDegradationSummaries = [];
+    const federationDegradationSummaries = [];
+    const graphMismatchSummaries = [];
+    const provenanceMismatchSummaries = [];
+    const confidenceDriftSummaries = [];
+    if (!controlPlane) {
+        missingArtifactSummaries.push('Missing control-plane snapshot at replay timestamp.');
+    }
+    if (!workspace) {
+        missingArtifactSummaries.push('Missing workspace snapshot at replay timestamp.');
+    }
+    if (!latestEvidence) {
+        missingArtifactSummaries.push('No verification evidence artifact available at replay timestamp.');
+    }
+    if (warnings.length > 0) {
+        missingArtifactSummaries.push(...warnings);
+    }
+    if (latestEvidence) {
+        if (!latestEvidence.governanceEnvelopePresent) {
+            provenanceMismatchSummaries.push('Canonical governance envelope missing from latest evidence artifact.');
+        }
+        if (latestEvidence.semanticTruncationCount > 0) {
+            semanticDegradationSummaries.push(`${latestEvidence.semanticTruncationCount} finding(s) flagged semantic index truncation.`);
+        }
+        if (latestEvidence.federationTruncationCount > 0) {
+            federationDegradationSummaries.push(`${latestEvidence.federationTruncationCount} finding(s) indicate bounded federation truncation.`);
+        }
+        if (latestEvidence.graphTruncationCount > 0) {
+            graphMismatchSummaries.push(`${latestEvidence.graphTruncationCount} graph-linked finding(s) marked traversal truncation.`);
+        }
+        if (latestEvidence.provenanceMissingCount > 0) {
+            provenanceMismatchSummaries.push(`${latestEvidence.provenanceMissingCount} finding(s) missing provenance metadata.`);
+        }
+        if (latestEvidence.canonicalVerifyOutput) {
+            const integrity = (0, canonical_pipeline_1.evaluateGovernanceReplayIntegrity)({
+                evidencePayload: latestEvidence.canonicalVerifyOutput,
+            });
+            if (integrity.missingArtifacts.length > 0) {
+                missingArtifactSummaries.push(...integrity.missingArtifacts);
+            }
+            if (integrity.provenanceMismatches.length > 0) {
+                provenanceMismatchSummaries.push(...integrity.provenanceMismatches);
+            }
+            if (integrity.graphMismatches.length > 0) {
+                graphMismatchSummaries.push(...integrity.graphMismatches);
+            }
+            if (integrity.semanticTruncationMismatches.length > 0) {
+                semanticDegradationSummaries.push(...integrity.semanticTruncationMismatches);
+            }
+        }
+    }
+    const provenanceScore = latestEvidence
+        ? clampScore(100
+            - (latestEvidence.provenanceMissingCount * 6)
+            - (latestEvidence.governanceEnvelopePresent ? 0 : 35))
+        : 10;
+    const semanticScore = latestEvidence
+        ? clampScore(100 - (latestEvidence.semanticTruncationCount * 8))
+        : 20;
+    const federationScore = latestEvidence
+        ? clampScore(100 - (latestEvidence.federationTruncationCount * 8))
+        : 30;
+    const graphScore = latestEvidence
+        ? clampScore(100 - (latestEvidence.graphTruncationCount * 8))
+        : 30;
+    const artifactsScore = clampScore(100
+        - (missingArtifactSummaries.length * 10)
+        - (latestEvidence ? 0 : 30));
+    const overall = clampScore((provenanceScore * 0.25)
+        + (graphScore * 0.2)
+        + (semanticScore * 0.2)
+        + (federationScore * 0.15)
+        + (artifactsScore * 0.2));
+    if (overall < 95) {
+        confidenceDriftSummaries.push(`Replay confidence reduced to ${overall}/100 due to bounded degradation signals.`);
+    }
+    if (evidences.length > 1) {
+        const previousEvidence = evidences[evidences.length - 2];
+        if (latestEvidence
+            && previousEvidence
+            && latestEvidence.deterministicVerificationHash
+            && previousEvidence.deterministicVerificationHash
+            && latestEvidence.deterministicVerificationHash !== previousEvidence.deterministicVerificationHash) {
+            confidenceDriftSummaries.push('Deterministic verification hash changed since previous evidence artifact (semantic scope drift or code drift).');
+        }
+        if (latestEvidence
+            && previousEvidence
+            && latestEvidence.coverageScore !== null
+            && previousEvidence.coverageScore !== null
+            && Math.abs(latestEvidence.coverageScore - previousEvidence.coverageScore) >= 8) {
+            confidenceDriftSummaries.push(`Coverage/confidence drift detected (${previousEvidence.coverageScore} -> ${latestEvidence.coverageScore}).`);
+        }
+    }
+    if (semanticScore < 100) {
+        confidenceDriftSummaries.push(`Semantic completeness reduced (${semanticScore}/100).`);
+    }
+    if (federationScore < 100) {
+        confidenceDriftSummaries.push(`Federation completeness reduced (${federationScore}/100).`);
+    }
+    const reconstructionStatus = missingArtifactSummaries.length === 0
+        && semanticDegradationSummaries.length === 0
+        && federationDegradationSummaries.length === 0
+        && graphMismatchSummaries.length === 0
+        && provenanceMismatchSummaries.length === 0
+        ? 'exact'
+        : 'bounded-degradation';
+    return {
+        reconstructionStatus,
+        canReconstructExactly: reconstructionStatus === 'exact',
+        missingArtifactSummaries: [...new Set(missingArtifactSummaries)],
+        semanticDegradationSummaries: [...new Set(semanticDegradationSummaries)],
+        federationDegradationSummaries: [...new Set(federationDegradationSummaries)],
+        graphMismatchSummaries: [...new Set(graphMismatchSummaries)],
+        provenanceMismatchSummaries: [...new Set(provenanceMismatchSummaries)],
+        confidenceDriftSummaries: [...new Set(confidenceDriftSummaries)],
+        confidence: {
+            overall,
+            provenance: {
+                score: provenanceScore,
+                note: latestEvidence?.governanceEnvelopePresent
+                    ? 'Canonical provenance envelope present.'
+                    : 'Canonical provenance envelope missing.',
+            },
+            graph: {
+                score: graphScore,
+                note: latestEvidence?.graphTruncationCount
+                    ? 'Graph traversal truncation detected.'
+                    : 'No graph truncation detected.',
+            },
+            semantic: {
+                score: semanticScore,
+                note: latestEvidence?.semanticTruncationCount
+                    ? 'Semantic truncation detected.'
+                    : 'Semantic retrieval completeness intact for observed findings.',
+            },
+            federation: {
+                score: federationScore,
+                note: latestEvidence?.federationTruncationCount
+                    ? 'Federated context truncation detected.'
+                    : 'No federated truncation detected.',
+            },
+            artifacts: {
+                score: artifactsScore,
+                note: missingArtifactSummaries.length > 0
+                    ? `${missingArtifactSummaries.length} artifact warning(s) present.`
+                    : 'No missing artifact warnings.',
+            },
+        },
+    };
+}
 function replayGovernanceState(request, cwd = process.cwd()) {
     const paths = toReplayPaths(cwd);
     const asOf = parseRequiredTimestamp(request.at);
@@ -682,6 +880,12 @@ function replayGovernanceState(request, cwd = process.cwd()) {
     const posture = computePosture(executions, evidences);
     const hotspots = buildHotspots(executions);
     const warnings = buildDeterminismWarnings(index, controlPlane, workspace);
+    const reconstruction = summarizeReplayGovernanceReport({
+        warnings,
+        evidences,
+        controlPlane,
+        workspace,
+    });
     const determinismPayload = {
         asOf,
         controlPlaneSnapshotId: controlPlane?.snapshotId || null,
@@ -711,6 +915,7 @@ function replayGovernanceState(request, cwd = process.cwd()) {
                 workspaceSnapshots: index.workspaceSnapshots.length,
             },
         },
+        reconstruction,
         controlPlane: {
             snapshotId: controlPlane?.snapshotId || null,
             createdAt: controlPlane?.createdAt || null,
@@ -837,6 +1042,7 @@ function replayExecution(request, cwd = process.cwd()) {
             regressionRate: stateAtExecution.posture.regressionRate,
             latestVerdict: stateAtExecution.posture.latestVerdict,
         },
+        reconstruction: stateAtExecution.reconstruction,
     };
 }
 function replayWorkspace(request, cwd = process.cwd()) {
@@ -892,6 +1098,7 @@ function replayWorkspace(request, cwd = process.cwd()) {
             }),
             warnings,
         },
+        reconstruction: state.reconstruction,
     };
 }
 function replayTimeline(request = {}, cwd = process.cwd()) {

@@ -57,7 +57,35 @@ function printStateSummary(state) {
             console.log(`- ${warning}`);
         }
     }
+    printReconstructionSummary(state.reconstruction);
     console.log('');
+}
+function printReconstructionSummary(reconstruction) {
+    const statusLabel = reconstruction.reconstructionStatus === 'exact'
+        ? 'exact'
+        : 'bounded-degradation';
+    console.log('\nReconstruction Trust');
+    console.log(`Status: ${statusLabel}`);
+    console.log(`Confidence: ${reconstruction.confidence.overall}/100`);
+    console.log(`Components: provenance ${reconstruction.confidence.provenance.score} · ` +
+        `graph ${reconstruction.confidence.graph.score} · semantic ${reconstruction.confidence.semantic.score} · ` +
+        `federation ${reconstruction.confidence.federation.score} · artifacts ${reconstruction.confidence.artifacts.score}`);
+    const sections = [
+        { title: 'Missing artifacts', lines: reconstruction.missingArtifactSummaries },
+        { title: 'Semantic degradation', lines: reconstruction.semanticDegradationSummaries },
+        { title: 'Federation degradation', lines: reconstruction.federationDegradationSummaries },
+        { title: 'Graph mismatches', lines: reconstruction.graphMismatchSummaries },
+        { title: 'Provenance mismatches', lines: reconstruction.provenanceMismatchSummaries },
+        { title: 'Confidence drift', lines: reconstruction.confidenceDriftSummaries },
+    ];
+    for (const section of sections) {
+        if (section.lines.length === 0)
+            continue;
+        console.log(`${section.title}:`);
+        for (const line of section.lines.slice(0, 4)) {
+            console.log(`- ${line}`);
+        }
+    }
 }
 function printExecutionSummary(detail) {
     const execution = detail.execution;
@@ -79,6 +107,7 @@ function printExecutionSummary(detail) {
             console.log(`- ${warning}`);
         }
     }
+    printReconstructionSummary(detail.reconstruction);
     console.log('');
 }
 function printWorkspaceSummary(detail) {
@@ -97,6 +126,7 @@ function printWorkspaceSummary(detail) {
             console.log(`- ${warning}`);
         }
     }
+    printReconstructionSummary(detail.reconstruction);
     console.log('');
 }
 function printTimelineSummary(result) {

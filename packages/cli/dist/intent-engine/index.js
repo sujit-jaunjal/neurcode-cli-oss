@@ -1,9 +1,14 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.detectRegressions = exports.buildCurrentState = exports.saveCurrentState = exports.loadPreviousState = exports.validateFlows = exports.buildFlowGraph = exports.labelForComponent = exports.requirementsForDomain = exports.formatComponentLabel = exports.formatCoverageBar = exports.computeIntentSummary = exports.computeCoverage = exports.matchIntentToCode = exports.indexDiffFiles = exports.parseIntent = void 0;
+exports.detectRegressions = exports.buildCurrentState = exports.saveCurrentState = exports.loadPreviousState = exports.validateFlows = exports.buildFlowGraph = exports.labelForComponent = exports.requirementsForDomain = exports.formatComponentLabel = exports.formatCoverageBar = exports.computeIntentSummary = exports.computeCoverage = exports.matchIntentToCode = exports.indexDiffFiles = exports.formatExpansionSummary = exports.listCachedExpansions = exports.loadCachedExpansion = exports.expandIntent = exports.parseIntent = void 0;
 exports.runIntentEngine = runIntentEngine;
 var parser_1 = require("./parser");
 Object.defineProperty(exports, "parseIntent", { enumerable: true, get: function () { return parser_1.parseIntent; } });
+var semantic_expander_1 = require("./semantic-expander");
+Object.defineProperty(exports, "expandIntent", { enumerable: true, get: function () { return semantic_expander_1.expandIntent; } });
+Object.defineProperty(exports, "loadCachedExpansion", { enumerable: true, get: function () { return semantic_expander_1.loadCachedExpansion; } });
+Object.defineProperty(exports, "listCachedExpansions", { enumerable: true, get: function () { return semantic_expander_1.listCachedExpansions; } });
+Object.defineProperty(exports, "formatExpansionSummary", { enumerable: true, get: function () { return semantic_expander_1.formatExpansionSummary; } });
 var indexer_1 = require("./indexer");
 Object.defineProperty(exports, "indexDiffFiles", { enumerable: true, get: function () { return indexer_1.indexDiffFiles; } });
 var matcher_1 = require("./matcher");

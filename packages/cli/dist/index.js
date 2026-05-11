@@ -26,9 +26,11 @@ const plan_slo_1 = require("./commands/plan-slo");
 const repo_1 = require("./commands/repo");
 const apply_1 = require("./commands/apply");
 const verify_1 = require("./commands/verify");
+const pilot_report_1 = require("./commands/pilot-report");
 const prompt_1 = require("./commands/prompt");
 const ship_1 = require("./commands/ship");
 const remediate_1 = require("./commands/remediate");
+const remediate_governance_1 = require("./commands/remediate-governance");
 const fix_1 = require("./commands/fix");
 const generate_1 = require("./commands/generate");
 const config_1 = require("./commands/config");
@@ -741,6 +743,58 @@ program
         json: options.json === true,
     });
 });
+// ── neurcode remediate export ──────────────────────────────────────────────────
+program
+    .command('remediate-export')
+    .description('Export a GovernanceRemediationRequest JSON for a governance finding (no provider invoked, no files modified). ' +
+    'Feed the output to Cursor / Claude / Codex to generate a constrained patch.')
+    .option('--finding-id <id>', 'Export request for a specific finding ID')
+    .option('--finding-index <n>', 'Export request for finding at 0-based index', (v) => parseInt(v, 10))
+    .option('--verify-output-file <path>', 'Path to neurcode verify --json output (default: .neurcode/last-verify-output.json)')
+    .option('--output-file <path>', 'Output path for the request artifact')
+    .option('--project-root <path>', 'Project root override')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, remediate_governance_1.remediateExportCommand)({
+        findingId: options.findingId,
+        findingIndex: options.findingIndex !== undefined ? Number(options.findingIndex) : undefined,
+        verifyOutputFile: options.verifyOutputFile,
+        outputFile: options.outputFile,
+        projectRoot: options.projectRoot,
+        json: options.json === true,
+    });
+});
+// ── neurcode remediate validate ────────────────────────────────────────────────
+program
+    .command('remediate-validate')
+    .description('Validate an LLM-generated patch against deterministic governance rules. ' +
+    'Runs syntax, scope, and structural re-verification. Never modifies files. Outputs a validation receipt.')
+    .requiredOption('--request-file <path>', 'Path to GovernanceRemediationRequest JSON (from remediate-export)')
+    .option('--response-diff <diff>', 'Unified diff string to validate')
+    .option('--response-file <path>', 'Path to patch file (.patch/.diff) or GovernanceRemediationResponse JSON')
+    .option('--project-root <path>', 'Project root override')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, remediate_governance_1.remediateValidateCommand)({
+        requestFile: options.requestFile,
+        responseDiff: options.responseDiff,
+        responseFile: options.responseFile,
+        projectRoot: options.projectRoot,
+        json: options.json === true,
+    });
+});
+// ── neurcode remediate status ──────────────────────────────────────────────────
+program
+    .command('remediate-status')
+    .description('Show status of remediation artifacts in .neurcode/remediation/')
+    .option('--project-root <path>', 'Project root override')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, remediate_governance_1.remediateStatusCommand)({
+        projectRoot: options.projectRoot,
+        json: options.json === true,
+    });
+});
 program
     .command('generate')
     .description('Generate a governed plan context (reads intent from plan.json if no prompt given)')
@@ -852,6 +906,19 @@ program
     });
 });
 program
+    .command('pilot-report')
+    .description('Print a local governance pilot summary (metrics, provenance, telemetry)')
+    .option('--days <n>', 'Report window in days (7 or 30)', '7')
+    .option('--json', 'Emit machine-readable JSON')
+    .action((options) => {
+    const raw = String(options.days ?? '7');
+    const days = raw === '30' ? 30 : 7;
+    (0, pilot_report_1.pilotReportCommand)({
+        days,
+        json: options.json === true,
+    });
+});
+program
     .command('verify')
     .description('Check code against policies and plan')
     .option('--plan-id <id>', 'Plan ID to verify against (required unless --policy-only)')
@@ -884,7 +951,11 @@ program
     .option('--record', 'Report verification results to Neurcode Cloud')
     .option('--api-key <key>', 'Neurcode API Key (overrides config and env var)')
     .option('--api-url <url>', 'Override API URL (default: https://api.neurcode.com)')
+    .option('--local-only', 'Offline structural fallback: skip API, run deterministic structural rules only (sets NEURCODE_VERIFY_LOCAL_ONLY=1)')
     .action(async (options) => {
+    if (options.localOnly === true) {
+        process.env.NEURCODE_VERIFY_LOCAL_ONLY = '1';
+    }
     if (shouldRouteJsonLegacyCommandThroughExecutionBus(options.json === true)) {
         const verifyArgs = ['verify'];
         if (options.planId)
