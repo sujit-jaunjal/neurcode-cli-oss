@@ -57,9 +57,12 @@ const PROFILE_RULES = {
       /^packages\/cli\/dist\/index\.js$/,
       /^packages\/cli\/package\.json$/,
       /^packages\/cli\/README\.md$/,
+      /^packages\/telemetry\/dist\/index\.js$/,
+      /^packages\/telemetry\/package\.json$/,
     ],
     forbidden: [
       /^packages\/cli\/src\//,
+      /^packages\/telemetry\/src\//,
       /^packages\/action\//,
       /^packages\/github-action\//,
       /^packages\/analysis\//,

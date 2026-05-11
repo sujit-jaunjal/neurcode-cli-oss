@@ -1,0 +1,11 @@
+{
+  "name": "@neurcode-ai/telemetry",
+  "version": "0.1.0",
+  "description": "Deterministic, local governance telemetry for calibration and pilot intelligence",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "start": "node dist/index.js"
+  },
+  "license": "MIT"
+}
