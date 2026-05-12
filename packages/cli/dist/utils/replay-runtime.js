@@ -601,8 +601,49 @@ function buildDeterminismWarnings(index, controlPlane, workspace) {
 function clampScore(value) {
     return clamp(Math.round(value), 0, 100);
 }
+function buildReplayIntegritySummary(status, overallConfidence, hasEvidence) {
+    if (status === 'exact') {
+        return ('Replay reconstruction is exact for indexed inputs at this timestamp — no bounded-degradation signals.');
+    }
+    if (!hasEvidence) {
+        return (`Bounded degradation — replay confidence ${overallConfidence}/100: no verify evidence artifacts were indexed ` +
+            'for this as-of time (replay posture is derived from execution index only or incomplete artifact retention).');
+    }
+    return (`Bounded degradation — replay confidence ${overallConfidence}/100: incomplete snapshots, truncation, or envelope gaps ` +
+        'reduce audit-grade reproducibility; see recovery guidance.');
+}
+function buildReplayRecoveryGuidance(input) {
+    if (input.reconstructionStatus === 'exact') {
+        return [
+            'No replay completeness recovery required — indexed artifact dimensions satisfied at this timestamp.',
+        ];
+    }
+    const merged = input.missingArtifactSummaries.join('\n').toLowerCase();
+    const lines = [];
+    if (!input.controlPlane || merged.includes('control-plane')) {
+        lines.push('Persist control-plane snapshots: enable flows that write `.neurcode/` control-plane snapshots after verify, ' +
+            'or upload the control-plane snapshot directory as a CI artifact for audit replay.');
+    }
+    if (!input.workspace || merged.includes('workspace snapshot')) {
+        lines.push('Persist workspace snapshots: record workspace snapshots on verify completion (daemon or CI integration), ' +
+            'or scope replay with `--workspace` only after snapshots exist for that workspace.');
+    }
+    if (!input.latestEvidence || merged.includes('verification evidence')) {
+        lines.push('Preserve verify evidence JSON under `.neurcode/evidence/` (or your configured evidence path): add CI steps ' +
+            'that upload evidence artifacts between verify and `neurcode replay`; avoid deleting `.neurcode/` between jobs.');
+    }
+    if (input.executionRecordCount === 0 || merged.includes('execution records')) {
+        lines.push('Execution index empty — run `neurcode verify` at least once so execution records populate `.neurcode/` for replay lineage.');
+    }
+    if (input.latestEvidence
+        && (!input.latestEvidence.governanceEnvelopePresent || merged.includes('canonical governance envelope'))) {
+        lines.push('Ensure verify outputs include the canonical governance envelope (`--json` / CI verify path) so evidence artifacts embed governanceVerification.');
+    }
+    lines.push('Treat bounded-degradation replay as indicative governance posture, not sole compliance evidence — restore artifacts before sign-off.');
+    return [...new Set(lines)];
+}
 function summarizeReplayGovernanceReport(input) {
-    const { warnings, evidences, controlPlane, workspace } = input;
+    const { warnings, evidences, controlPlane, workspace, executionRecordCount } = input;
     const latestEvidence = evidences[evidences.length - 1] || null;
     const missingArtifactSummaries = [];
     const semanticDegradationSummaries = [];
@@ -711,10 +752,29 @@ function summarizeReplayGovernanceReport(input) {
         && provenanceMismatchSummaries.length === 0
         ? 'exact'
         : 'bounded-degradation';
+    const dedupedMissing = [...new Set(missingArtifactSummaries)];
+    const integritySummary = buildReplayIntegritySummary(reconstructionStatus, overall, latestEvidence !== null);
+    const snapshotCompleteness = {
+        controlPlaneSnapshot: controlPlane !== null,
+        workspaceSnapshot: workspace !== null,
+        verifyEvidenceArtifact: latestEvidence !== null,
+        executionRecordsIndexed: executionRecordCount > 0,
+    };
+    const recoveryGuidance = buildReplayRecoveryGuidance({
+        reconstructionStatus,
+        missingArtifactSummaries: dedupedMissing,
+        controlPlane,
+        workspace,
+        latestEvidence,
+        executionRecordCount,
+    });
     return {
         reconstructionStatus,
         canReconstructExactly: reconstructionStatus === 'exact',
-        missingArtifactSummaries: [...new Set(missingArtifactSummaries)],
+        integritySummary,
+        snapshotCompleteness,
+        recoveryGuidance,
+        missingArtifactSummaries: dedupedMissing,
         semanticDegradationSummaries: [...new Set(semanticDegradationSummaries)],
         federationDegradationSummaries: [...new Set(federationDegradationSummaries)],
         graphMismatchSummaries: [...new Set(graphMismatchSummaries)],
@@ -885,6 +945,7 @@ function replayGovernanceState(request, cwd = process.cwd()) {
         evidences,
         controlPlane,
         workspace,
+        executionRecordCount: index.executions.length,
     });
     const determinismPayload = {
         asOf,

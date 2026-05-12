@@ -12,6 +12,17 @@ interface ReplayConfidenceComponent {
 interface ReplayGovernanceReport {
     reconstructionStatus: ReplayReconstructionStatus;
     canReconstructExactly: boolean;
+    /** Single-sentence boundary statement — exact vs bounded degradation (never claims false exactness). */
+    integritySummary: string;
+    /** Snapshot presence at replay as-of time — visibility only, not a guarantee of CI-uploaded artifacts. */
+    snapshotCompleteness: {
+        controlPlaneSnapshot: boolean;
+        workspaceSnapshot: boolean;
+        verifyEvidenceArtifact: boolean;
+        executionRecordsIndexed: boolean;
+    };
+    /** Deterministic operational guidance — what to persist or upload to improve replay confidence. */
+    recoveryGuidance: string[];
     missingArtifactSummaries: string[];
     semanticDegradationSummaries: string[];
     federationDegradationSummaries: string[];

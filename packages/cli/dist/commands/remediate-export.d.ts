@@ -16,6 +16,7 @@
  *   neurcode remediate-export --finding <id> --format mcp
  *   neurcode remediate-export --finding <id> --out ./payload.json
  *   neurcode remediate-export --finding <id> --copy
+ *   neurcode remediate-export --verify-output-file ./verify.json --project-root ./repo
  */
 interface RemediateExportOptions {
     finding?: string;
@@ -25,6 +26,10 @@ interface RemediateExportOptions {
     out?: string;
     copy?: boolean;
     json?: boolean;
+    /** Absolute or cwd-relative path to verify JSON (matches CLI --verify-output-file). */
+    verifyOutputFile?: string;
+    /** Root of the repository whose sources are cited in findings (matches CLI --project-root). */
+    projectRoot?: string;
 }
 export declare function remediateExportCommand(options: RemediateExportOptions): Promise<void>;
 export {};

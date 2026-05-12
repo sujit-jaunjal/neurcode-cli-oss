@@ -798,6 +798,8 @@ program
         out: options.out,
         copy: options.copy === true,
         json: options.json === true,
+        verifyOutputFile: options.verifyOutputFile,
+        projectRoot: options.projectRoot,
     });
 });
 // ── neurcode remediate validate ────────────────────────────────────────────────

@@ -67,9 +67,23 @@ function printReconstructionSummary(reconstruction) {
     console.log('\nReconstruction Trust');
     console.log(`Status: ${statusLabel}`);
     console.log(`Confidence: ${reconstruction.confidence.overall}/100`);
+    if (reconstruction.integritySummary) {
+        console.log(`Summary: ${reconstruction.integritySummary}`);
+    }
+    const sc = reconstruction.snapshotCompleteness;
+    if (sc) {
+        console.log(`Snapshots present — control-plane: ${sc.controlPlaneSnapshot ? 'yes' : 'no'} · workspace: ${sc.workspaceSnapshot ? 'yes' : 'no'} · ` +
+            `verify evidence: ${sc.verifyEvidenceArtifact ? 'yes' : 'no'} · execution index: ${sc.executionRecordsIndexed ? 'yes' : 'no'}`);
+    }
     console.log(`Components: provenance ${reconstruction.confidence.provenance.score} · ` +
         `graph ${reconstruction.confidence.graph.score} · semantic ${reconstruction.confidence.semantic.score} · ` +
         `federation ${reconstruction.confidence.federation.score} · artifacts ${reconstruction.confidence.artifacts.score}`);
+    if (reconstruction.recoveryGuidance?.length) {
+        console.log('\nRecovery guidance (operational):');
+        for (const line of reconstruction.recoveryGuidance.slice(0, 12)) {
+            console.log(`- ${line}`);
+        }
+    }
     const sections = [
         { title: 'Missing artifacts', lines: reconstruction.missingArtifactSummaries },
         { title: 'Semantic degradation', lines: reconstruction.semanticDegradationSummaries },

@@ -17,6 +17,7 @@
  *   neurcode remediate-export --finding <id> --format mcp
  *   neurcode remediate-export --finding <id> --out ./payload.json
  *   neurcode remediate-export --finding <id> --copy
+ *   neurcode remediate-export --verify-output-file ./verify.json --project-root ./repo
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.remediateExportCommand = remediateExportCommand;
@@ -78,20 +79,23 @@ const PROMPT_HINT = {
         'Remediation should add bounds or explicit cleanup.',
 };
 async function remediateExportCommand(options) {
-    const projectRoot = process.cwd();
-    const lastVerifyPath = (0, path_1.join)(projectRoot, '.neurcode', 'last-verify-output.json');
-    if (!(0, fs_1.existsSync)(lastVerifyPath)) {
+    const projectRoot = options.projectRoot ? (0, path_1.resolve)(options.projectRoot) : process.cwd();
+    const verifyPath = options.verifyOutputFile
+        ? (0, path_1.resolve)(options.verifyOutputFile)
+        : (0, path_1.join)(projectRoot, '.neurcode', 'last-verify-output.json');
+    if (!(0, fs_1.existsSync)(verifyPath)) {
         console.error(chalk.red('✗ No verify output found.'));
+        console.error(chalk.dim(`  Expected: ${verifyPath}`));
         console.error(chalk.dim('  Run: neurcode verify --policy-only --json'));
-        console.error(chalk.dim('  The last verify output must exist at .neurcode/last-verify-output.json'));
+        console.error(chalk.dim('  Or pass: neurcode remediate-export --verify-output-file <path-to-verify.json>'));
         process.exit(1);
     }
     let verifyOutput;
     try {
-        verifyOutput = JSON.parse((0, fs_1.readFileSync)(lastVerifyPath, 'utf-8'));
+        verifyOutput = JSON.parse((0, fs_1.readFileSync)(verifyPath, 'utf-8'));
     }
     catch {
-        console.error(chalk.red('✗ Could not parse .neurcode/last-verify-output.json'));
+        console.error(chalk.red(`✗ Could not parse verify output: ${verifyPath}`));
         process.exit(1);
     }
     // Collect findings from verify output
@@ -208,7 +212,7 @@ function buildPayload(finding, verifyOutput, projectRoot, replayChecksum, replay
     const payload = {
         exportId,
         exportedAt: new Date().toISOString(),
-        neurcodeVersion: '0.9.66',
+        neurcodeVersion: '0.9.67',
         schemaVersion: '2026-05-12',
         findingId,
         ruleId,

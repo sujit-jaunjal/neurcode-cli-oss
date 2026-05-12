@@ -478,6 +478,8 @@ function evaluateGovernanceReplayIntegrity(input) {
     const driftReasons = new Set();
     const ev = input.evidencePayload.governanceVerification;
     const rec = input.reconstructedPayload?.governanceVerification;
+    /** Two-sided replay diff (verify vs reconstruct). Omitting reconstructedPayload means evidence-only validation. */
+    const compareRuns = input.reconstructedPayload !== undefined && input.reconstructedPayload !== null;
     if (!ev && !rec) {
         notes.push('No canonical governance envelope present on evidence or reconstruction.');
         return {
@@ -490,99 +492,108 @@ function evaluateGovernanceReplayIntegrity(input) {
             driftReasons: [],
         };
     }
-    if (ev && !rec) {
-        missingArtifacts.push('governanceVerification missing from reconstructed payload');
+    if (!ev && rec) {
+        missingArtifacts.push('governanceVerification missing from evidence payload');
+        notes.push('Only reconstructed envelope present — evidence artifact incomplete for two-sided replay.');
     }
-    else if (ev && rec) {
-        // ── 1. Schema version ──────────────────────────────────────────────────────
-        if (ev.schemaVersion !== rec.schemaVersion) {
-            provenanceMismatches.push(`schemaVersion drift: evidence=${ev.schemaVersion} replay=${rec.schemaVersion}`);
-            driftReasons.add('provenance-drift');
+    if (compareRuns) {
+        if (ev && !rec) {
+            missingArtifacts.push('governanceVerification missing from reconstructed payload');
         }
-        // ── 2. Finding count equality ──────────────────────────────────────────────
-        if (ev.findings.length !== rec.findings.length) {
-            provenanceMismatches.push(`findings count drift: evidence=${ev.findings.length} replay=${rec.findings.length}`);
-        }
-        // ── 3. Missing / extra findings ────────────────────────────────────────────
-        const evById = new Map(ev.findings.map(f => [f.id, f]));
-        const recById = new Map(rec.findings.map(f => [f.id, f]));
-        for (const [id] of evById) {
-            if (!recById.has(id)) {
-                graphMismatches.push(`missing-finding in replay: ${id}`);
-                driftReasons.add('missing-finding');
+        else if (ev && rec) {
+            // ── 1. Schema version ──────────────────────────────────────────────────────
+            if (ev.schemaVersion !== rec.schemaVersion) {
+                provenanceMismatches.push(`schemaVersion drift: evidence=${ev.schemaVersion} replay=${rec.schemaVersion}`);
+                driftReasons.add('provenance-drift');
             }
-        }
-        for (const [id] of recById) {
-            if (!evById.has(id)) {
-                graphMismatches.push(`extra-finding in replay: ${id}`);
-                driftReasons.add('extra-finding');
+            // ── 2. Finding count equality ──────────────────────────────────────────────
+            if (ev.findings.length !== rec.findings.length) {
+                provenanceMismatches.push(`findings count drift: evidence=${ev.findings.length} replay=${rec.findings.length}`);
             }
-        }
-        // ── 4. Per-finding semantic equality (severity, determinism, provenance, suppression) ──
-        for (const [id, evF] of evById) {
-            const recF = recById.get(id);
-            if (!recF)
-                continue; // already reported as missing above
-            if (evF.severity !== recF.severity) {
-                graphMismatches.push(`severity-drift on ${id}: evidence=${evF.severity} replay=${recF.severity}`);
-                driftReasons.add('severity-drift');
-            }
-            if (evF.determinismClassification !== recF.determinismClassification) {
-                graphMismatches.push(`determinism-drift on ${id}: ` +
-                    `evidence=${evF.determinismClassification} replay=${recF.determinismClassification}`);
-                driftReasons.add('determinism-drift');
-            }
-            // Provenance: compare planId if present
-            const evProv = evF.provenanceMetadata;
-            const recProv = recF.provenanceMetadata;
-            if (evProv && recProv) {
-                if (evProv.planId !== recProv.planId) {
-                    provenanceMismatches.push(`provenance planId drift on ${id}: evidence=${evProv.planId} replay=${recProv.planId}`);
-                    driftReasons.add('provenance-drift');
+            // ── 3. Missing / extra findings ────────────────────────────────────────────
+            const evById = new Map(ev.findings.map(f => [f.id, f]));
+            const recById = new Map(rec.findings.map(f => [f.id, f]));
+            for (const [id] of evById) {
+                if (!recById.has(id)) {
+                    graphMismatches.push(`missing-finding in replay: ${id}`);
+                    driftReasons.add('missing-finding');
                 }
             }
-            else if (evProv && !recProv) {
-                provenanceMismatches.push(`provenance-drift on ${id}: evidence has provenanceMetadata, replay does not`);
-                driftReasons.add('provenance-drift');
+            for (const [id] of recById) {
+                if (!evById.has(id)) {
+                    graphMismatches.push(`extra-finding in replay: ${id}`);
+                    driftReasons.add('extra-finding');
+                }
             }
-            // Structural policyRef: compare via structuralMetadata
-            const evSM = evF.structuralMetadata;
-            const recSM = recF.structuralMetadata;
-            if (evSM && recSM && evSM.policyRef !== recSM.policyRef) {
-                provenanceMismatches.push(`policyRef drift on ${id}: evidence=${evSM.policyRef} replay=${recSM.policyRef}`);
-                driftReasons.add('provenance-drift');
+            // ── 4. Per-finding semantic equality (severity, determinism, provenance, suppression) ──
+            for (const [id, evF] of evById) {
+                const recF = recById.get(id);
+                if (!recF)
+                    continue; // already reported as missing above
+                if (evF.severity !== recF.severity) {
+                    graphMismatches.push(`severity-drift on ${id}: evidence=${evF.severity} replay=${recF.severity}`);
+                    driftReasons.add('severity-drift');
+                }
+                if (evF.determinismClassification !== recF.determinismClassification) {
+                    graphMismatches.push(`determinism-drift on ${id}: ` +
+                        `evidence=${evF.determinismClassification} replay=${recF.determinismClassification}`);
+                    driftReasons.add('determinism-drift');
+                }
+                // Provenance: compare planId if present
+                const evProv = evF.provenanceMetadata;
+                const recProv = recF.provenanceMetadata;
+                if (evProv && recProv) {
+                    if (evProv.planId !== recProv.planId) {
+                        provenanceMismatches.push(`provenance planId drift on ${id}: evidence=${evProv.planId} replay=${recProv.planId}`);
+                        driftReasons.add('provenance-drift');
+                    }
+                }
+                else if (evProv && !recProv) {
+                    provenanceMismatches.push(`provenance-drift on ${id}: evidence has provenanceMetadata, replay does not`);
+                    driftReasons.add('provenance-drift');
+                }
+                // Structural policyRef: compare via structuralMetadata
+                const evSM = evF.structuralMetadata;
+                const recSM = recF.structuralMetadata;
+                if (evSM && recSM && evSM.policyRef !== recSM.policyRef) {
+                    provenanceMismatches.push(`policyRef drift on ${id}: evidence=${evSM.policyRef} replay=${recSM.policyRef}`);
+                    driftReasons.add('provenance-drift');
+                }
+                // Suppression: compare suppressionMetadata presence
+                const evSupp = evF.suppressionMetadata;
+                const recSupp = recF.suppressionMetadata;
+                if (Boolean(evSupp) !== Boolean(recSupp)) {
+                    graphMismatches.push(`suppression-drift on ${id}: ` +
+                        `evidence ${evSupp ? 'suppressed' : 'not-suppressed'} vs ` +
+                        `replay ${recSupp ? 'suppressed' : 'not-suppressed'}`);
+                    driftReasons.add('suppression-drift');
+                }
             }
-            // Suppression: compare suppressionMetadata presence
-            const evSupp = evF.suppressionMetadata;
-            const recSupp = recF.suppressionMetadata;
-            if (Boolean(evSupp) !== Boolean(recSupp)) {
-                graphMismatches.push(`suppression-drift on ${id}: ` +
-                    `evidence ${evSupp ? 'suppressed' : 'not-suppressed'} vs ` +
-                    `replay ${recSupp ? 'suppressed' : 'not-suppressed'}`);
-                driftReasons.add('suppression-drift');
+            // ── 5. Canonical ordering equality ────────────────────────────────────────
+            // Both arrays should be in canonical order. Compare the ordered ID sequences.
+            const evOrderedIds = ev.findings.map(f => f.id).join('\x00');
+            const recOrderedIds = rec.findings.map(f => f.id).join('\x00');
+            if (evOrderedIds !== recOrderedIds && ev.findings.length === rec.findings.length) {
+                graphMismatches.push('finding-order-drift: canonical ordering differs between evidence and replay');
+                driftReasons.add('finding-order-drift');
+            }
+            // ── 6. Checksum equality ───────────────────────────────────────────────────
+            if (ev.replayChecksum && rec.replayChecksum) {
+                if (ev.replayChecksum !== rec.replayChecksum) {
+                    const comparison = (0, canonical_invariants_1.compareForReplayEquivalence)(ev.findings, rec.findings);
+                    graphMismatches.push(`checksum-drift: evidence=${ev.replayChecksum.slice(0, 16)} ` +
+                        `replay=${rec.replayChecksum.slice(0, 16)}` +
+                        (comparison.driftDetails ? ` (${comparison.driftDetails})` : ''));
+                    driftReasons.add('checksum-drift');
+                }
+            }
+            else if (ev.replayChecksum && !rec.replayChecksum) {
+                notes.push('Replay envelope missing replayChecksum (older CLI version); falling back to per-field comparison.');
             }
         }
-        // ── 5. Canonical ordering equality ────────────────────────────────────────
-        // Both arrays should be in canonical order. Compare the ordered ID sequences.
-        const evOrderedIds = ev.findings.map(f => f.id).join('\x00');
-        const recOrderedIds = rec.findings.map(f => f.id).join('\x00');
-        if (evOrderedIds !== recOrderedIds && ev.findings.length === rec.findings.length) {
-            graphMismatches.push('finding-order-drift: canonical ordering differs between evidence and replay');
-            driftReasons.add('finding-order-drift');
-        }
-        // ── 6. Checksum equality ───────────────────────────────────────────────────
-        if (ev.replayChecksum && rec.replayChecksum) {
-            if (ev.replayChecksum !== rec.replayChecksum) {
-                const comparison = (0, canonical_invariants_1.compareForReplayEquivalence)(ev.findings, rec.findings);
-                graphMismatches.push(`checksum-drift: evidence=${ev.replayChecksum.slice(0, 16)} ` +
-                    `replay=${rec.replayChecksum.slice(0, 16)}` +
-                    (comparison.driftDetails ? ` (${comparison.driftDetails})` : ''));
-                driftReasons.add('checksum-drift');
-            }
-        }
-        else if (ev.replayChecksum && !rec.replayChecksum) {
-            notes.push('Replay envelope missing replayChecksum (older CLI version); falling back to per-field comparison.');
-        }
+    }
+    else if (ev && !ev.replayChecksum) {
+        notes.push('replayChecksum absent on evidence envelope — older CLI export or partial verify JSON; findings remain authoritative.');
     }
     const trunc = input.evidencePayload.semanticTruncation
         ?? input.reconstructedPayload?.semanticTruncation;
