@@ -105,6 +105,38 @@ catch {
         white: (str) => str,
     };
 }
+/**
+ * Structured CI explainability for `neurcode verify --ci` / `--policy-only` human output.
+ * Keeps logs short — no JSON dumps — and separates merge-blocking vs advisory signals.
+ */
+function logCiPolicyOnlyOutcomeExplainability(params) {
+    if (!params.ciModeEnabled || params.json) {
+        return;
+    }
+    const modeLine = params.source === 'ci'
+        ? '`verify --ci` uses deterministic local governance (compiled/custom policy + structural rules). Remote plan-verify API is not used.'
+        : '`--policy-only` — local policy + structural governance without plan adherence.';
+    const sev = (s) => String(s || '').toLowerCase();
+    const sBlock = params.structuralViolations.filter((v) => v.severity === 'BLOCKING').length;
+    const sAdv = params.structuralViolations.length - sBlock;
+    const pBlock = params.policyViolations.filter((v) => sev(v.severity) === 'block').length;
+    const pWarn = params.policyViolations.filter((v) => sev(v.severity) === 'warn').length;
+    if (params.verdict === 'PASS') {
+        console.log(chalk.dim('\n── CI verify contract ──'));
+        console.log(chalk.dim(`   ${modeLine}`));
+        console.log(chalk.dim('   Exit 0: no blocking severities. Replay checksum (JSON) anchors structural findings for audit parity.'));
+        return;
+    }
+    console.log(chalk.bold.red('\n── CI failure explainability ──'));
+    console.log(chalk.dim(`   ${modeLine}`));
+    console.log(chalk.red(`   Merge-blocking rows: structural BLOCKING ${sBlock}; policy/custom severity=block ${pBlock}`));
+    console.log(chalk.yellow(`   Non-blocking (warn/advisory-class): structural advisory ${sAdv}; policy warn ${pWarn} — does not fail CI unless your gate maps warns to failure`));
+    console.log(chalk.dim('   Offline / structural-only: set NEURCODE_VERIFY_LOCAL_ONLY=1 or `--local-only` to skip API compatibility probes (AST gates still run).'));
+    if (params.replayChecksum) {
+        console.log(chalk.dim(`   Structural replay checksum: ${params.replayChecksum.slice(0, 16)}… · mode ${params.replayMode ?? 'local-structural'}`));
+    }
+    console.log(chalk.dim('   Next: resolve BLOCKING first → `neurcode remediate-export` (optional) → re-run `neurcode verify --ci`.\n'));
+}
 ;
 function toArtifactSignatureSummary(status) {
     return {
@@ -2071,6 +2103,16 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         }
         displayGovernanceInsights(governanceAnalysis, { explain: options.explain });
         console.log(chalk.dim(`\n${message}`));
+        logCiPolicyOnlyOutcomeExplainability({
+            ciModeEnabled,
+            json: Boolean(options.json),
+            verdict: effectiveVerdict,
+            source,
+            structuralViolations: policyOnlyStructural.violations,
+            policyViolations,
+            replayChecksum: policyOnlyReplayChecksum,
+            replayMode: 'local-structural',
+        });
     }
     await recordPolicyOnlyVerification({
         grade,
@@ -2855,7 +2897,9 @@ async function verifyCommand(options) {
                     });
                 }
                 console.log(chalk.dim(`\n[Local-only] ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking. ` +
-                    `Remove --local-only for full governance verification.\n`));
+                    `Structural analysis ran on this checkout only (no verify API).\n`));
+                console.log(chalk.dim('   Replay: same commit + same flags → same structural findings.\n' +
+                    '   Full plan/adherence + remote verify: drop --local-only when policy allows network/API.\n'));
             }
             recordVerifyEvent(localVerdict, `local_only;structural=${localStructural.violations.length}`, diffFiles.map((f) => f.path));
             exitWithEvidence(blockingViolations.length > 0 ? 2 : 0);
@@ -4599,6 +4643,15 @@ async function verifyCommand(options) {
                         console.log(chalk.dim('   Intent proof repo scan reached configured file/byte limit (truncated).'));
                     }
                 }
+                console.log(chalk.dim('\n── Verification contract (this run) ──'));
+                console.log(chalk.dim(`   Verify source: ${verifySource === 'local_fallback'
+                    ? 'local deterministic fallback (verify API unavailable)'
+                    : 'verify API'}`));
+                console.log(chalk.dim(`   Structural findings: ${structuralViolations.length} ` +
+                    `(${structuralViolations.filter((v) => v.severity === 'BLOCKING').length} blocking, ` +
+                    `${structuralViolations.filter((v) => v.severity !== 'BLOCKING').length} advisory)`));
+                console.log(chalk.dim('   Merge gates follow rule severity + policy: blocking structural findings are reproducible on this tree.'));
+                console.log(chalk.dim('   Evidence trail: see `.neurcode/` on success (provenance, telemetry) — use `neurcode replay` / dashboard for audit parity.'));
             }
             // ── Governance Provenance Chain + Pilot Metrics ───────────────────────
             // Best-effort: never throws, never changes the verification outcome.
