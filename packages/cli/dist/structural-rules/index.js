@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DS002MissingCorrelationId = exports.DS001SagaRollbackAbsence = exports.SR016UnsafeJSONParse = exports.SR015DanglingAbortController = exports.SR014MutableClosureAsync = exports.SR013MissingIdempotencyKey = exports.SR012PromiseRaceLeak = exports.SR011EventListenerLeak = exports.PY010LeakedAiohttpSession = exports.PY009UnsafePickleDeserialization = exports.PY008CeleryTaskWithoutRetry = exports.PY007SQLAlchemySessionLeak = exports.PY006BlockingIOInAsync = exports.PY005FastAPIWithoutPydantic = exports.PY004SwallowedAsyncException = exports.PY003BroadExceptClause = exports.PY002UnboundedDictSingleton = exports.PY001AsyncioTaskWithoutCancel = exports.SR010RetryStorm = exports.SR009MissingRetryBackoff = exports.SR008BackgroundTaskOrphan = exports.SR007CrossRequestError = exports.SR006FanoutErrorSanitization = exports.SR005HalfOpenProbeGate = exports.SR004RequestBoundaryNoValidation = exports.SR003TimerWithoutCleanup = exports.SR002UnboundedCollection = exports.SR001SwallowedAsyncRejection = exports.applyContextualSeverity = exports.adjustViolationSeverity = exports.classifyFileContext = exports.applySuppressions = exports.parseSuppressionDirectives = exports.StructuralRuleEngine = void 0;
+exports.DS002MissingCorrelationId = exports.DS001SagaRollbackAbsence = exports.SR016UnsafeJSONParse = exports.SR015DanglingAbortController = exports.SR014MutableClosureAsync = exports.SR013MissingIdempotencyKey = exports.SR012PromiseRaceLeak = exports.SR011EventListenerLeak = exports.PY014FixedSleepRetry = exports.PY013MutableDefaultArg = exports.PY012AsyncioRunMisuse = exports.PY011ThreadLifecycle = exports.PY010LeakedAiohttpSession = exports.PY009UnsafePickleDeserialization = exports.PY008CeleryTaskWithoutRetry = exports.PY007SQLAlchemySessionLeak = exports.PY006BlockingIOInAsync = exports.PY005FastAPIWithoutPydantic = exports.PY004SwallowedAsyncException = exports.PY003BroadExceptClause = exports.PY002UnboundedDictSingleton = exports.PY001AsyncioTaskWithoutCancel = exports.SR010RetryStorm = exports.SR009MissingRetryBackoff = exports.SR008BackgroundTaskOrphan = exports.SR007CrossRequestError = exports.SR006FanoutErrorSanitization = exports.SR005HalfOpenProbeGate = exports.SR004RequestBoundaryNoValidation = exports.SR003TimerWithoutCleanup = exports.SR002UnboundedCollection = exports.SR001SwallowedAsyncRejection = exports.applyContextualSeverity = exports.adjustViolationSeverity = exports.classifyFileContext = exports.applySuppressions = exports.parseSuppressionDirectives = exports.StructuralRuleEngine = void 0;
 exports.createDefaultStructuralRuleEngine = createDefaultStructuralRuleEngine;
 var engine_1 = require("./engine");
 Object.defineProperty(exports, "StructuralRuleEngine", { enumerable: true, get: function () { return engine_1.StructuralRuleEngine; } });
@@ -53,6 +53,14 @@ var PY009_unsafe_pickle_deserialization_1 = require("./python/PY009-unsafe-pickl
 Object.defineProperty(exports, "PY009UnsafePickleDeserialization", { enumerable: true, get: function () { return PY009_unsafe_pickle_deserialization_1.PY009UnsafePickleDeserialization; } });
 var PY010_leaked_aiohttp_session_1 = require("./python/PY010-leaked-aiohttp-session");
 Object.defineProperty(exports, "PY010LeakedAiohttpSession", { enumerable: true, get: function () { return PY010_leaked_aiohttp_session_1.PY010LeakedAiohttpSession; } });
+var PY011_thread_lifecycle_1 = require("./python/PY011-thread-lifecycle");
+Object.defineProperty(exports, "PY011ThreadLifecycle", { enumerable: true, get: function () { return PY011_thread_lifecycle_1.PY011ThreadLifecycle; } });
+var PY012_asyncio_run_misuse_1 = require("./python/PY012-asyncio-run-misuse");
+Object.defineProperty(exports, "PY012AsyncioRunMisuse", { enumerable: true, get: function () { return PY012_asyncio_run_misuse_1.PY012AsyncioRunMisuse; } });
+var PY013_mutable_default_arg_1 = require("./python/PY013-mutable-default-arg");
+Object.defineProperty(exports, "PY013MutableDefaultArg", { enumerable: true, get: function () { return PY013_mutable_default_arg_1.PY013MutableDefaultArg; } });
+var PY014_fixed_sleep_retry_1 = require("./python/PY014-fixed-sleep-retry");
+Object.defineProperty(exports, "PY014FixedSleepRetry", { enumerable: true, get: function () { return PY014_fixed_sleep_retry_1.PY014FixedSleepRetry; } });
 // TypeScript rules — extended set
 var SR011_event_listener_leak_1 = require("./rules/SR011-event-listener-leak");
 Object.defineProperty(exports, "SR011EventListenerLeak", { enumerable: true, get: function () { return SR011_event_listener_leak_1.SR011EventListenerLeak; } });
@@ -100,6 +108,10 @@ const SR015_dangling_abort_controller_2 = require("./rules/SR015-dangling-abort-
 const SR016_unsafe_json_parse_2 = require("./rules/SR016-unsafe-json-parse");
 const DS001_saga_rollback_absence_2 = require("./distributed/DS001-saga-rollback-absence");
 const DS002_missing_correlation_id_2 = require("./distributed/DS002-missing-correlation-id");
+const PY011_thread_lifecycle_2 = require("./python/PY011-thread-lifecycle");
+const PY012_asyncio_run_misuse_2 = require("./python/PY012-asyncio-run-misuse");
+const PY013_mutable_default_arg_2 = require("./python/PY013-mutable-default-arg");
+const PY014_fixed_sleep_retry_2 = require("./python/PY014-fixed-sleep-retry");
 /**
  * Creates and returns a pre-configured StructuralRuleEngine with all rules registered.
  * This is the standard way to get a ready-to-use engine.
@@ -135,6 +147,11 @@ function createDefaultStructuralRuleEngine() {
         new SR016_unsafe_json_parse_2.SR016UnsafeJSONParse(),
         new DS001_saga_rollback_absence_2.DS001SagaRollbackAbsence(),
         new DS002_missing_correlation_id_2.DS002MissingCorrelationId(),
+        // Python — lifecycle and correctness rules (Phase 4.75)
+        new PY011_thread_lifecycle_2.PY011ThreadLifecycle(),
+        new PY012_asyncio_run_misuse_2.PY012AsyncioRunMisuse(),
+        new PY013_mutable_default_arg_2.PY013MutableDefaultArg(),
+        new PY014_fixed_sleep_retry_2.PY014FixedSleepRetry(),
     ]);
     return engine;
 }

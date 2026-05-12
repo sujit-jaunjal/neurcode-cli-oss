@@ -69,6 +69,7 @@ const diff_symbols_1 = require("../utils/diff-symbols");
 const advisory_signals_1 = require("../utils/advisory-signals");
 const structural_rules_1 = require("../structural-rules");
 const canonical_pipeline_1 = require("../governance/canonical-pipeline");
+const canonical_invariants_1 = require("../governance/canonical-invariants");
 const structural_on_diff_1 = require("../governance/structural-on-diff");
 // NOTE: mergeStructuralIntoPolicyViolations is intentionally NOT imported.
 // Structural violations flow exclusively through payload.structuralViolations
@@ -1995,6 +1996,11 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
             eventCount: auditIntegrity.count,
         },
     };
+    // Phase 4: Compute replay checksum from structural findings so replayChecksum
+    // is populated in --policy-only and --local-only CI/daemonless modes.
+    // This closes the N/A gap identified in the Apache Airflow benchmark.
+    const policyOnlyStructuralFindings = policyOnlyStructural.violations.map(canonical_pipeline_1.findingFromStructural);
+    const policyOnlyReplayChecksum = (0, canonical_invariants_1.computeCanonicalFindingChecksum)(policyOnlyStructuralFindings);
     const policyOnlyPayload = {
         grade,
         score,
@@ -2013,6 +2019,8 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         mode: 'policy_only',
         policyOnly: true,
         policyOnlySource: source,
+        replayChecksum: policyOnlyReplayChecksum,
+        replayMode: 'local-structural',
         ...governancePayload,
         policyLock: {
             enforced: policyLockEvaluation.enforced,

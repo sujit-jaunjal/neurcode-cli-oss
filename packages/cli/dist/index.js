@@ -32,6 +32,7 @@ const ship_1 = require("./commands/ship");
 const remediate_1 = require("./commands/remediate");
 const remediate_governance_1 = require("./commands/remediate-governance");
 const fix_1 = require("./commands/fix");
+const remediate_export_1 = require("./commands/remediate-export");
 const generate_1 = require("./commands/generate");
 const config_1 = require("./commands/config");
 const map_1 = require("./commands/map");
@@ -771,24 +772,31 @@ program
         json: options.json === true,
     });
 });
-// ── neurcode remediate export ──────────────────────────────────────────────────
+// ── neurcode remediate-export (Phase 2 — trust boundary export) ───────────────
 program
     .command('remediate-export')
-    .description('Export a GovernanceRemediationRequest JSON for a governance finding (no provider invoked, no files modified). ' +
-    'Feed the output to Cursor / Claude / Codex to generate a constrained patch.')
-    .option('--finding-id <id>', 'Export request for a specific finding ID')
-    .option('--finding-index <n>', 'Export request for finding at 0-based index', (v) => parseInt(v, 10))
-    .option('--verify-output-file <path>', 'Path to neurcode verify --json output (default: .neurcode/last-verify-output.json)')
-    .option('--output-file <path>', 'Output path for the request artifact')
+    .description('Export a structured deterministic remediation payload for a governance finding.\n' +
+    'Pass the output to Cursor, Claude, Codex, or any AI coding assistant.\n' +
+    'This command NEVER modifies any file. Neurcode detects. Your AI assistant remediates.')
+    .option('--finding <id>', 'Export payload for a specific finding ID')
+    .option('--finding-id <id>', 'Alias for --finding (backward compatible)')
+    .option('--finding-index <n>', 'Export payload for finding at 0-based index')
+    .option('--all', 'Export payloads for all findings from last verify')
+    .option('--format <fmt>', 'Output format: json | mcp (default: json)', 'json')
+    .option('--out <path>', 'Write output to file instead of stdout')
+    .option('--copy', 'Copy output to clipboard (macOS pbcopy)')
+    .option('--verify-output-file <path>', 'Path to verify JSON output (default: .neurcode/last-verify-output.json)')
     .option('--project-root <path>', 'Project root override')
     .option('--json', 'Output machine-readable JSON')
-    .action((options) => {
-    (0, remediate_governance_1.remediateExportCommand)({
-        findingId: options.findingId,
-        findingIndex: options.findingIndex !== undefined ? Number(options.findingIndex) : undefined,
-        verifyOutputFile: options.verifyOutputFile,
-        outputFile: options.outputFile,
-        projectRoot: options.projectRoot,
+    .action(async (options) => {
+    const finding = options.finding ?? options.findingId;
+    await (0, remediate_export_1.remediateExportCommand)({
+        finding,
+        findingIndex: options.findingIndex,
+        all: options.all === true,
+        format: options.format === 'mcp' ? 'mcp' : 'json',
+        out: options.out,
+        copy: options.copy === true,
         json: options.json === true,
     });
 });
