@@ -276,7 +276,7 @@ function buildNarrative(actionType, succeeded, verification, target) {
             why: `Blocking delta ${diff.blockingDelta ?? 0}, advisory delta ${diff.advisoryDelta ?? 0}.`,
             riskLevel: 'low',
             recommendedAction: 'Run follow-up verify in CI to confirm stability across ephemeral runners.',
-            expectedImprovement: 'Sustaining the same patch/fix pattern should reduce recurrent blocking drift.',
+            expectedImprovement: 'Sustaining the same export → fix → re-verify pattern should reduce recurrent blocking drift.',
         };
     }
     if (diff.trend === 'regressed') {
@@ -285,8 +285,8 @@ function buildNarrative(actionType, succeeded, verification, target) {
             summary: 'Execution completed but verification regressed.',
             why: `Blocking delta ${diff.blockingDelta ?? 0}, advisory delta ${diff.advisoryDelta ?? 0}.`,
             riskLevel: 'high',
-            recommendedAction: 'Open Fix Center or run neurcode fix --apply-safe before merging.',
-            expectedImprovement: 'Applying deterministic remediation should reduce blocking findings on the next run.',
+            recommendedAction: 'Export remediation context (`neurcode remediate-export`) and re-verify after external edits before merging.',
+            expectedImprovement: 'Closing blocking findings externally then re-running verify should reduce reported violations.',
         };
     }
     return {
@@ -295,7 +295,7 @@ function buildNarrative(actionType, succeeded, verification, target) {
         why: 'No net blocking/advisory change was detected in the deterministic reverify stage.',
         riskLevel: 'medium',
         recommendedAction: 'Review advisory findings and maintain verify cadence.',
-        expectedImprovement: 'Targeted follow-up patches can move the system from stable to improving.',
+        expectedImprovement: 'Targeted follow-up remediation and re-verify can move the system from stable to improving.',
     };
 }
 function listEvidenceFiles(dir) {
