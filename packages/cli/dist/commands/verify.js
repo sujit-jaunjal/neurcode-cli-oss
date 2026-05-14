@@ -67,6 +67,9 @@ const policy_compiler_1 = require("../utils/policy-compiler");
 const change_contract_1 = require("../utils/change-contract");
 const diff_symbols_1 = require("../utils/diff-symbols");
 const advisory_signals_1 = require("../utils/advisory-signals");
+const verify_guidance_1 = require("./verify-guidance");
+const verify_output_1 = require("./verify-output");
+const verify_render_1 = require("./verify-render");
 const structural_rules_1 = require("../structural-rules");
 const canonical_pipeline_1 = require("../governance/canonical-pipeline");
 const canonical_invariants_1 = require("../governance/canonical-invariants");
@@ -76,15 +79,16 @@ const structural_on_diff_1 = require("../governance/structural-on-diff");
 // into the canonical pipeline. Merging them into policyViolations caused
 // duplicate GovernanceFinding objects (fixed in Phase 1 canonical graph hardening).
 const telemetry_1 = require("@neurcode-ai/telemetry");
-const governance_provenance_1 = require("../utils/governance-provenance");
 const pilot_metrics_1 = require("../utils/pilot-metrics");
-const explainability_1 = require("../explainability");
+const replay_custody_1 = require("../utils/replay-custody");
 const runtime_guard_1 = require("../utils/runtime-guard");
 const artifact_signature_1 = require("../utils/artifact-signature");
 const policy_1 = require("@neurcode-ai/policy");
+const active_engineering_context_1 = require("../utils/active-engineering-context");
 const ai_debt_budget_1 = require("../utils/ai-debt-budget");
 const verification_evidence_1 = require("../utils/verification-evidence");
 const verify_runtime_stability_1 = require("../utils/verify-runtime-stability");
+const policy_decision_1 = require("../utils/policy-decision");
 // Import chalk with fallback
 let chalk;
 try {
@@ -136,6 +140,42 @@ function logCiPolicyOnlyOutcomeExplainability(params) {
         console.log(chalk.dim(`   Structural replay checksum: ${params.replayChecksum.slice(0, 16)}… · mode ${params.replayMode ?? 'local-structural'}`));
     }
     console.log(chalk.dim('   Next: resolve BLOCKING first → `neurcode remediate-export` (optional) → re-run `neurcode verify --ci`.\n'));
+}
+function driftSeverityToPolicySeverity(severity) {
+    return severity === 'critical' || severity === 'high' ? 'block' : 'warn';
+}
+function driftGateToPolicySeverity(gate, fallbackSeverity) {
+    if (gate === 'policy-blocker' || gate === 'rollout-blocker' || gate === 'architecture-blocker') {
+        return 'block';
+    }
+    if (gate === 'review-blocker' || gate === 'advisory') {
+        return 'warn';
+    }
+    return driftSeverityToPolicySeverity(fallbackSeverity);
+}
+function driftFindingsToVerificationViolations(drift) {
+    if (!drift || !Array.isArray(drift.findings)) {
+        return [];
+    }
+    if (Array.isArray(drift.narratives) && drift.narratives.length > 0) {
+        return drift.narratives.map((narrative) => ({
+            file: narrative.affectedFiles[0]
+                || narrative.affectedModules[0]
+                || narrative.affectedServices[0]
+                || '.neurcode/intent-pack.json',
+            rule: `drift_narrative:${narrative.category}`,
+            severity: driftGateToPolicySeverity(drift.riskSynthesis?.governanceGate, narrative.severity),
+            message: narrative.summary,
+        }));
+    }
+    return drift.findings.map((finding) => ({
+        file: finding.file || finding.module || finding.service || '.neurcode/intent-pack.json',
+        rule: `drift_intelligence:${finding.category}`,
+        severity: driftGateToPolicySeverity(finding.governanceGate, finding.severity),
+        message: finding.priority
+            ? `${finding.message} (${finding.priority}; ${finding.governanceGate || 'review-blocker'})`
+            : finding.message,
+    }));
 }
 ;
 function toArtifactSignatureSummary(status) {
@@ -697,569 +737,6 @@ function runtimeGuardViolationsToReport(summary) {
         message: item.message,
     }));
 }
-function asObjectRecord(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        return null;
-    }
-    return value;
-}
-function asObjectArray(value) {
-    if (!Array.isArray(value)) {
-        return [];
-    }
-    return value
-        .map((item) => asObjectRecord(item))
-        .filter((item) => item !== null);
-}
-function asBooleanFlag(value) {
-    return typeof value === 'boolean' ? value : null;
-}
-function asNumberValue(value) {
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-function asStringValue(value) {
-    return typeof value === 'string' && value.trim().length > 0 ? value : null;
-}
-const EXPEDITE_FOLLOW_UP_CHECKLIST = [
-    'Add validation back',
-    'Move logic to proper layer',
-    'Remove temporary code',
-];
-function containsAnyToken(value, tokens) {
-    const normalized = value.toLowerCase();
-    return tokens.some((token) => normalized.includes(token));
-}
-function isSecurityOrAuthViolation(fileRaw, policyRaw, messageRaw) {
-    const combined = `${fileRaw} ${policyRaw} ${messageRaw}`.toLowerCase();
-    return containsAnyToken(combined, [
-        'auth',
-        'authentication',
-        'authorization',
-        'security',
-        'permission',
-        'access control',
-        'access_control',
-        'token',
-        'secret',
-        'credential',
-        'encryption',
-        'encrypt',
-        'decrypt',
-        'csrf',
-        'xss',
-        'sql injection',
-        'sqli',
-        'insecure',
-        'vulnerability',
-    ]);
-}
-function isCriticalScopeBreach(fileRaw, messageRaw) {
-    const combined = `${fileRaw} ${messageRaw}`.toLowerCase();
-    return containsAnyToken(combined, [
-        'auth',
-        'security',
-        'secret',
-        'token',
-        'credential',
-        'permission',
-        'infra/terraform',
-        'terraform',
-        'k8s',
-        'helm',
-        'migration',
-        'database/migration',
-        'policy',
-        'contract',
-    ]);
-}
-function resolveExpediteModeFromPayload(payload) {
-    const explicit = asBooleanFlag(payload.expediteMode);
-    if (explicit !== null) {
-        return explicit;
-    }
-    const message = asStringValue(payload.message) || '';
-    return containsAnyToken(message, ['hotfix', 'urgent', 'prod down', 'incident', 'expedite']);
-}
-function toVerifySeverity(value) {
-    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (normalized === 'critical' || normalized === 'block')
-        return 'critical';
-    if (normalized === 'high')
-        return 'high';
-    if (normalized === 'warn'
-        || normalized === 'warning'
-        || normalized === 'medium'
-        || normalized === 'low') {
-        return 'warning';
-    }
-    return 'info';
-}
-function toVerifyVerdict(value) {
-    const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
-    if (normalized === 'PASS' || normalized === 'WARN' || normalized === 'FAIL') {
-        return normalized;
-    }
-    return 'FAIL';
-}
-function normalizeScopeIssueMessage(rawMessage) {
-    const message = asStringValue(rawMessage);
-    return message || 'File modified outside intended scope';
-}
-function pushVerifyIssue(target, seen, key, value) {
-    if (seen.has(key))
-        return;
-    seen.add(key);
-    target.push(value);
-}
-function dedupeTriageItems(items) {
-    const seen = new Set();
-    const output = [];
-    for (const item of items) {
-        const key = `${item.source}|${item.file.toLowerCase()}|${item.policy.toLowerCase()}|${item.message.toLowerCase()}`;
-        if (seen.has(key))
-            continue;
-        seen.add(key);
-        output.push(item);
-    }
-    return output;
-}
-function toCanonicalVerifyOutput(payload) {
-    const verdict = toVerifyVerdict(payload.verdict);
-    const violations = [];
-    const warnings = [];
-    const scopeIssues = [];
-    const seenViolations = new Set();
-    const seenWarnings = new Set();
-    const seenScopeIssues = new Set();
-    const addScopeIssue = (fileRaw, messageRaw) => {
-        const file = asStringValue(fileRaw) || 'unknown';
-        const message = normalizeScopeIssueMessage(messageRaw);
-        const key = file.toLowerCase();
-        pushVerifyIssue(scopeIssues, seenScopeIssues, key, { file, message });
-    };
-    const addWarning = (fileRaw, messageRaw, policyRaw) => {
-        const file = asStringValue(fileRaw) || 'unknown';
-        const message = asStringValue(messageRaw) || 'Warning detected';
-        const policy = asStringValue(policyRaw) || 'warning';
-        const key = `${file.toLowerCase()}|${message.toLowerCase()}|${policy.toLowerCase()}`;
-        pushVerifyIssue(warnings, seenWarnings, key, { file, message, policy });
-    };
-    const addViolation = (fileRaw, messageRaw, policyRaw, severityRaw) => {
-        const file = asStringValue(fileRaw) || 'unknown';
-        const message = asStringValue(messageRaw) || 'Policy violation detected';
-        const policy = asStringValue(policyRaw) || 'unknown_policy';
-        const severity = toVerifySeverity(severityRaw);
-        const key = `${file.toLowerCase()}|${message.toLowerCase()}|${policy.toLowerCase()}|${severity}`;
-        pushVerifyIssue(violations, seenViolations, key, { file, message, policy, severity });
-    };
-    const rawScopeIssues = Array.isArray(payload.scopeIssues) ? payload.scopeIssues : [];
-    for (const item of rawScopeIssues) {
-        const record = asObjectRecord(item);
-        if (record) {
-            addScopeIssue(record.file, record.message);
-        }
-        else {
-            addScopeIssue(item, null);
-        }
-    }
-    const rawBloatFiles = Array.isArray(payload.bloatFiles) ? payload.bloatFiles : [];
-    for (const item of rawBloatFiles) {
-        addScopeIssue(item, null);
-    }
-    const rawWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
-    for (const item of rawWarnings) {
-        const record = asObjectRecord(item);
-        if (record) {
-            addWarning(record.file, record.message, record.policy ?? record.rule);
-        }
-        else if (typeof item === 'string') {
-            addWarning('unknown', item, 'warning');
-        }
-    }
-    const rawViolations = Array.isArray(payload.violations) ? payload.violations : [];
-    for (const item of rawViolations) {
-        const record = asObjectRecord(item);
-        if (!record)
-            continue;
-        const file = record.file;
-        const message = record.message;
-        const policy = record.policy ?? record.rule;
-        const severity = toVerifySeverity(record.severity);
-        const combined = `${String(policy || '').toLowerCase()} ${String(message || '').toLowerCase()}`;
-        const isScopeIssue = combined.includes('scope_guard')
-            || combined.includes('scope')
-            || combined.includes('outside the plan')
-            || combined.includes('out of scope');
-        if (isScopeIssue) {
-            addScopeIssue(file, message);
-            continue;
-        }
-        // Artifact presence/signature checks are advisory — they must never block a PR.
-        // Real governance signal (policy violations, scope drift) should not be obscured
-        // by infrastructure setup state.
-        const policyStr = String(policy || '').toLowerCase();
-        const isArtifactCheck = policyStr === 'deterministic_artifacts_required'
-            || policyStr === 'signed_artifacts_required';
-        if (isArtifactCheck) {
-            addWarning(file, message, policy);
-            continue;
-        }
-        if (severity === 'warning' || severity === 'info') {
-            addWarning(file, message, policy);
-            continue;
-        }
-        addViolation(file, message, policy, severity);
-    }
-    const payloadMessage = asStringValue(payload.message);
-    if (payloadMessage
-        && violations.length === 0
-        && warnings.length === 0
-        && scopeIssues.length === 0) {
-        addWarning('unknown', payloadMessage, 'verify_result');
-    }
-    const summaryRecord = asObjectRecord(payload.summary);
-    const fileSet = new Set();
-    for (const violation of violations)
-        fileSet.add(violation.file);
-    for (const warning of warnings)
-        fileSet.add(warning.file);
-    for (const scopeIssue of scopeIssues)
-        fileSet.add(scopeIssue.file);
-    const totalFilesChanged = (() => {
-        const fromSummary = summaryRecord ? asNumberValue(summaryRecord.totalFilesChanged) : null;
-        if (fromSummary !== null)
-            return Math.max(0, Math.floor(fromSummary));
-        const blastRadius = asObjectRecord(payload.blastRadius);
-        const fromBlastRadius = blastRadius ? asNumberValue(blastRadius.filesChanged) : null;
-        if (fromBlastRadius !== null)
-            return Math.max(0, Math.floor(fromBlastRadius));
-        return fileSet.size;
-    })();
-    const driftScoreRaw = asNumberValue(payload.driftScore);
-    const driftScore = driftScoreRaw === null
-        ? undefined
-        : Math.max(0, Math.min(100, Math.round(driftScoreRaw)));
-    const expediteModeUsed = resolveExpediteModeFromPayload(payload);
-    const scopeTriageItems = scopeIssues.map((item) => ({
-        file: item.file,
-        message: item.message,
-        policy: 'scope_guard',
-        severity: 'block',
-        source: 'scope',
-    }));
-    const violationTriageItems = violations.map((item) => ({
-        file: item.file,
-        message: item.message,
-        policy: item.policy,
-        severity: item.severity,
-        source: 'violation',
-    }));
-    const warningTriageItems = warnings.map((item) => ({
-        file: item.file,
-        message: item.message,
-        policy: item.policy,
-        severity: 'warning',
-        source: 'warning',
-    }));
-    const defaultBlockingItems = dedupeTriageItems([
-        ...scopeTriageItems,
-        ...violationTriageItems.filter((item) => item.severity === 'critical' || item.severity === 'high'),
-    ]);
-    const defaultAdvisoryItems = dedupeTriageItems([
-        ...warningTriageItems,
-        ...violationTriageItems.filter((item) => item.severity === 'warning' || item.severity === 'info'),
-    ]);
-    const expediteBlockingItems = dedupeTriageItems([
-        ...scopeTriageItems.filter((item) => isCriticalScopeBreach(item.file, item.message)),
-        ...violationTriageItems.filter((item) => isSecurityOrAuthViolation(item.file, item.policy, item.message)),
-        ...warningTriageItems
-            .filter((item) => isSecurityOrAuthViolation(item.file, item.policy, item.message))
-            .map((item) => ({
-            ...item,
-            source: 'violation',
-        })),
-    ]);
-    const expediteItems = dedupeTriageItems([
-        ...scopeTriageItems
-            .filter((item) => !isCriticalScopeBreach(item.file, item.message))
-            .map((item) => ({
-            ...item,
-            source: 'expedite',
-        })),
-        ...violationTriageItems
-            .filter((item) => !isSecurityOrAuthViolation(item.file, item.policy, item.message))
-            .map((item) => ({
-            ...item,
-            source: 'expedite',
-        })),
-        ...warningTriageItems
-            .filter((item) => !isSecurityOrAuthViolation(item.file, item.policy, item.message))
-            .map((item) => ({
-            ...item,
-            source: 'expedite',
-        })),
-    ]);
-    // ── Intent issues and summary from engine ───────────────────────────────
-    const rawIntentIssues = Array.isArray(payload.intentIssues) ? payload.intentIssues : [];
-    const intentDomains = Array.isArray(payload.intentDomains) ? payload.intentDomains : [];
-    const intentSummary = (payload.intentSummary ?? null);
-    const rawFlowIssues = Array.isArray(payload.flowIssues) ? payload.flowIssues : [];
-    const rawRegressions = Array.isArray(payload.regressions) ? payload.regressions : [];
-    // High-severity intent issues become blocking; medium become advisory.
-    const intentBlockingTriageItems = rawIntentIssues
-        .filter((i) => i.severity === 'high')
-        .map((i) => ({
-        file: (i.files?.[0]) ?? 'intent-analysis',
-        message: i.message,
-        policy: i.rule,
-        severity: 'high',
-        source: 'violation',
-    }));
-    const intentAdvisoryTriageItems = rawIntentIssues
-        .filter((i) => i.severity === 'medium')
-        .map((i) => ({
-        file: (i.files?.[0]) ?? 'intent-analysis',
-        message: i.message,
-        policy: i.rule,
-        severity: 'warning',
-        source: 'warning',
-    }));
-    // V5: flow issues — high → blocking, medium → advisory
-    const flowBlockingTriageItems = rawFlowIssues
-        .filter((i) => i.severity === 'high')
-        .map((i) => ({
-        file: (i.files?.[0]) ?? 'flow-analysis',
-        message: i.message,
-        policy: i.rule,
-        severity: 'high',
-        source: 'violation',
-    }));
-    const flowAdvisoryTriageItems = rawFlowIssues
-        .filter((i) => i.severity === 'medium')
-        .map((i) => ({
-        file: (i.files?.[0]) ?? 'flow-analysis',
-        message: i.message,
-        policy: i.rule,
-        severity: 'warning',
-        source: 'warning',
-    }));
-    let blockingItems = expediteModeUsed ? expediteBlockingItems : defaultBlockingItems;
-    let advisoryItems = expediteModeUsed ? expediteItems : defaultAdvisoryItems;
-    if (intentBlockingTriageItems.length > 0) {
-        blockingItems = dedupeTriageItems([...blockingItems, ...intentBlockingTriageItems]);
-    }
-    if (intentAdvisoryTriageItems.length > 0) {
-        advisoryItems = dedupeTriageItems([...advisoryItems, ...intentAdvisoryTriageItems]);
-    }
-    if (flowBlockingTriageItems.length > 0) {
-        blockingItems = dedupeTriageItems([...blockingItems, ...flowBlockingTriageItems]);
-    }
-    if (flowAdvisoryTriageItems.length > 0) {
-        advisoryItems = dedupeTriageItems([...advisoryItems, ...flowAdvisoryTriageItems]);
-    }
-    // V6: regressions — always blocking
-    const regressionBlockingTriageItems = rawRegressions.map((r) => ({
-        file: 'regression-analysis',
-        message: r.message,
-        policy: r.rule,
-        severity: 'high',
-        source: 'violation',
-    }));
-    if (regressionBlockingTriageItems.length > 0) {
-        blockingItems = dedupeTriageItems([...regressionBlockingTriageItems, ...blockingItems]);
-    }
-    const grade = verdict === 'PASS' ? 'A' : verdict === 'WARN' ? 'C' : 'F';
-    const canonical = {
-        grade,
-        score: violations.length === 0 && warnings.length === 0 && scopeIssues.length === 0 ? 100 : 0,
-        verdict,
-        summary: {
-            totalFilesChanged,
-            totalViolations: violations.length,
-            totalWarnings: warnings.length,
-            totalScopeIssues: scopeIssues.length,
-        },
-        violations,
-        warnings,
-        scopeIssues,
-        blockingCount: blockingItems.length,
-        advisoryCount: advisoryItems.length,
-        blockingItems,
-        advisoryItems,
-        intentIssues: rawIntentIssues,
-        intentDomains,
-        intentSummary,
-        flowIssues: rawFlowIssues,
-        regressions: rawRegressions,
-        expediteModeUsed,
-        expediteCount: expediteModeUsed ? expediteItems.length : 0,
-        expediteItems: expediteModeUsed ? expediteItems : [],
-        expediteFollowUpChecklist: expediteModeUsed ? [...EXPEDITE_FOLLOW_UP_CHECKLIST] : [],
-        ...(expediteModeUsed ? { expediteNote: 'Expedite Mode used' } : {}),
-        ...(typeof driftScore === 'number' ? { driftScore } : {}),
-    };
-    // Preserve actionable metadata from rich verify payloads so downstream
-    // consumers (Action, CI contracts, dashboards) keep structured context.
-    const passthroughKeys = [
-        'message',
-        'mode',
-        'ciMode',
-        'policyOnly',
-        'policyOnlySource',
-        'policySources',
-        'scopeGuardPassed',
-        'policyLock',
-        'policyCompilation',
-        'policyExceptions',
-        'policyGovernance',
-        'changeContract',
-        'runtimeGuard',
-        'governanceDecision',
-        'orgGovernance',
-        'aiChangeLog',
-        'verificationSource',
-        'tier',
-        'aiDebt',
-        'blastRadius',
-        'suspiciousChange',
-        'policyDecision',
-        'policyPack',
-        'changeContractViolations',
-        'governanceVerification',
-        'governanceFindings',
-        'structuralViolations',
-        'structuralRulesApplied',
-        'structuralSuppressedCount',
-    ];
-    const canonicalMutable = canonical;
-    for (const key of passthroughKeys) {
-        const v = payload[key];
-        if (Object.prototype.hasOwnProperty.call(payload, key) && v !== undefined && v !== null) {
-            canonicalMutable[key] = v;
-        }
-    }
-    // Backward-compatibility alias: older integrations and tests expect `rule`
-    // while canonical contract uses `policy`.
-    canonical.violations = canonical.violations.map((item) => ({
-        ...item,
-        rule: item.policy,
-    }));
-    canonical.warnings = canonical.warnings.map((item) => ({
-        ...item,
-        rule: item.policy,
-    }));
-    return canonical;
-}
-function emitCanonicalVerifyJson(payload, onEmit) {
-    const canonical = toCanonicalVerifyOutput((0, canonical_pipeline_1.attachCanonicalGovernance)(payload));
-    onEmit?.(canonical);
-    // Use sync stdout write so immediate process.exit paths do not truncate JSON.
-    const serialized = Buffer.from(`${JSON.stringify(canonical, null, 2)}\n`, 'utf-8');
-    try {
-        let offset = 0;
-        while (offset < serialized.length) {
-            try {
-                const written = (0, fs_1.writeSync)(1, serialized, offset, serialized.length - offset);
-                if (written <= 0)
-                    break;
-                offset += written;
-            }
-            catch (error) {
-                const code = error.code;
-                if (code === 'EAGAIN' || code === 'EWOULDBLOCK') {
-                    continue;
-                }
-                throw error;
-            }
-        }
-    }
-    catch {
-        process.stdout.write(serialized.toString('utf-8'));
-    }
-}
-function buildDeterministicLayerSummary(payload) {
-    const verdict = asStringValue(payload.verdict) || 'UNKNOWN';
-    const mode = asStringValue(payload.mode) || 'unknown';
-    const policyOnly = payload.policyOnly === true;
-    const scopeGuardPassed = asBooleanFlag(payload.scopeGuardPassed);
-    const violations = asObjectArray(payload.violations);
-    const policyViolations = violations.filter((entry) => {
-        const rule = String(entry.rule || '').toLowerCase();
-        return (!rule.includes('scope_guard')
-            && !rule.includes('change_contract')
-            && !rule.includes('runtime_guard')
-            && !rule.includes('deterministic_artifacts_required')
-            && !rule.includes('signed_artifacts_required'));
-    });
-    const policyBlocking = policyViolations.filter((entry) => String(entry.severity || '').toLowerCase() === 'block');
-    const policyWarnings = policyViolations.filter((entry) => String(entry.severity || '').toLowerCase() === 'warn');
-    const changeContract = asObjectRecord(payload.changeContract);
-    const changeContractValid = asBooleanFlag(changeContract?.valid);
-    const changeContractEnforced = changeContract?.enforced === true;
-    const changeContractViolations = Array.isArray(changeContract?.violations)
-        ? (changeContract?.violations).length
-        : 0;
-    const explicitContractViolations = violations.filter((entry) => {
-        const rule = String(entry.rule || '').toLowerCase();
-        return rule.includes('scope_guard') || rule.includes('change_contract');
-    }).length;
-    const runtimeGuard = asObjectRecord(payload.runtimeGuard);
-    const runtimeGuardRequired = runtimeGuard?.required === true;
-    const runtimeGuardPass = asBooleanFlag(runtimeGuard?.pass);
-    const runtimeGuardViolations = Array.isArray(runtimeGuard?.violations)
-        ? (runtimeGuard?.violations).length
-        : violations.filter((entry) => String(entry.rule || '').toLowerCase().includes('runtime_guard')).length;
-    const policyCompilation = asObjectRecord(payload.policyCompilation);
-    const deterministicRuleCount = asNumberValue(policyCompilation?.deterministicRuleCount);
-    const unmatchedStatements = asNumberValue(policyCompilation?.unmatchedStatements);
-    let policyGateStatus = 'pass';
-    if (policyBlocking.length > 0) {
-        policyGateStatus = 'fail';
-    }
-    else if (policyWarnings.length > 0 || verdict === 'WARN') {
-        policyGateStatus = 'warn';
-    }
-    let contractGateStatus = 'not_applicable';
-    if (!policyOnly) {
-        contractGateStatus = 'pass';
-        if (changeContractEnforced
-            && (changeContractValid === false || changeContractViolations > 0 || explicitContractViolations > 0 || scopeGuardPassed === false)) {
-            contractGateStatus = 'fail';
-        }
-        else if (!changeContractEnforced && (changeContractViolations > 0 || explicitContractViolations > 0)) {
-            contractGateStatus = 'warn';
-        }
-    }
-    let runtimeGuardStatus = 'not_applicable';
-    if (runtimeGuardRequired) {
-        runtimeGuardStatus = runtimeGuardPass === false || runtimeGuardViolations > 0 ? 'fail' : 'pass';
-    }
-    else if (runtimeGuardViolations > 0) {
-        runtimeGuardStatus = 'fail';
-    }
-    return {
-        policyGate: {
-            status: policyGateStatus,
-            blockingViolations: policyBlocking.length,
-            warningViolations: policyWarnings.length,
-            deterministicRuleCount: deterministicRuleCount ?? null,
-            unmatchedStatements: unmatchedStatements ?? null,
-        },
-        contractGate: {
-            status: contractGateStatus,
-            enforced: changeContractEnforced,
-            valid: changeContractValid,
-            violationCount: changeContractViolations + explicitContractViolations,
-            mode,
-        },
-        runtimeGuardGate: {
-            status: runtimeGuardStatus,
-            required: runtimeGuardRequired,
-            pass: runtimeGuardPass,
-            violationCount: runtimeGuardViolations,
-        },
-    };
-}
 function toAiDebtSummary(evaluation) {
     return {
         mode: evaluation.mode,
@@ -1363,7 +840,7 @@ function resolveVerifyExpediteMode(projectRoot) {
         return true;
     }
     const branchName = (0, git_1.detectCurrentGitBranch)(projectRoot) || process.env.GITHUB_REF_NAME || '';
-    return containsAnyToken(branchName, ['hotfix', 'urgent', 'prod-down', 'prod_down', 'prod down', 'incident', 'expedite']);
+    return (0, verify_output_1.containsAnyToken)(branchName, ['hotfix', 'urgent', 'prod-down', 'prod_down', 'prod down', 'incident', 'expedite']);
 }
 function isSignedAiLogsRequired(orgGovernanceSettings) {
     const explicitRequirement = isEnabledFlag(process.env.NEURCODE_GOVERNANCE_REQUIRE_SIGNED_LOGS) ||
@@ -1387,19 +864,6 @@ function toPolicyLockViolations(mismatches) {
         severity: 'block',
         message: item.message,
     }));
-}
-function resolvePolicyDecisionFromViolations(violations) {
-    let hasWarn = false;
-    for (const violation of violations) {
-        const severity = String(violation.severity || '').toLowerCase();
-        if (severity === 'block') {
-            return 'block';
-        }
-        if (severity === 'warn') {
-            hasWarn = true;
-        }
-    }
-    return hasWarn ? 'warn' : 'allow';
 }
 function explainExceptionEligibilityReason(reason) {
     switch (reason) {
@@ -1537,12 +1001,15 @@ async function recordVerificationIfRequested(options, config, payload) {
  * Returns the exit code to use
  */
 async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRoot, config, client, source, ciModeEnabled, scopeTelemetry, projectId, orgGovernanceSettings, aiLogSigningKey, aiLogSigningKeyId, aiLogSigningKeys, aiLogSigner, expediteModeEnabled, compiledPolicyArtifact, compiledPolicyMetadata, changeContractSummary, onCanonicalEmit) {
-    const emitPolicyOnlyJson = (payload) => {
-        emitCanonicalVerifyJson({
+    const emitPolicyOnlyJson = (payload, onEmit) => {
+        (0, verify_output_1.emitCanonicalVerifyJson)({
             ...payload,
             ciMode: payload.ciMode ?? ciModeEnabled,
             expediteMode: expediteModeEnabled,
-        }, onCanonicalEmit);
+        }, (canonical) => {
+            onEmit?.(canonical);
+            onCanonicalEmit?.(canonical);
+        });
     };
     const policyOnlyVerificationSource = 'policy_only';
     const recordPolicyOnlyVerification = async (payload) => recordVerificationIfRequested(options, config, {
@@ -1559,18 +1026,22 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     const diffFilesForPolicy = diffFiles.filter((f) => !ignoreFilter(f.path));
     const expectedPolicyOnlyFiles = diffFilesForPolicy.map((file) => file.path);
     const signedLogsRequired = isSignedAiLogsRequired(orgGovernanceSettings);
+    const activeEngineeringContext = (0, active_engineering_context_1.loadActiveEngineeringContext)(projectRoot);
     const governanceAnalysis = (0, governance_1.evaluateGovernance)({
         projectRoot,
         task: 'Policy-only verification',
         expectedFiles: expectedPolicyOnlyFiles,
         diffFiles: diffFilesForPolicy,
-        contextCandidates: expectedPolicyOnlyFiles,
+        contextCandidates: activeEngineeringContext
+            ? activeEngineeringContext.contextPack.selectedFiles.map((item) => item.path)
+            : expectedPolicyOnlyFiles,
         orgGovernance: orgGovernanceSettings,
         requireSignedAiLogs: signedLogsRequired,
         signingKey: aiLogSigningKey,
         signingKeyId: aiLogSigningKeyId,
         signingKeys: aiLogSigningKeys,
         signer: aiLogSigner,
+        activeEngineeringContext,
     });
     const governancePayload = buildGovernancePayload(governanceAnalysis, orgGovernanceSettings, {
         compiledPolicy: compiledPolicyMetadata,
@@ -1636,19 +1107,23 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         const message = governanceAnalysis.governanceDecision.summary
             || 'Governance decision matrix returned BLOCK.';
         const reasonCodes = governanceAnalysis.governanceDecision.reasonCodes || [];
+        const driftViolations = driftFindingsToVerificationViolations(governanceAnalysis.driftIntelligence)
+            .filter((item) => !ignoreFilter(item.file));
+        const governanceBlockViolations = [
+            {
+                file: '.neurcode/ai-change-log.json',
+                rule: 'governance_decision_block',
+                severity: 'block',
+                message,
+            },
+            ...driftViolations,
+        ];
         if (options.json) {
             emitPolicyOnlyJson({
                 grade: 'F',
                 score: 0,
                 verdict: 'FAIL',
-                violations: [
-                    {
-                        file: '.neurcode/ai-change-log.json',
-                        rule: 'governance_decision_block',
-                        severity: 'block',
-                        message,
-                    },
-                ],
+                violations: governanceBlockViolations,
                 message,
                 scopeGuardPassed: false,
                 bloatCount: 0,
@@ -1671,14 +1146,7 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         }
         await recordPolicyOnlyVerification({
             grade: 'F',
-            violations: [
-                {
-                    file: '.neurcode/ai-change-log.json',
-                    rule: 'governance_decision_block',
-                    severity: 'block',
-                    message,
-                },
-            ],
+            violations: governanceBlockViolations,
             verifyResult: {
                 adherenceScore: 0,
                 verdict: 'FAIL',
@@ -1968,11 +1436,15 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
             message: `Policy audit chain is invalid: ${auditIntegrityStatus.issues.join('; ') || 'unknown issue'}`,
         });
     }
+    if (governanceAnalysis.driftIntelligence) {
+        const driftViolations = driftFindingsToVerificationViolations(governanceAnalysis.driftIntelligence);
+        policyViolations.push(...driftViolations.filter((item) => !ignoreFilter(item.file)));
+    }
     const policyOnlyStructural = (0, structural_on_diff_1.runStructuralOnDiffFiles)(projectRoot, diffFilesForPolicy);
     // Structural violations are passed to the canonical pipeline via payload.structuralViolations
     // (see line ~2584). Do NOT merge them into policyViolations — that would create structural:*
     // duplicates that contaminate the canonical finding graph.
-    policyDecision = resolvePolicyDecisionFromViolations(policyViolations);
+    policyDecision = (0, policy_decision_1.resolvePolicyDecisionFromViolations)(policyViolations);
     const effectiveVerdict = policyDecision === 'block' ? 'FAIL' : policyDecision === 'warn' ? 'WARN' : 'PASS';
     const grade = effectiveVerdict === 'PASS' ? 'A' : effectiveVerdict === 'WARN' ? 'C' : 'F';
     const score = effectiveVerdict === 'PASS' ? 100 : effectiveVerdict === 'WARN' ? 50 : 0;
@@ -2073,15 +1545,46 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
             }
             : {}),
     };
+    const policyOnlyReplayCustody = (0, replay_custody_1.captureVerifyReplayCustody)({
+        projectRoot,
+        diffContext: `${options.base || 'HEAD'} vs working tree`,
+        filesAnalyzed: diffFiles.length,
+        planId: null,
+        verificationSource: policyOnlyVerificationSource,
+        policyLockFingerprint: (0, policy_packs_1.readPolicyLockFile)(projectRoot).lock?.effective.fingerprint || null,
+        compiledPolicyFingerprint: compiledPolicyArtifact?.fingerprint || null,
+        ruleIds: policyOnlyStructural.rulesApplied,
+        blockingCount: policyViolations.filter((v) => v.severity === 'block').length
+            + policyOnlyStructural.violations.filter((v) => v.severity === 'BLOCKING').length,
+        advisoryCount: policyViolations.filter((v) => v.severity !== 'block').length
+            + policyOnlyStructural.violations.filter((v) => v.severity !== 'BLOCKING').length,
+        suppressedCount: policyOnlyStructural.suppressedCount,
+        structuralBlockingCount: policyOnlyStructural.violations.filter((v) => v.severity === 'BLOCKING').length,
+        structuralAdvisoryCount: policyOnlyStructural.violations.filter((v) => v.severity !== 'BLOCKING').length,
+        deterministicSignals: policyOnlyStructural.violations.filter((v) => v.determinism === 'deterministic-structural').length,
+        heuristicSignals: policyOnlyStructural.violations.filter((v) => v.determinism === 'heuristic-advisory').length,
+        overallTrustScore: policyOnlyStructural.violations.length > 0
+            ? Math.round((policyOnlyStructural.violations.filter((v) => v.determinism === 'deterministic-structural').length / policyOnlyStructural.violations.length) * 100)
+            : 100,
+        verdict: effectiveVerdict,
+        governanceDecision: governanceAnalysis.governanceDecision.summary || 'policy-only',
+        actor: ciModeEnabled ? 'ci-runner' : 'local-user',
+        source: ciModeEnabled ? 'ci' : 'cli',
+        replayChecksum: policyOnlyReplayChecksum,
+    });
     if (options.json) {
-        emitPolicyOnlyJson(policyOnlyPayload);
+        emitPolicyOnlyJson(policyOnlyPayload, (canonical) => {
+            (0, replay_custody_1.applyReplayCustodyToCanonicalOutput)(canonical, policyOnlyReplayCustody);
+        });
     }
     else {
-        onCanonicalEmit?.(toCanonicalVerifyOutput({
+        const policyOnlyCanonical = (0, verify_output_1.toCanonicalVerifyOutput)((0, canonical_pipeline_1.attachCanonicalGovernance)({
             ...policyOnlyPayload,
             ciMode: ciModeEnabled,
             expediteMode: expediteModeEnabled,
         }));
+        (0, replay_custody_1.applyReplayCustodyToCanonicalOutput)(policyOnlyCanonical, policyOnlyReplayCustody);
+        onCanonicalEmit?.(policyOnlyCanonical);
         if (effectiveVerdict === 'PASS') {
             console.log(chalk.green('✅ Policy check passed'));
         }
@@ -2101,7 +1604,7 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         if (governance.audit.requireIntegrity && !auditIntegrityStatus.valid) {
             console.log(chalk.red('   Policy audit integrity check failed'));
         }
-        displayGovernanceInsights(governanceAnalysis, { explain: options.explain });
+        (0, verify_render_1.displayGovernanceInsights)(chalk, governanceAnalysis, { explain: options.explain });
         console.log(chalk.dim(`\n${message}`));
         logCiPolicyOnlyOutcomeExplainability({
             ciModeEnabled,
@@ -2148,6 +1651,8 @@ async function verifyCommand(options) {
         let lastCanonicalOutput = null;
         let lastEvidenceFallbackOutput = null;
         let evidenceFinalizeAttempted = false;
+        const custodySource = ciModeEnabled ? 'ci' : 'cli';
+        const custodyActor = ciModeEnabled ? 'ci-runner' : 'local-user';
         // ── Phase 1 Runtime Stability: create context early so all subsystems share it ──
         // Structural governance is NEVER gated by this context — it always runs.
         const runtimeCtx = (0, verify_runtime_stability_1.createVerifyRuntimeContext)(ciModeEnabled);
@@ -2162,8 +1667,16 @@ async function verifyCommand(options) {
             options.asyncMode = false;
         }
         const captureEvidencePayload = (payload) => {
-            lastEvidenceFallbackOutput = payload;
-            lastCanonicalOutput = toCanonicalVerifyOutput(payload);
+            const enrichedPayload = (0, canonical_pipeline_1.attachCanonicalGovernance)(payload);
+            lastEvidenceFallbackOutput = enrichedPayload;
+            lastCanonicalOutput = (0, verify_output_1.toCanonicalVerifyOutput)(enrichedPayload);
+        };
+        const applyCapturedReplayCustody = (canonical, custody) => {
+            if (!canonical || !custody) {
+                return;
+            }
+            (0, replay_custody_1.applyReplayCustodyToCanonicalOutput)(canonical, custody);
+            lastProvenanceRunId = custody.provenanceRecord?.runId ?? lastProvenanceRunId;
         };
         const finalizeEvidence = (exitCode) => {
             if (!evidenceEnabled || evidenceFinalizeAttempted) {
@@ -2225,7 +1738,7 @@ async function verifyCommand(options) {
         let structuralViolations = [];
         let structuralRulesApplied = [];
         let structuralSuppressedCount = 0;
-        const emitVerifyJson = (payload) => {
+        const emitVerifyJson = (payload, onEmit) => {
             // Check memory pressure immediately before emission (may have changed during long verify)
             (0, verify_runtime_stability_1.applyMemoryPressureDegradation)(runtimeCtx);
             const runtimeStabilityReport = (0, verify_runtime_stability_1.buildVerifyRuntimeReport)(runtimeCtx);
@@ -2248,8 +1761,9 @@ async function verifyCommand(options) {
                 runtimeStabilityReport,
             };
             lastEvidenceFallbackOutput = enrichedPayload;
-            emitCanonicalVerifyJson(enrichedPayload, (canonical) => {
+            (0, verify_output_1.emitCanonicalVerifyJson)(enrichedPayload, (canonical) => {
                 lastCanonicalOutput = canonical;
+                onEmit?.(lastCanonicalOutput);
             });
         };
         if (!isGitRepository(projectRoot)) {
@@ -2854,34 +2368,70 @@ async function verifyCommand(options) {
                 console.log(chalk.cyan('\n🔍 Local-only mode: deterministic structural verification (no API required)...'));
             }
             const localStructural = (0, structural_on_diff_1.runStructuralOnDiffFiles)(projectRoot, diffFiles);
+            const localStructuralFindings = localStructural.violations.map(canonical_pipeline_1.findingFromStructural);
+            const localReplayChecksum = (0, canonical_invariants_1.computeCanonicalFindingChecksum)(localStructuralFindings);
             const blockingViolations = localStructural.violations.filter((v) => v.severity === 'BLOCKING');
+            const advisoryViolations = localStructural.violations.filter((v) => v.severity !== 'BLOCKING');
             const localVerdict = blockingViolations.length > 0 ? 'FAIL' : 'PASS';
             const localGrade = blockingViolations.length > 0 ? 'F' : 'B';
             const localScore = blockingViolations.length > 0 ? 0 : 70;
+            const localPayload = {
+                grade: localGrade,
+                score: localScore,
+                verdict: localVerdict,
+                violations: localStructural.violations.map((v) => ({
+                    file: v.filePath,
+                    rule: v.ruleId,
+                    severity: v.severity === 'BLOCKING' ? 'block' : 'warn',
+                    message: `${v.ruleName}: ${v.evidence.slice(0, 120)}`,
+                })),
+                adherenceScore: localScore,
+                bloatCount: 0,
+                bloatFiles: [],
+                plannedFilesModified: 0,
+                totalPlannedFiles: 0,
+                message: `Local-only structural verification: ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking.`,
+                scopeGuardPassed: true,
+                mode: 'local_only_structural',
+                policyOnly: true,
+                replayChecksum: localReplayChecksum,
+                replayMode: 'local-structural',
+                structuralViolations: localStructural.violations,
+                structuralBlockingCount: blockingViolations.length,
+                structuralRulesApplied: localStructural.rulesApplied,
+                changeContract: changeContractSummary,
+            };
+            captureEvidencePayload((0, canonical_pipeline_1.attachCanonicalGovernance)(localPayload));
+            const localReplayCustody = (0, replay_custody_1.captureVerifyReplayCustody)({
+                projectRoot,
+                diffContext: `${options.base || 'HEAD'} vs working tree`,
+                filesAnalyzed: diffFiles.length,
+                planId: null,
+                verificationSource: 'local_only_structural',
+                policyLockFingerprint: null,
+                compiledPolicyFingerprint: null,
+                ruleIds: localStructural.rulesApplied,
+                blockingCount: blockingViolations.length,
+                advisoryCount: advisoryViolations.length,
+                suppressedCount: localStructural.suppressedCount,
+                structuralBlockingCount: blockingViolations.length,
+                structuralAdvisoryCount: advisoryViolations.length,
+                deterministicSignals: localStructural.violations.filter((v) => v.determinism === 'deterministic-structural').length,
+                heuristicSignals: localStructural.violations.filter((v) => v.determinism === 'heuristic-advisory').length,
+                overallTrustScore: localStructural.violations.length > 0
+                    ? Math.round((localStructural.violations.filter((v) => v.determinism === 'deterministic-structural').length / localStructural.violations.length) * 100)
+                    : 100,
+                verdict: localVerdict,
+                governanceDecision: 'local deterministic structural verification',
+                actor: custodyActor,
+                source: custodySource,
+                replayChecksum: localReplayChecksum,
+            });
+            applyCapturedReplayCustody(lastCanonicalOutput, localReplayCustody);
             if (options.json) {
-                emitVerifyJson({
-                    grade: localGrade,
-                    score: localScore,
-                    verdict: localVerdict,
-                    violations: localStructural.violations.map((v) => ({
-                        file: v.filePath,
-                        rule: v.ruleId,
-                        severity: v.severity === 'BLOCKING' ? 'block' : 'warn',
-                        message: `${v.ruleName}: ${v.evidence.slice(0, 120)}`,
-                    })),
-                    adherenceScore: localScore,
-                    bloatCount: 0,
-                    bloatFiles: [],
-                    plannedFilesModified: 0,
-                    totalPlannedFiles: 0,
-                    message: `Local-only structural verification: ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking.`,
-                    scopeGuardPassed: true,
-                    mode: 'local_only_structural',
-                    policyOnly: true,
-                    structuralViolations: localStructural.violations,
-                    structuralBlockingCount: blockingViolations.length,
-                    structuralRulesApplied: localStructural.rulesApplied,
-                    changeContract: changeContractSummary,
+                (0, verify_output_1.emitCanonicalVerifyJson)(localPayload, (canonical) => {
+                    applyCapturedReplayCustody(canonical, localReplayCustody);
+                    lastCanonicalOutput = canonical;
                 });
             }
             else {
@@ -3278,6 +2828,10 @@ async function verifyCommand(options) {
                             missingExpectedFiles: 0,
                             blockedFilesTouched: 0,
                             actionMismatches: 0,
+                            serviceBoundaryBreaches: 0,
+                            infraBoundaryBreaches: 0,
+                            dependencyBoundaryBreaches: 0,
+                            sensitiveBoundaryBreaches: 0,
                             expectedSymbols: advisoryContract.expectedSymbols?.length || 0,
                             changedSymbols: 0,
                             missingExpectedSymbols: 0,
@@ -3387,8 +2941,8 @@ async function verifyCommand(options) {
                 });
             }
             else {
-                printFirstRunAdvisoryMessage(options.demo === true);
-                printAdvisorySignals(advisorySignals, options.demo === true);
+                (0, verify_guidance_1.printFirstRunAdvisoryMessage)(chalk, options.demo === true);
+                (0, verify_guidance_1.printAdvisorySignals)(chalk, advisorySignals, options.demo === true);
                 if (autoContractPath) {
                     console.log(chalk.green(`✅ Auto-generated minimal advisory contract: ${autoContractPath}`));
                 }
@@ -3426,6 +2980,7 @@ async function verifyCommand(options) {
             let planFiles = [];
             let planDependencies = [];
             let remotePlanSessionId = null;
+            const activeEngineeringContext = (0, active_engineering_context_1.loadActiveEngineeringContext)(projectRoot);
             if (useLocalPlanSync) {
                 const localIntent = (localPlanSync.intent || '').trim();
                 const localConstraintText = localPlanSync.constraints.length > 0
@@ -3460,6 +3015,27 @@ async function verifyCommand(options) {
             }
             planFilesForVerification = [...new Set([...planFiles, ...localPlanExpectedFiles])];
             intentConstraintsForVerification = originalIntent || undefined;
+            if (activeEngineeringContext) {
+                if (activeEngineeringContext.intentPack.approvedScope.files.length > 0) {
+                    planFilesForVerification = [...activeEngineeringContext.intentPack.approvedScope.files];
+                }
+                if (activeEngineeringContext.intentPack.intent.normalized) {
+                    intentConstraintsForVerification = activeEngineeringContext.intentPack.intent.normalized;
+                    governanceTask = activeEngineeringContext.intentPack.intent.normalized;
+                }
+                planDependencies = [...new Set([
+                        ...planDependencies,
+                        ...activeEngineeringContext.intentPack.expectedDependencies,
+                    ])];
+                if (!options.json) {
+                    console.log(chalk.dim(`   Intent runtime loaded: ${activeEngineeringContext.sessionRuntime.sessionId} ` +
+                        `(${planFilesForVerification.length} approved file(s), ` +
+                        `${activeEngineeringContext.contextPack.selectedFiles.length} context file(s))`));
+                    activeEngineeringContext.warnings.slice(0, 3).forEach((warning) => {
+                        console.log(chalk.yellow(`   Context warning: ${warning}`));
+                    });
+                }
+            }
             // ── Intent-Aware Engine ─────────────────────────────────────────────
             // Run once we have both diffFiles and the resolved intent text.
             // Stored in outer scope so all emitCanonicalVerifyJson call sites can
@@ -3513,13 +3089,16 @@ async function verifyCommand(options) {
                 expectedFiles: planFilesForVerification,
                 expectedDependencies: planDependencies,
                 diffFiles,
-                contextCandidates: planFilesForVerification,
+                contextCandidates: activeEngineeringContext
+                    ? activeEngineeringContext.contextPack.selectedFiles.map((item) => item.path)
+                    : planFilesForVerification,
                 orgGovernance: orgGovernanceSettings,
                 requireSignedAiLogs: signedLogsRequired,
                 signingKey: aiLogSigningKey,
                 signingKeyId: aiLogSigningKeyId,
                 signingKeys: aiLogSigningKeys,
                 signer: aiLogSigner,
+                activeEngineeringContext,
             });
             // Get sessionId from state file (.neurcode/state.json) first, then fallback to config
             // Fallback to sessionId from plan if not in state/config
@@ -3561,13 +3140,17 @@ async function verifyCommand(options) {
                 }
             }
             // Step C: The Intersection Logic
-            const approvedSet = new Set([...planFilesForVerification, ...allowedFiles]);
+            const approvedSet = new Set([
+                ...planFilesForVerification,
+                ...allowedFiles,
+                ...(governanceResult.engineeringContext?.approvedScope?.files || []),
+            ]);
             const violations = modifiedFiles.filter(f => !approvedSet.has(f));
             const filteredViolations = violations.filter((p) => !shouldIgnore(p));
             // Step D: The Block (only report scope violations for non-ignored files)
             if (filteredViolations.length > 0) {
                 const criticalScopeViolations = expediteModeEnabled
-                    ? filteredViolations.filter((file) => isCriticalScopeBreach(file, 'File modified outside the plan'))
+                    ? filteredViolations.filter((file) => (0, verify_output_1.isCriticalScopeBreach)(file, 'File modified outside the plan'))
                     : filteredViolations;
                 const expediteScopeViolations = expediteModeEnabled
                     ? filteredViolations.filter((file) => !criticalScopeViolations.includes(file))
@@ -3686,7 +3269,7 @@ async function verifyCommand(options) {
                         }
                     }
                     if (governanceResult) {
-                        displayGovernanceInsights(governanceResult, { explain: options.explain });
+                        (0, verify_render_1.displayGovernanceInsights)(chalk, governanceResult, { explain: options.explain });
                     }
                     // ── Intent Status in scope-violation path ──────────────────────
                     if (intentEngineSummary) {
@@ -3755,7 +3338,7 @@ async function verifyCommand(options) {
                             console.log(chalk.yellow(`   • ${file}`));
                         });
                         console.log(chalk.dim('   Follow-up checklist:'));
-                        EXPEDITE_FOLLOW_UP_CHECKLIST.forEach((item) => {
+                        verify_output_1.EXPEDITE_FOLLOW_UP_CHECKLIST.forEach((item) => {
                             console.log(chalk.dim(`   - ${item}`));
                         });
                         console.log(chalk.dim('   Note: Expedite Mode used\n'));
@@ -4056,10 +3639,14 @@ async function verifyCommand(options) {
                 message: `Policy audit chain is invalid: ${auditIntegrityStatus.issues.join('; ') || 'unknown issue'}`,
             });
         }
+        if (governanceResult?.driftIntelligence) {
+            const driftViolations = driftFindingsToVerificationViolations(governanceResult.driftIntelligence);
+            policyViolations.push(...driftViolations.filter((item) => !shouldIgnore(item.file)));
+        }
         // Structural violations are passed to the canonical pipeline via payload.structuralViolations
         // (see line ~5281). Do NOT merge them into policyViolations — that would create structural:*
         // duplicates that contaminate the canonical finding graph.
-        policyDecision = resolvePolicyDecisionFromViolations(policyViolations);
+        policyDecision = (0, policy_decision_1.resolvePolicyDecisionFromViolations)(policyViolations);
         const policyExceptionsSummary = {
             sourceMode: policyExceptionResolution.mode,
             sourceWarning: policyExceptionResolution.warning,
@@ -4201,7 +3788,7 @@ async function verifyCommand(options) {
                     message: violation,
                 }));
                 policyViolations.push(...intentProofPolicyViolations);
-                policyDecision = resolvePolicyDecisionFromViolations(policyViolations);
+                policyDecision = (0, policy_decision_1.resolvePolicyDecisionFromViolations)(policyViolations);
             }
             if (!options.json) {
                 if (intentProofSummary.pass) {
@@ -4280,7 +3867,7 @@ async function verifyCommand(options) {
                     });
                 }
                 else {
-                    displayChangeContractDrift(changeContractSummary, { advisory: false });
+                    (0, verify_render_1.displayChangeContractDrift)(chalk, changeContractSummary, { advisory: false });
                 }
                 await recordVerificationIfRequested(options, config, {
                     grade: 'F',
@@ -4304,7 +3891,7 @@ async function verifyCommand(options) {
                 exitWithEvidence(2);
             }
             else if (!changeContractEvaluation.valid && !options.json) {
-                displayChangeContractDrift(changeContractSummary, { advisory: true });
+                (0, verify_render_1.displayChangeContractDrift)(chalk, changeContractSummary, { advisory: true });
             }
         }
         // Call verify API (or deterministic local evaluation for Plan Sync scope mode)
@@ -4538,9 +4125,50 @@ async function verifyCommand(options) {
                     : {}),
             };
             captureEvidencePayload(verifyEvidencePayload);
+            const canonicalReplayChecksum = (() => {
+                const direct = lastCanonicalOutput?.['replayChecksum'];
+                if (typeof direct === 'string') {
+                    return direct;
+                }
+                const envelope = lastCanonicalOutput?.['governanceVerification'] ?? undefined;
+                return typeof envelope?.replayChecksum === 'string' ? envelope.replayChecksum : null;
+            })();
+            const structuralBlocking = structuralViolations.filter(v => v.severity === 'BLOCKING').length;
+            const structuralAdvisory = structuralViolations.filter(v => v.severity === 'ADVISORY').length;
+            const deterministicSigs = structuralViolations.filter(v => v.determinism === 'deterministic-structural').length;
+            const heuristicSigs = structuralViolations.filter(v => v.determinism === 'heuristic-advisory').length;
+            const trustScore = structuralViolations.length > 0
+                ? Math.round((deterministicSigs / structuralViolations.length) * 100)
+                : 100;
+            const mainReplayCustody = (0, replay_custody_1.captureVerifyReplayCustody)({
+                projectRoot,
+                diffContext: `${options.base || 'HEAD'} vs working tree`,
+                filesAnalyzed: diffFiles.length,
+                planId: finalPlanId || null,
+                verificationSource: verifySource,
+                policyLockFingerprint: (0, policy_packs_1.readPolicyLockFile)(projectRoot).lock?.effective.fingerprint || null,
+                compiledPolicyFingerprint: effectiveCompiledPolicy?.fingerprint || null,
+                ruleIds: structuralRulesApplied,
+                blockingCount: policyViolations.filter((v) => v.severity === 'block').length + structuralBlocking,
+                advisoryCount: policyViolations.filter((v) => v.severity !== 'block').length + structuralAdvisory,
+                suppressedCount: structuralSuppressedCount,
+                structuralBlockingCount: structuralBlocking,
+                structuralAdvisoryCount: structuralAdvisory,
+                deterministicSignals: deterministicSigs,
+                heuristicSignals: heuristicSigs,
+                overallTrustScore: trustScore,
+                verdict: effectiveVerdict,
+                governanceDecision: governanceResult?.governanceDecision?.summary || 'automatic',
+                actor: custodyActor,
+                source: custodySource,
+                replayChecksum: canonicalReplayChecksum,
+            });
+            applyCapturedReplayCustody(lastCanonicalOutput, mainReplayCustody);
             // If JSON output requested, output JSON and exit
             if (options.json) {
-                emitVerifyJson(verifyEvidencePayload);
+                emitVerifyJson(verifyEvidencePayload, (canonical) => {
+                    applyCapturedReplayCustody(canonical, mainReplayCustody);
+                });
                 await recordVerificationIfRequested(options, config, {
                     grade,
                     violations: violations,
@@ -4574,7 +4202,7 @@ async function verifyCommand(options) {
             // Display results (only if not in json mode; exclude ignored paths from bloat)
             if (!options.json) {
                 const displayBloatFiles = (verifyResult.bloatFiles || []).filter((f) => !shouldIgnore(f));
-                displayVerifyResults({
+                (0, verify_render_1.displayVerifyResults)(chalk, {
                     ...verifyResult,
                     verdict: effectiveVerdict,
                     message: effectiveMessage,
@@ -4582,7 +4210,7 @@ async function verifyCommand(options) {
                     bloatCount: displayBloatFiles.length,
                 }, policyViolations, expediteModeEnabled, intentEngineIssues, intentEngineSummary, intentEngineFlowIssues, intentEngineRegressions, structuralViolations);
                 if (governanceResult) {
-                    displayGovernanceInsights(governanceResult, { explain: options.explain });
+                    (0, verify_render_1.displayGovernanceInsights)(chalk, governanceResult, { explain: options.explain });
                 }
                 if (aiDebtSummary.mode !== 'off') {
                     const header = aiDebtSummary.mode === 'enforce'
@@ -4656,34 +4284,7 @@ async function verifyCommand(options) {
             // ── Governance Provenance Chain + Pilot Metrics ───────────────────────
             // Best-effort: never throws, never changes the verification outcome.
             try {
-                const structuralBlocking = structuralViolations.filter(v => v.severity === 'BLOCKING').length;
-                const structuralAdvisory = structuralViolations.filter(v => v.severity === 'ADVISORY').length;
-                const deterministicSigs = structuralViolations.filter(v => v.determinism === 'deterministic-structural').length;
-                const heuristicSigs = structuralViolations.filter(v => v.determinism === 'heuristic-advisory').length;
-                const trustScore = structuralViolations.length > 0
-                    ? Math.round((deterministicSigs / structuralViolations.length) * 100)
-                    : 100;
-                const prov = (0, governance_provenance_1.buildProvenanceRecord)({
-                    repoRoot: projectRoot,
-                    filesAnalyzed: diffFiles.length,
-                    diffContext: `${options.base || 'HEAD'} vs working tree`,
-                    planId: finalPlanId || null,
-                    intentHash: null,
-                    policyHash: null,
-                    ruleIds: structuralRulesApplied,
-                    blockingCount: policyViolations.filter((v) => v.severity === 'block').length + structuralBlocking,
-                    advisoryCount: policyViolations.filter((v) => v.severity !== 'block').length + structuralAdvisory,
-                    suppressedCount: structuralSuppressedCount,
-                    structuralBlockingCount: structuralBlocking,
-                    structuralAdvisoryCount: structuralAdvisory,
-                    deterministicSignals: deterministicSigs,
-                    heuristicSignals: heuristicSigs,
-                    overallTrustScore: trustScore,
-                    verdict: effectiveVerdict,
-                    governanceDecision: governanceResult?.governanceDecision?.summary || 'automatic',
-                });
-                (0, governance_provenance_1.saveProvenanceRecord)(projectRoot, prov);
-                lastProvenanceRunId = prov.runId;
+                lastProvenanceRunId = mainReplayCustody.provenanceRecord?.runId ?? lastProvenanceRunId;
                 // Tally per-rule counts for pilot metrics
                 const ruleCounts = {};
                 for (const v of structuralViolations) {
@@ -4694,8 +4295,8 @@ async function verifyCommand(options) {
                     verifyCount: 1,
                     passCount: effectiveVerdict === 'PASS' ? 1 : 0,
                     failCount: effectiveVerdict === 'FAIL' ? 1 : 0,
-                    blockingCaught: prov.blockingCount,
-                    advisoryCaught: prov.advisoryCount,
+                    blockingCaught: mainReplayCustody.provenanceRecord?.blockingCount ?? (policyViolations.filter((v) => v.severity === 'block').length + structuralBlocking),
+                    advisoryCaught: mainReplayCustody.provenanceRecord?.advisoryCount ?? (policyViolations.filter((v) => v.severity !== 'block').length + structuralAdvisory),
                     suppressions: structuralSuppressedCount,
                     structuralCaught: structuralViolations.length,
                     aiDebtDelta: aiDebtSummary?.score ?? 0,
@@ -4817,7 +4418,7 @@ async function verifyCommand(options) {
     catch (error) {
         if (options.json) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            emitCanonicalVerifyJson({
+            (0, verify_output_1.emitCanonicalVerifyJson)({
                 verdict: 'FAIL',
                 summary: {
                     totalFilesChanged: 0,
@@ -5068,6 +4669,8 @@ function buildGovernancePayload(governance, orgGovernanceSettings, options) {
         suspiciousChange: governance.suspiciousChange,
         changeJustification: governance.changeJustification,
         governanceDecision: governance.governanceDecision,
+        engineeringContext: governance.engineeringContext,
+        driftIntelligence: governance.driftIntelligence,
         aiChangeLog: {
             path: governance.aiChangeLogPath,
             auditPath: governance.aiChangeLogAuditPath,
@@ -5089,412 +4692,6 @@ function buildGovernancePayload(governance, orgGovernanceSettings, options) {
         ...(options?.changeContract ? { changeContract: options.changeContract } : {}),
         ...(options?.aiDebt ? { aiDebt: options.aiDebt } : {}),
     };
-}
-function displayGovernanceInsights(governance, options = {}) {
-    const maxUnexpectedFiles = options.maxUnexpectedFiles ?? 20;
-    const decision = governance.governanceDecision;
-    console.log(chalk.bold.white('\nBlast Radius:'));
-    console.log(chalk.dim(`   Files touched: ${governance.blastRadius.filesChanged}`));
-    console.log(chalk.dim(`   Functions impacted: ${governance.blastRadius.functionsAffected}`));
-    console.log(chalk.dim(`   Modules impacted: ${governance.blastRadius.modulesAffected.join(', ') || 'none'}`));
-    if (governance.blastRadius.dependenciesAdded.length > 0) {
-        console.log(chalk.dim(`   Dependencies added: ${governance.blastRadius.dependenciesAdded.join(', ')}`));
-    }
-    console.log(chalk.dim(`   Risk level: ${governance.blastRadius.riskScore.toUpperCase()}`));
-    console.log(chalk.dim(`   Governance decision: ${decision.decision.toUpperCase().replace('_', ' ')} | Avg relevance: ${decision.averageRelevanceScore}`));
-    console.log(chalk.dim(`   Policy source: ${governance.policySources.mode}${governance.policySources.orgPolicy ? ' (org + local)' : ' (local)'}`));
-    console.log(governance.aiChangeLogIntegrity.valid
-        ? chalk.dim(`   AI change-log integrity: valid (${governance.aiChangeLogIntegrity.signed ? 'signed' : 'unsigned'})`)
-        : chalk.red(`   AI change-log integrity: invalid (${governance.aiChangeLogIntegrity.issues.join('; ') || 'unknown'})`));
-    if (governance.aiChangeLogIntegrity.signed) {
-        const keyId = typeof governance.aiChangeLogIntegrity.keyId === 'string'
-            ? governance.aiChangeLogIntegrity.keyId
-            : null;
-        const verifiedWithKeyId = typeof governance.aiChangeLogIntegrity.verifiedWithKeyId === 'string'
-            ? governance.aiChangeLogIntegrity.verifiedWithKeyId
-            : null;
-        if (keyId || verifiedWithKeyId) {
-            console.log(chalk.dim(`   Signing key: ${keyId || 'n/a'}${verifiedWithKeyId ? ` (verified via ${verifiedWithKeyId})` : ''}`));
-        }
-    }
-    if (governance.suspiciousChange.flagged) {
-        console.log(chalk.red('\nSuspicious Change Detected'));
-        console.log(chalk.red(`   Plan expected files: ${governance.suspiciousChange.expectedFiles} | AI modified files: ${governance.suspiciousChange.actualFiles}`));
-        governance.suspiciousChange.unexpectedFiles.slice(0, maxUnexpectedFiles).forEach((filePath) => {
-            console.log(chalk.red(`   • ${filePath}`));
-        });
-        console.log(chalk.red(`   Confidence: ${governance.suspiciousChange.confidence}`));
-    }
-    if (decision.lowRelevanceFiles.length > 0) {
-        console.log(chalk.yellow('\nLow Relevance Files'));
-        decision.lowRelevanceFiles.slice(0, 10).forEach((item) => {
-            console.log(chalk.yellow(`   • ${item.file} (score ${item.relevanceScore}, ${item.planLink.replace('_', ' ')})`));
-        });
-    }
-    if (options.explain) {
-        console.log(chalk.bold.white('\nAI Change Justification:'));
-        console.log(chalk.dim(`   Task: ${governance.changeJustification.task}`));
-        governance.changeJustification.changes.forEach((item) => {
-            const relevance = typeof item.relevanceScore === 'number' ? ` [score ${item.relevanceScore}]` : '';
-            console.log(chalk.dim(`   • ${item.file} — ${item.reason}${relevance}`));
-        });
-    }
-}
-function displayChangeContractDrift(summary, options = { advisory: false }) {
-    const groups = (0, change_contract_1.groupChangeContractViolations)(summary.violations.map((item) => ({
-        code: item.code,
-        message: item.message,
-        ...(item.file ? { file: item.file } : {}),
-        ...(item.symbol ? { symbol: item.symbol } : {}),
-        ...(item.symbolType ? { symbolType: item.symbolType } : {}),
-        ...(item.expected ? { expected: item.expected } : {}),
-        ...(item.actual ? { actual: item.actual } : {}),
-    })));
-    if (groups.length === 0)
-        return;
-    const maxItemsPerGroup = options.maxItemsPerGroup ?? 12;
-    const header = options.advisory
-        ? chalk.yellow('\nWARN ⚠️  Change contract drift detected')
-        : chalk.red('\nFAIL ❌  Change contract enforcement failed');
-    console.log(header);
-    for (const group of groups) {
-        console.log(chalk.white(`\n${group.title}:`));
-        group.items.slice(0, maxItemsPerGroup).forEach((entry) => {
-            console.log(`  - ${entry}`);
-        });
-        if (group.items.length > maxItemsPerGroup) {
-            console.log(chalk.dim(`  - ... ${group.items.length - maxItemsPerGroup} more`));
-        }
-        console.log(chalk.dim(`  Why it matters: ${group.impact}`));
-    }
-    console.log(chalk.dim('\nSummary:'));
-    console.log(chalk.dim('Implementation deviates from intended contract.'));
-    console.log(chalk.dim(`Contract path: ${summary.path}`));
-}
-/**
- * Display verification results in a formatted report card
- */
-function displayVerifyResults(result, policyViolations, expediteModeUsed = false, intentIssuesForDisplay = [], intentSummaryForDisplay = null, flowIssuesForDisplay = [], regressionsForDisplay = [], structuralViolationsForDisplay = []) {
-    // ── Header ────────────────────────────────────────────────────────────────
-    const headerLabel = result.verdict === 'PASS'
-        ? chalk.bold.green('\n✅ VERIFICATION PASSED')
-        : result.verdict === 'WARN'
-            ? chalk.bold.yellow('\n⚠️  VERIFICATION PASSED WITH WARNINGS')
-            : chalk.bold.red('\n❌ VERIFICATION FAILED');
-    console.log(headerLabel);
-    // ── Intent Status block ──────────────────────────────────────────────────
-    if (intentSummaryForDisplay) {
-        const s = intentSummaryForDisplay;
-        const domainLabel = s.domain.charAt(0).toUpperCase() + s.domain.slice(1);
-        const confColor = s.confidence === 'HIGH'
-            ? chalk.green
-            : s.confidence === 'MEDIUM'
-                ? chalk.yellow
-                : chalk.red;
-        // V4: weighted coverage bar
-        const wCovPct = s.weightedCoverage != null
-            ? Math.round(s.weightedCoverage * 100)
-            : s.coveragePct;
-        const barWidth = 20;
-        const filled = Math.round((wCovPct / 100) * barWidth);
-        const bar = chalk.cyan('█'.repeat(filled)) + chalk.dim('░'.repeat(barWidth - filled));
-        // V4: system status label
-        const sysStatus = s.status;
-        const statusLabel = sysStatus === 'CRITICAL'
-            ? chalk.bold.red('[CRITICAL]')
-            : sysStatus === 'AT RISK'
-                ? chalk.bold.yellow('[AT RISK]')
-                : chalk.bold.green('[SECURE]');
-        console.log(chalk.bold('\n━━━ INTENT STATUS ━━━━━━━━━━━━━━━━━━━━━━'));
-        console.log(`  ${statusLabel} ${chalk.bold(`${domainLabel} Implementation:`)} ${bar} ${chalk.bold(`${wCovPct}%`)} (weighted)`);
-        console.log(`  Confidence: ${confColor(s.confidence)}`);
-        if (s.foundList.length > 0) {
-            const foundLabels = s.foundList
-                .map((k) => k.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '))
-                .slice(0, 4);
-            console.log(`  Found:   ${chalk.green(foundLabels.join(', '))}${s.foundList.length > 4 ? chalk.dim(` +${s.foundList.length - 4} more`) : ''}`);
-        }
-        // V4: show critical missing and non-critical missing separately
-        const critMissing = s.criticalMissing ?? [];
-        const otherMissing = s.missing.filter((k) => !critMissing.includes(k));
-        if (critMissing.length > 0) {
-            console.log(`  ${chalk.bold.red('Critical missing:')}`);
-            critMissing.forEach((k) => {
-                const label = k.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-                console.log(chalk.red(`    ✗ ${label}`));
-            });
-        }
-        if (otherMissing.length > 0) {
-            console.log(`  ${chalk.bold.yellow('Missing:')}`);
-            otherMissing.forEach((k) => {
-                const label = k.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-                console.log(chalk.yellow(`    • ${label}`));
-            });
-        }
-        if (critMissing.length === 0 && otherMissing.length === 0) {
-            console.log(`  Missing: ${chalk.green('none — all components detected')}`);
-        }
-        console.log(chalk.bold('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-    }
-    // ── Triage items ──────────────────────────────────────────────────────────
-    const maxBlockingItems = 20;
-    const maxAdvisoryItems = 8;
-    const maxExpediteItems = 12;
-    const policyItems = policyViolations || [];
-    const isBlockingSeverity = (severityRaw) => {
-        const normalized = String(severityRaw || '').toLowerCase();
-        return normalized === 'block' || normalized === 'critical' || normalized === 'high';
-    };
-    const scopeItems = result.bloatFiles.map((file) => ({
-        file,
-        message: 'File modified outside intended scope',
-        policy: 'scope_guard',
-    }));
-    const policyTriageItems = policyItems.map((item) => ({
-        file: item.file,
-        message: item.message || item.rule,
-        policy: item.rule || 'policy_violation',
-        severity: item.severity,
-    }));
-    // Structural rule violations — split by severity
-    const structuralBlocking = structuralViolationsForDisplay
-        .filter((v) => v.severity === 'BLOCKING')
-        .map((v) => ({
-        file: v.filePath,
-        message: `${v.ruleId} · ${v.ruleName} (line ${v.line}) — ${v.operationalRisk}`,
-    }));
-    const structuralAdvisory = structuralViolationsForDisplay
-        .filter((v) => v.severity === 'ADVISORY')
-        .map((v) => ({
-        file: v.filePath,
-        message: `${v.ruleId} · ${v.ruleName} (line ${v.line}) — ${v.operationalRisk}`,
-    }));
-    let blockingItems = [
-        ...scopeItems.map((item) => ({
-            file: item.file,
-            message: item.message,
-        })),
-        ...policyTriageItems
-            .filter((item) => isBlockingSeverity(item.severity))
-            .map((item) => ({
-            file: item.file,
-            message: item.message,
-        })),
-        ...structuralBlocking,
-    ];
-    let advisoryItems = [
-        ...policyTriageItems
-            .filter((item) => !isBlockingSeverity(item.severity))
-            .map((item) => ({
-            file: item.file,
-            message: item.message,
-        })),
-        ...structuralAdvisory,
-    ];
-    let expediteItems = [];
-    if (expediteModeUsed) {
-        blockingItems = [
-            ...scopeItems
-                .filter((item) => isCriticalScopeBreach(item.file, item.message))
-                .map((item) => ({ file: item.file, message: item.message })),
-            ...policyTriageItems
-                .filter((item) => isSecurityOrAuthViolation(item.file, item.policy, item.message))
-                .map((item) => ({ file: item.file, message: item.message })),
-        ];
-        expediteItems = [
-            ...scopeItems
-                .filter((item) => !isCriticalScopeBreach(item.file, item.message))
-                .map((item) => ({ file: item.file, message: item.message })),
-            ...policyTriageItems
-                .filter((item) => !isSecurityOrAuthViolation(item.file, item.policy, item.message))
-                .map((item) => ({ file: item.file, message: item.message })),
-        ];
-        advisoryItems = [];
-    }
-    // ── Counts ────────────────────────────────────────────────────────────────
-    console.log(blockingItems.length > 0
-        ? chalk.red(`Blocking Issues: ${blockingItems.length}`)
-        : chalk.dim('Blocking Issues: 0'));
-    if (expediteModeUsed) {
-        console.log(chalk.yellow(`Expedite Issues: ${expediteItems.length}`));
-    }
-    else {
-        console.log(advisoryItems.length > 0
-            ? chalk.yellow(`Advisory Issues: ${advisoryItems.length}`)
-            : chalk.dim('Advisory Issues: 0'));
-    }
-    console.log(chalk.dim(`Plan adherence: ${result.plannedFilesModified}/${result.totalPlannedFiles} files (${result.adherenceScore}%)`));
-    // ── Top issues ────────────────────────────────────────────────────────────
-    const topIssues = [
-        ...blockingItems,
-        ...(expediteModeUsed ? expediteItems : advisoryItems),
-    ].slice(0, 2);
-    if (topIssues.length > 0) {
-        console.log(chalk.bold('\nTop Issues:'));
-        topIssues.forEach((item, i) => {
-            console.log(`  ${i + 1}. ${item.message} → ${chalk.cyan(item.file)}`);
-        });
-    }
-    // ── Detailed lists ────────────────────────────────────────────────────────
-    if (blockingItems.length > 0) {
-        console.log(chalk.red(`\nBLOCKING (${blockingItems.length})`));
-        blockingItems.slice(0, maxBlockingItems).forEach((item) => {
-            console.log(`  - ${item.file}: ${item.message}`);
-        });
-        if (blockingItems.length > maxBlockingItems) {
-            console.log(chalk.dim(`  - ... ${blockingItems.length - maxBlockingItems} more`));
-        }
-    }
-    if (advisoryItems.length > 0) {
-        console.log(chalk.yellow(`\nADVISORY (${advisoryItems.length})`));
-        advisoryItems.slice(0, maxAdvisoryItems).forEach((item) => {
-            console.log(`  - ${item.file}: ${item.message}`);
-        });
-        if (advisoryItems.length > maxAdvisoryItems) {
-            console.log(chalk.dim(`  - ... ${advisoryItems.length - maxAdvisoryItems} more (summarized)`));
-        }
-    }
-    if (expediteModeUsed && expediteItems.length > 0) {
-        console.log(chalk.yellow(`\nEXPEDITE (requires follow-up) (${expediteItems.length})`));
-        expediteItems.slice(0, maxExpediteItems).forEach((item) => {
-            console.log(`  - ${item.file}: ${item.message}`);
-        });
-        if (expediteItems.length > maxExpediteItems) {
-            console.log(chalk.dim(`  - ... ${expediteItems.length - maxExpediteItems} more (summarized)`));
-        }
-        console.log(chalk.dim('  Follow-up checklist:'));
-        EXPEDITE_FOLLOW_UP_CHECKLIST.forEach((checkItem) => {
-            console.log(chalk.dim(`  - ${checkItem}`));
-        });
-        console.log(chalk.dim('  Note: Expedite Mode used'));
-    }
-    // ── Intent issues ─────────────────────────────────────────────────────────
-    if (intentIssuesForDisplay.length > 0) {
-        console.log(chalk.magenta(`\nINTENT ISSUES (${intentIssuesForDisplay.length})`));
-        intentIssuesForDisplay.forEach((issue) => {
-            const label = issue.severity === 'high' ? chalk.red('[HIGH]') : chalk.yellow('[MEDIUM]');
-            const typeLabel = issue.type === 'missing' ? 'Missing' : issue.type === 'misplaced' ? 'Misplaced' : 'Partial';
-            console.log(`  ${label} ${typeLabel}: ${issue.message}`);
-        });
-    }
-    // ── Flow Validation ───────────────────────────────────────────────────────
-    if (flowIssuesForDisplay.length > 0) {
-        console.log(chalk.bold('\n━━━ FLOW VALIDATION ━━━━━━━━━━━━━━━━━━━━━'));
-        flowIssuesForDisplay.forEach((issue) => {
-            const label = issue.severity === 'high' ? chalk.red('[HIGH]') : chalk.yellow('[MEDIUM]');
-            const typeIcon = issue.type === 'missing-flow' ? '⛓' : issue.type === 'misplaced-flow' ? '⚠' : '⊘';
-            console.log(`  ${label} ${typeIcon} ${issue.message}`);
-            if (issue.files && issue.files.length > 0) {
-                const display = issue.files.slice(0, 3);
-                console.log(chalk.dim(`      → ${display.join(', ')}${issue.files.length > 3 ? ` +${issue.files.length - 3} more` : ''}`));
-            }
-        });
-        console.log(chalk.bold('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-    }
-    // ── Regression Analysis ───────────────────────────────────────────────────
-    if (regressionsForDisplay.length > 0) {
-        console.log(chalk.bold.red('\n━━━ REGRESSION ANALYSIS ━━━━━━━━━━━━━━━━━'));
-        regressionsForDisplay.forEach((reg) => {
-            const icon = reg.type === 'coverage-regression' ? '📉' :
-                reg.type === 'critical-regression' ? '🔴' :
-                    reg.type === 'flow-regression' ? '⛓' : '⚠';
-            console.log(`  ${chalk.red('[REGRESSION]')} ${icon} ${reg.message}`);
-        });
-        console.log(chalk.bold.red('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-    }
-    // ── Structural Rule Engine ─────────────────────────────────────────────────
-    // Display detailed structural violations with AST evidence and determinism labels.
-    if (structuralViolationsForDisplay.length > 0) {
-        try {
-            const report = (0, explainability_1.buildViolationReport)(structuralViolationsForDisplay, '');
-            const formatter = new explainability_1.ViolationFormatter();
-            const blocking = report.blocking;
-            const advisory = report.advisory;
-            if (blocking.length > 0 || advisory.length > 0) {
-                console.log(chalk.bold('\n━━━ STRUCTURAL ANALYSIS ━━━━━━━━━━━━━━━━━'));
-                blocking.slice(0, 5).forEach((v) => {
-                    const detLabel = v.determinism === 'deterministic-structural'
-                        ? chalk.cyan('⚙ AST-verified')
-                        : chalk.yellow('⚡ heuristic');
-                    console.log(chalk.red(`\n  ● ${v.ruleId} [BLOCKING] ${detLabel} · confidence ${Math.round(v.confidence * 100)}%`));
-                    console.log(chalk.bold(`    ${v.filePath}:${v.line}`));
-                    console.log(chalk.dim(`    Pattern: ${v.evidence.matchReason}`));
-                    if (v.evidence.codeSnippet) {
-                        console.log(chalk.dim(`    Code:    ${v.evidence.codeSnippet.slice(0, 100)}`));
-                    }
-                    console.log(chalk.yellow(`    Risk:    ${v.operationalRisk}`));
-                    console.log(chalk.green(`    Fix:     ${v.remediation}`));
-                });
-                if (blocking.length > 5) {
-                    console.log(chalk.dim(`\n  ... ${blocking.length - 5} more blocking structural violations`));
-                }
-                advisory.slice(0, 3).forEach((v) => {
-                    console.log(chalk.yellow(`\n  ○ ${v.ruleId} [ADVISORY] ⚡ heuristic · confidence ${Math.round(v.confidence * 100)}%`));
-                    console.log(chalk.dim(`    ${v.filePath}:${v.line} — ${v.operationalRisk}`));
-                });
-                if (advisory.length > 3) {
-                    console.log(chalk.dim(`  ... ${advisory.length - 3} more advisory structural violations`));
-                }
-                const deterministicCount = report.deterministicCount;
-                const heuristicCount = report.heuristicCount;
-                console.log(chalk.dim(`\n  Determinism: ${deterministicCount} AST-verified · ${heuristicCount} heuristic`));
-                console.log(chalk.bold('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-            }
-        }
-        catch {
-            // Non-fatal: explainability rendering must never break verification display
-        }
-    }
-    const hasAnyIssue = blockingItems.length > 0 ||
-        advisoryItems.length > 0 ||
-        expediteItems.length > 0 ||
-        intentIssuesForDisplay.length > 0 ||
-        flowIssuesForDisplay.length > 0 ||
-        regressionsForDisplay.length > 0;
-    if (!hasAnyIssue) {
-        console.log(chalk.green('\nNo issues detected.'));
-    }
-    // ── Next step ─────────────────────────────────────────────────────────────
-    if (hasAnyIssue) {
-        console.log(chalk.bold('\nNext step:'));
-        console.log(`  ${chalk.cyan('neurcode fix')}`);
-        console.log(chalk.dim('  or: neurcode fix --apply-safe  (auto-apply high-confidence patches)'));
-    }
-    console.log(chalk.dim(`\nDetails: ${result.message}\n`));
-}
-function printFirstRunAdvisoryMessage(demoMode) {
-    console.log(chalk.cyan('\nNeurcode first-run advisory mode'));
-    console.log(chalk.dim('Neurcode checks if your AI-generated code matches your intended plan.'));
-    console.log(chalk.dim('To get full enforcement:'));
-    console.log(chalk.dim('1. Define a plan'));
-    console.log(chalk.dim('2. Generate a contract'));
-    console.log(chalk.dim('Running in advisory mode for now.\n'));
-    if (demoMode) {
-        console.log(chalk.dim('Demo mode: this run is intentionally non-blocking to make evaluation easy.'));
-    }
-}
-function printAdvisorySignals(signals, demoMode) {
-    if (signals.length === 0) {
-        if (demoMode) {
-            console.log(chalk.dim('No high-signal advisory findings detected for this diff.'));
-        }
-        return;
-    }
-    console.log(chalk.yellow('\nAdvisory findings (non-blocking):'));
-    for (const signal of signals) {
-        const severityLabel = signal.severity === 'warn' ? chalk.yellow('[warn]') : chalk.dim('[info]');
-        console.log(`${severityLabel} ${signal.title}`);
-        console.log(chalk.dim(`  ${signal.detail}`));
-        console.log(chalk.dim(`  Confidence: ${signal.confidence.toUpperCase()} (advisory-only)`));
-        if (signal.evidence.length > 0) {
-            console.log(chalk.dim(`  Evidence: ${signal.evidence.join(', ')}`));
-        }
-        console.log(chalk.dim(`  Structural gap: ${signal.structuralCoverageGap}`));
-        console.log(chalk.dim(`  Uncertainty: ${signal.uncertainty}`));
-        signal.files.forEach((file) => {
-            console.log(chalk.dim(`  - ${file}`));
-        });
-    }
 }
 function buildMinimalAdvisoryContractFromDiff(diffFiles, fallbackPlanId) {
     const expectedFiles = [...new Set(diffFiles.map((file) => toUnixPath(file.path)).filter(Boolean))];

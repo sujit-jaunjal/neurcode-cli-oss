@@ -9,6 +9,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GIT_EMPTY_TREE = void 0;
 exports.execGitCommand = execGitCommand;
+exports.gitRefExists = gitRefExists;
 exports.detectCurrentGitBranch = detectCurrentGitBranch;
 exports.detectDefaultBaseRef = detectDefaultBaseRef;
 exports.resolveDefaultDiffContext = resolveDefaultDiffContext;
@@ -42,8 +43,11 @@ function tryExecGit(command, cwd) {
         return null;
     }
 }
+function quoteGitArg(value) {
+    return `'${value.replace(/'/g, "'\\''")}'`;
+}
 function gitRefExists(ref, cwd) {
-    const value = tryExecGit(`git rev-parse --verify --quiet ${ref}`, cwd);
+    const value = tryExecGit(`git rev-parse --verify --quiet ${quoteGitArg(ref)}`, cwd);
     return Boolean(value);
 }
 function detectCurrentGitBranch(cwd) {
@@ -88,11 +92,17 @@ function resolveDefaultDiffContext(cwd) {
  * so all files are treated as newly added and the policy engine can scan them.
  */
 function getDiffFromBase(base) {
+    const ref = base.trim();
+    const quotedRef = quoteGitArg(ref);
+    if (!gitRefExists(`${ref}^{commit}`)) {
+        console.warn(`Git base ref unavailable (${ref}). Falling back to empty-tree comparison with bounded replay trust.`);
+        return (0, child_process_1.execSync)(`git diff ${exports.GIT_EMPTY_TREE} HEAD`, EXEC_OPTS);
+    }
     try {
-        return (0, child_process_1.execSync)(`git diff ${base}`, EXEC_OPTS);
+        return (0, child_process_1.execSync)(`git diff ${quotedRef}`, EXEC_OPTS);
     }
     catch {
-        console.warn('Initial commit detected. Comparing against empty tree.');
+        console.warn(`Git diff against ${ref} failed. Falling back to empty-tree comparison with bounded replay trust.`);
         return (0, child_process_1.execSync)(`git diff ${exports.GIT_EMPTY_TREE} HEAD`, EXEC_OPTS);
     }
 }

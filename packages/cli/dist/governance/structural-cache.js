@@ -28,6 +28,7 @@ exports.computeImplementationHash = computeImplementationHash;
 const crypto_1 = require("crypto");
 const fs_1 = require("fs");
 const path_1 = require("path");
+const artifact_io_1 = require("../utils/artifact-io");
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CACHE_FILE = 'structural-cache.json';
 const NEURCODE_DIR = '.neurcode';
@@ -37,13 +38,7 @@ function sha256(input) {
     return (0, crypto_1.createHash)('sha256').update(input, 'utf-8').digest('hex');
 }
 function atomicWrite(filePath, content) {
-    const tmp = `${filePath}.tmp`;
-    const dir = (0, path_1.dirname)(filePath);
-    if (!(0, fs_1.existsSync)(dir)) {
-        (0, fs_1.mkdirSync)(dir, { recursive: true });
-    }
-    (0, fs_1.writeFileSync)(tmp, content, 'utf-8');
-    (0, fs_1.renameSync)(tmp, filePath);
+    (0, artifact_io_1.atomicWriteUtf8FileSync)(filePath, content, { fsync: false });
 }
 // ── StructuralCache class ─────────────────────────────────────────────────────
 class StructuralCache {

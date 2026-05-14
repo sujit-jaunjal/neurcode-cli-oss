@@ -178,6 +178,100 @@ function findingFromScope(file, message) {
         remediation: 'Limit diff to planned scope or expand plan through governed workflow.',
     };
 }
+function mapDriftSeverity(severity) {
+    return severity === 'critical' || severity === 'high' ? 'BLOCKING' : 'ADVISORY';
+}
+function mapDriftGateSeverity(gate, fallbackSeverity) {
+    if (gate === 'policy-blocker' || gate === 'rollout-blocker' || gate === 'architecture-blocker') {
+        return 'BLOCKING';
+    }
+    if (gate === 'review-blocker' || gate === 'advisory') {
+        return 'ADVISORY';
+    }
+    return mapDriftSeverity(fallbackSeverity);
+}
+function mapDriftConfidence(confidence) {
+    if (confidence === 'high')
+        return 0.84;
+    if (confidence === 'medium')
+        return 0.68;
+    return 0.52;
+}
+function findingFromDriftFinding(finding, source) {
+    const filePath = finding.file || finding.module || finding.service || '.neurcode/intent-pack.json';
+    const id = stableFindingId([
+        'intent-drift',
+        finding.id,
+        finding.category,
+        filePath,
+        finding.message,
+    ]);
+    return {
+        id,
+        category: 'intent-conditioned',
+        sourceSystem: 'intent-engine',
+        determinismClassification: source === 'intent-runtime' ? 'deterministic-semantic' : 'heuristic-advisory',
+        severity: mapDriftGateSeverity(finding.governanceGate, finding.severity),
+        confidence: source === 'intent-runtime' ? 0.76 : 0.58,
+        title: `Intent drift · ${finding.category}`,
+        evidence: {
+            excerpt: finding.rationale || finding.message,
+            filePath,
+            structuralHint: `drift_intelligence:${finding.category}`,
+        },
+        operationalImplication: finding.message,
+        remediation: finding.expected && finding.actual
+            ? `Restore expected intent boundary (${finding.expected}) or explicitly update the intent contract; actual drift: ${finding.actual}.`
+            : 'Pull implementation back inside the declared intent boundary or update the intent contract through the governed workflow.',
+        semanticMetadata: {
+            retrievalMethod: 'deterministic-graph',
+            matchedTerms: [finding.category, finding.module, finding.service].filter((entry) => Boolean(entry)),
+        },
+    };
+}
+function findingFromDriftNarrative(narrative, source, governanceGate) {
+    const filePath = narrative.affectedFiles[0]
+        || narrative.affectedModules[0]
+        || narrative.affectedServices[0]
+        || '.neurcode/intent-pack.json';
+    const id = stableFindingId([
+        'intent-drift-narrative',
+        narrative.id,
+        narrative.category,
+        filePath,
+        narrative.summary,
+    ]);
+    return {
+        id,
+        category: 'intent-conditioned',
+        sourceSystem: 'intent-engine',
+        determinismClassification: source === 'intent-runtime' ? 'deterministic-semantic' : 'heuristic-advisory',
+        severity: mapDriftGateSeverity(governanceGate, narrative.severity),
+        confidence: mapDriftConfidence(narrative.confidence),
+        title: `Intent drift narrative · ${narrative.category}`,
+        evidence: {
+            excerpt: narrative.rootCause || narrative.summary,
+            filePath,
+            structuralHint: `drift_narrative:${narrative.category}`,
+        },
+        operationalImplication: narrative.operationalRisk || narrative.summary,
+        remediation: narrative.remediationBoundary || 'Keep remediation inside the declared intent, service, dependency, and rollout boundary.',
+        semanticMetadata: {
+            retrievalMethod: 'deterministic-graph',
+            matchedTerms: [
+                narrative.category,
+                narrative.primaryCategory,
+                ...narrative.affectedModules.slice(0, 4),
+                ...narrative.affectedServices.slice(0, 4),
+            ],
+        },
+        mergedFrom: narrative.evidenceFindingIds.length > 0 ? [...narrative.evidenceFindingIds].sort() : undefined,
+    };
+}
+function isDriftPolicyViolation(v) {
+    const rule = String(v.rule || '').toLowerCase();
+    return rule.startsWith('drift_intelligence:') || rule.startsWith('drift_narrative:');
+}
 function findingFromGovernanceConstraint(message, fileHint) {
     const id = stableFindingId(['constraint', fileHint, message]);
     return {
@@ -216,10 +310,15 @@ function compressByLocation(findings) {
     // the structural-rules source AND a policy-engine structural:* row,
     // we can identify and absorb the duplicate before bucket compression.
     const structuralById = new Map();
+    const structuralByFileRule = new Map();
     for (const f of findings) {
         if (f.sourceSystem === 'structural-rules' && f.structuralMetadata?.ruleId) {
             const key = `${f.evidence.filePath ?? ''}\x00${f.evidence.line ?? 0}\x00${f.structuralMetadata.ruleId}`;
             structuralById.set(key, f);
+            const fileRuleKey = `${f.evidence.filePath ?? ''}\x00${f.structuralMetadata.ruleId}`;
+            const existing = structuralByFileRule.get(fileRuleKey) ?? [];
+            existing.push(f);
+            structuralByFileRule.set(fileRuleKey, existing);
         }
     }
     // ── Pass 2: bucket by location + behavior, absorb structural duplicates ───
@@ -228,14 +327,26 @@ function compressByLocation(findings) {
     for (const f of findings) {
         // If this is a policy-engine row that mirrors a structural finding, absorb it
         if (f.sourceSystem === 'policy-engine') {
-            const ruleId = String(f.structuralMetadata?.ruleId ?? f.title.match(/^Policy · structural:(.+)$/)?.[1] ?? '');
+            const titleRuleId = f.title.match(/^Policy · (.+)$/)?.[1] ?? '';
+            const normalizedRuleId = titleRuleId.startsWith('structural:')
+                ? titleRuleId.slice('structural:'.length)
+                : titleRuleId;
+            const ruleId = String(f.structuralMetadata?.ruleId ?? normalizedRuleId ?? '');
             if (ruleId) {
                 const structKey = `${f.evidence.filePath ?? ''}\x00${f.evidence.line ?? 0}\x00${ruleId}`;
-                const primary = structuralById.get(structKey);
+                const exactPrimary = structuralById.get(structKey);
+                const fileRuleKey = `${f.evidence.filePath ?? ''}\x00${ruleId}`;
+                const fileRuleCandidates = structuralByFileRule.get(fileRuleKey) ?? [];
+                const primary = exactPrimary ?? (fileRuleCandidates.length === 1 ? fileRuleCandidates[0] : undefined);
                 if (primary) {
                     // Absorb into structural primary's mergedFrom — do not add to buckets
                     const mergedFrom = [...(primary.mergedFrom ?? [primary.id]), f.id];
-                    structuralById.set(structKey, { ...primary, mergedFrom });
+                    const enrichedPrimary = { ...primary, mergedFrom };
+                    const primaryKey = `${primary.evidence.filePath ?? ''}\x00${primary.evidence.line ?? 0}\x00${ruleId}`;
+                    structuralById.set(primaryKey, enrichedPrimary);
+                    if (fileRuleCandidates.length === 1) {
+                        structuralByFileRule.set(fileRuleKey, [enrichedPrimary]);
+                    }
                     duplicateCount++;
                     continue;
                 }
@@ -329,9 +440,23 @@ function buildGovernanceVerificationEnvelope(input) {
     // Strip structural:* policy rows — they duplicate structuralViolations entries.
     // The canonical dedup in compressByLocation handles any that slip through,
     // but stripping here prevents them from appearing as independent findings.
-    const filteredPolicyViolations = stripStructuralPolicyRows(input.policyViolations ?? []);
+    const filteredPolicyViolations = stripStructuralPolicyRows(input.policyViolations ?? [])
+        .filter((violation) => input.driftIntelligence ? !isDriftPolicyViolation(violation) : true);
     for (const v of filteredPolicyViolations) {
         raw.push(findingFromPolicyEngine(v));
+    }
+    const drift = input.driftIntelligence;
+    if (drift) {
+        if (Array.isArray(drift.narratives) && drift.narratives.length > 0) {
+            for (const narrative of drift.narratives) {
+                raw.push(findingFromDriftNarrative(narrative, drift.source, drift.riskSynthesis?.governanceGate));
+            }
+        }
+        else {
+            for (const finding of drift.findings ?? []) {
+                raw.push(findingFromDriftFinding(finding, drift.source));
+            }
+        }
     }
     for (const i of input.intentIssues ?? []) {
         raw.push(findingFromIntentIssue(i));
@@ -414,6 +539,42 @@ function asRuleViolationsFromPayloadViolations(payload) {
     }
     return out;
 }
+function asDriftIntelligenceReport(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return null;
+    const record = value;
+    if (!Array.isArray(record.findings) || !Array.isArray(record.narratives))
+        return null;
+    return record;
+}
+function buildIntentGovernanceSummary(drift, envelope) {
+    const intentFindings = envelope.findings.filter((finding) => finding.sourceSystem === 'intent-engine');
+    const blocking = intentFindings.filter((finding) => finding.severity === 'BLOCKING').length;
+    return {
+        schemaVersion: 'neurcode.intent-governance.v1',
+        source: drift?.source ?? null,
+        deterministic: drift?.source === 'intent-runtime',
+        flagged: drift?.flagged === true || blocking > 0,
+        confidence: drift?.confidence ?? null,
+        rolloutRisk: drift?.rolloutRisk ?? null,
+        canonicalFindingCount: intentFindings.length,
+        blockingFindingCount: blocking,
+        advisoryFindingCount: intentFindings.length - blocking,
+        rawFindingCount: drift?.findings.length ?? 0,
+        narrativeCount: drift?.narratives.length ?? 0,
+        unexpectedFiles: drift?.unexpectedFiles ?? [],
+        unexpectedModules: drift?.unexpectedModules ?? [],
+        unexpectedServices: drift?.unexpectedServices ?? [],
+        impactedModules: drift?.impactedModules ?? [],
+        impactedServices: drift?.impactedServices ?? [],
+        riskSummary: drift?.riskSynthesis?.summary ?? null,
+        governanceGate: drift?.riskSynthesis?.governanceGate ?? null,
+        rolloutTrust: drift?.riskSynthesis?.rolloutTrust ?? null,
+        governancePosture: drift?.governancePosture ?? null,
+        governanceDecisions: drift?.governanceDecisions ?? null,
+        replayChecksum: envelope.replayChecksum ?? null,
+    };
+}
 function scopeHintsFromPayload(payload) {
     const scopeIssues = payload.scopeIssues;
     const bloatFiles = payload.bloatFiles;
@@ -447,6 +608,7 @@ function attachCanonicalGovernance(payload) {
     const intentIssues = Array.isArray(payload.intentIssues) ? payload.intentIssues : [];
     const flowIssues = Array.isArray(payload.flowIssues) ? payload.flowIssues : [];
     const regressions = Array.isArray(payload.regressions) ? payload.regressions : [];
+    const driftIntelligence = asDriftIntelligenceReport(payload.driftIntelligence);
     const scopeFiles = scopeHintsFromPayload(payload);
     const planId = typeof payload.planId === 'string' ? payload.planId : null;
     const verificationSource = typeof payload.verificationSource === 'string' ? payload.verificationSource : undefined;
@@ -456,6 +618,7 @@ function attachCanonicalGovernance(payload) {
         intentIssues,
         flowIssues,
         regressions,
+        driftIntelligence,
         scopeFiles,
         provenance: {
             planId,
@@ -467,6 +630,7 @@ function attachCanonicalGovernance(payload) {
         ...payload,
         governanceVerification: envelope,
         governanceFindings: envelope.findings,
+        intentGovernance: buildIntentGovernanceSummary(driftIntelligence, envelope),
     };
 }
 function evaluateGovernanceReplayIntegrity(input) {

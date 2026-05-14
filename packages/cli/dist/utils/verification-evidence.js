@@ -6,6 +6,7 @@ const os_1 = require("os");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const secret_masking_1 = require("./secret-masking");
+const artifact_io_1 = require("./artifact-io");
 const EVIDENCE_SCHEMA_VERSION = 'neurcode.verify.evidence.v1';
 const EVIDENCE_FILENAME_PREFIX = 'verification-';
 const EVIDENCE_FILENAME_SUFFIX = '.json';
@@ -177,6 +178,7 @@ function writeVerificationEvidence(input) {
     const violations = Array.isArray(canonicalRecord.violations) ? canonicalRecord.violations : [];
     const flowIssues = Array.isArray(canonicalRecord.flowIssues) ? canonicalRecord.flowIssues : [];
     const regressions = Array.isArray(canonicalRecord.regressions) ? canonicalRecord.regressions : [];
+    const intentGovernance = canonicalRecord.intentGovernance ?? null;
     const blockingCount = asNumber(canonicalRecord.blockingCount)
         ?? (Array.isArray(canonicalRecord.blockingItems) ? canonicalRecord.blockingItems.length : null)
         ?? 0;
@@ -215,6 +217,7 @@ function writeVerificationEvidence(input) {
         git: sanitizeValue(input.ciContext || {}, homeDirResolved),
         policiesUsed: sanitizeValue(policySources, homeDirResolved),
         intentSummary: sanitizeValue(intentSummary, homeDirResolved),
+        intentGovernance: sanitizeValue(intentGovernance, homeDirResolved),
         violations: sanitizeValue(violations, homeDirResolved),
         flowIssues: sanitizeValue(flowIssues, homeDirResolved),
         regressions: sanitizeValue(regressions, homeDirResolved),
@@ -226,7 +229,7 @@ function writeVerificationEvidence(input) {
     };
     (0, fs_1.mkdirSync)(evidenceDir, { recursive: true });
     const filePath = (0, path_1.join)(evidenceDir, `${EVIDENCE_FILENAME_PREFIX}${fileTimestamp}.json`);
-    (0, fs_1.writeFileSync)(filePath, `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8');
+    (0, artifact_io_1.atomicWriteJsonFileSync)(filePath, artifact);
     pruneEvidenceArtifacts(evidenceDir, retentionLimit);
     return filePath;
 }

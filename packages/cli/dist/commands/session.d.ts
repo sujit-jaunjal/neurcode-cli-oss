@@ -12,6 +12,9 @@ interface SessionCommandOptions {
     sessionId?: string;
     projectId?: string;
     all?: boolean;
+    left?: string;
+    right?: string;
+    json?: boolean;
 }
 /**
  * List all sessions
@@ -25,5 +28,9 @@ export declare function endSessionCommand(options: SessionCommandOptions): Promi
  * Show session status
  */
 export declare function sessionStatusCommand(options: SessionCommandOptions): Promise<void>;
+export declare function listLocalSessionsCommand(options?: SessionCommandOptions): void;
+export declare function currentLocalSessionCommand(options?: SessionCommandOptions): void;
+export declare function resumeLocalSessionCommand(options?: SessionCommandOptions): void;
+export declare function compareLocalSessionsCommand(options?: SessionCommandOptions): void;
 export {};
 //# sourceMappingURL=session.d.ts.map

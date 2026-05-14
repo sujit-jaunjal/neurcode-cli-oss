@@ -21,6 +21,7 @@ export interface PlanSyncUpdateResult {
     lastUpdated: string;
 }
 export declare function addExpectedFilesToLocalPlan(projectRoot: string, files: string[]): PlanSyncUpdateResult;
+export declare function replaceExpectedFilesInLocalPlan(projectRoot: string, files: string[]): PlanSyncUpdateResult;
 export interface IntentPlanInitializationResult {
     path: string;
     intent: string;

@@ -1,4 +1,4 @@
-import type { GovernanceFinding, GovernanceReplayIntegrity, GovernanceVerificationEnvelope } from '@neurcode-ai/contracts';
+import type { DriftIntelligenceReport, GovernanceFinding, GovernanceReplayIntegrity, GovernanceVerificationEnvelope } from '@neurcode-ai/contracts';
 import type { StructuralViolation } from '../structural-rules/types';
 import type { IntentIssue } from '../intent-engine/matcher';
 import type { FlowIssue } from '../intent-engine/flow-validator';
@@ -28,6 +28,7 @@ export declare function buildGovernanceVerificationEnvelope(input: {
         file: string;
         message?: string;
     }>;
+    driftIntelligence?: DriftIntelligenceReport | null;
     constraintMessages?: Array<{
         message: string;
         file?: string;

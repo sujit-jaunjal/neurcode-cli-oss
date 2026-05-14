@@ -12,6 +12,98 @@ const path_1 = require("path");
 function normalizeRepoPath(value) {
     return value.replace(/\\/g, '/').replace(/^\.\//, '').trim();
 }
+function toPathSegments(pathValue) {
+    return normalizeRepoPath(pathValue).split('/').filter(Boolean);
+}
+function isDependencyManifestPath(pathValue) {
+    const normalized = normalizeRepoPath(pathValue).toLowerCase();
+    return (normalized === 'package.json'
+        || normalized === 'package-lock.json'
+        || normalized === 'pnpm-lock.yaml'
+        || normalized === 'yarn.lock'
+        || normalized === 'bun.lockb'
+        || normalized === 'requirements.txt'
+        || normalized === 'requirements-dev.txt'
+        || normalized === 'pyproject.toml'
+        || normalized === 'poetry.lock'
+        || normalized === 'pipfile'
+        || normalized === 'pipfile.lock'
+        || normalized === 'go.mod'
+        || normalized === 'go.sum'
+        || normalized === 'cargo.toml'
+        || normalized === 'cargo.lock'
+        || normalized === 'pom.xml'
+        || normalized.endsWith('/package.json')
+        || normalized.endsWith('/pnpm-lock.yaml')
+        || normalized.endsWith('/yarn.lock')
+        || normalized.endsWith('/requirements.txt')
+        || normalized.endsWith('/pyproject.toml')
+        || normalized.endsWith('/poetry.lock')
+        || normalized.endsWith('/go.mod')
+        || normalized.endsWith('/go.sum')
+        || normalized.endsWith('/cargo.toml')
+        || normalized.endsWith('/cargo.lock')
+        || normalized.endsWith('/pom.xml'));
+}
+function isInfraBoundaryPath(pathValue) {
+    const normalized = normalizeRepoPath(pathValue).toLowerCase();
+    return (/^(\.github\/workflows|infra\/|terraform\/|k8s\/|kubernetes\/|helm\/|ansible\/|iac\/|cloudformation\/|pulumi\/)/.test(normalized)
+        || /(\/|^)(infra|terraform|k8s|kubernetes|helm|ansible|iac|cloudformation|pulumi)(\/|$)/.test(normalized));
+}
+function classifySensitiveBoundary(pathValue) {
+    const normalized = normalizeRepoPath(pathValue).toLowerCase();
+    if (/\b(auth|rbac|permission|acl|identity|oauth|session|jwt)\b/.test(normalized)) {
+        return 'auth';
+    }
+    if (/\b(payment|billing|invoice|refund|wallet|checkout|webhook)\b/.test(normalized)) {
+        return 'payment';
+    }
+    if (/\b(db|database|prisma|migration|sql|repository|repositories)\b/.test(normalized)) {
+        return 'data';
+    }
+    if (/\b(queue|worker|consumer|producer|kafka|rabbit|sqs|pubsub|event|events)\b/.test(normalized)) {
+        return 'queue';
+    }
+    if (/\b(route|routes|controller|controllers|handler|handlers|api|openapi|graphql|proto)\b/.test(normalized)) {
+        return 'api';
+    }
+    return null;
+}
+function deriveScopeAnchor(pathValue) {
+    const segments = toPathSegments(pathValue);
+    if (segments.length === 0)
+        return null;
+    const [first, second, third] = segments;
+    if ((first === 'services' || first === 'apps' || first === 'packages' || first === 'web') && second) {
+        return `${first}:${second}`;
+    }
+    if (first === 'src' && second) {
+        return `src:${second}`;
+    }
+    if ((first === 'server' || first === 'client') && second) {
+        return `${first}:${second}`;
+    }
+    if ((first === 'api' || first === 'routes' || first === 'controllers') && second) {
+        return `${first}:${second}`;
+    }
+    if (first === '.github' && second === 'workflows') {
+        return '.github:workflows';
+    }
+    if ((first === 'infra' || first === 'terraform' || first === 'k8s' || first === 'kubernetes' || first === 'helm') && second) {
+        return `${first}:${second}`;
+    }
+    if (first === 'auth'
+        || first === 'payment'
+        || first === 'billing'
+        || first === 'db'
+        || first === 'database'
+        || first === 'queue'
+        || first === 'worker'
+        || first === 'workers') {
+        return first;
+    }
+    return null;
+}
 function uniqueSorted(values) {
     const set = new Set();
     for (const value of values) {
@@ -531,6 +623,14 @@ function evaluateChangeContract(contract, input) {
     const expectedSet = new Set(uniqueSorted(contract.expectedFiles));
     const normalizedChanged = uniqueSorted(input.changedFiles);
     const changedSet = new Set(normalizedChanged);
+    const expectedScopeAnchors = new Set([...expectedSet]
+        .map((pathValue) => deriveScopeAnchor(pathValue))
+        .filter((value) => typeof value === 'string' && value.length > 0));
+    const expectedSensitiveBoundaries = new Set([...expectedSet]
+        .map((pathValue) => classifySensitiveBoundary(pathValue))
+        .filter((value) => value !== null));
+    const expectedTouchesInfra = [...expectedSet].some((pathValue) => isInfraBoundaryPath(pathValue));
+    const expectedTouchesDependency = [...expectedSet].some((pathValue) => isDependencyManifestPath(pathValue));
     const normalizedChangedEntries = (input.changedFileEntries || [])
         .map((entry) => ({
         path: normalizeRepoPath(entry.path || ''),
@@ -561,6 +661,52 @@ function evaluateChangeContract(contract, input) {
             continue;
         }
         if (!expectedSet.has(path)) {
+            const scopeAnchor = deriveScopeAnchor(path);
+            const sensitiveBoundary = classifySensitiveBoundary(path);
+            const dependencyManifest = isDependencyManifestPath(path);
+            const infraBoundary = isInfraBoundaryPath(path);
+            if (dependencyManifest && !expectedTouchesDependency) {
+                violations.push({
+                    code: 'CHANGE_CONTRACT_DEPENDENCY_BOUNDARY_BREACH',
+                    message: `Dependency manifest changed outside change contract boundary: ${path}`,
+                    file: path,
+                    expected: expectedTouchesDependency ? 'dependency-boundary' : 'no dependency changes approved',
+                    actual: 'dependency-manifest',
+                });
+                continue;
+            }
+            if (infraBoundary && !expectedTouchesInfra) {
+                violations.push({
+                    code: 'CHANGE_CONTRACT_INFRA_BOUNDARY_BREACH',
+                    message: `Infrastructure or CI boundary changed outside change contract: ${path}`,
+                    file: path,
+                    expected: expectedTouchesInfra ? 'infra-boundary' : 'no infra or CI changes approved',
+                    actual: scopeAnchor || 'infra-boundary',
+                });
+                continue;
+            }
+            if (scopeAnchor && expectedScopeAnchors.size > 0 && !expectedScopeAnchors.has(scopeAnchor)) {
+                violations.push({
+                    code: 'CHANGE_CONTRACT_SERVICE_BOUNDARY_BREACH',
+                    message: `Cross-scope architectural drift detected: ${path} is outside approved scope anchors`,
+                    file: path,
+                    expected: [...expectedScopeAnchors].join(', '),
+                    actual: scopeAnchor,
+                });
+                continue;
+            }
+            if (sensitiveBoundary
+                && expectedSensitiveBoundaries.size > 0
+                && !expectedSensitiveBoundaries.has(sensitiveBoundary)) {
+                violations.push({
+                    code: 'CHANGE_CONTRACT_SENSITIVE_BOUNDARY_BREACH',
+                    message: `Sensitive boundary changed outside approved intent scope: ${path}`,
+                    file: path,
+                    expected: [...expectedSensitiveBoundaries].join(', '),
+                    actual: sensitiveBoundary,
+                });
+                continue;
+            }
             violations.push({
                 code: 'CHANGE_CONTRACT_UNEXPECTED_FILE',
                 message: `File changed outside change contract: ${path}`,
@@ -684,6 +830,10 @@ function evaluateChangeContract(contract, input) {
         violations = violations.filter((item) => item.code !== 'CHANGE_CONTRACT_MISSING_EXPECTED_SYMBOL');
     }
     const outOfContractFiles = violations.filter((violation) => violation.code === 'CHANGE_CONTRACT_UNEXPECTED_FILE').length;
+    const serviceBoundaryBreaches = violations.filter((violation) => violation.code === 'CHANGE_CONTRACT_SERVICE_BOUNDARY_BREACH').length;
+    const infraBoundaryBreaches = violations.filter((violation) => violation.code === 'CHANGE_CONTRACT_INFRA_BOUNDARY_BREACH').length;
+    const dependencyBoundaryBreaches = violations.filter((violation) => violation.code === 'CHANGE_CONTRACT_DEPENDENCY_BOUNDARY_BREACH').length;
+    const sensitiveBoundaryBreaches = violations.filter((violation) => violation.code === 'CHANGE_CONTRACT_SENSITIVE_BOUNDARY_BREACH').length;
     const missingExpectedFiles = violations.filter((violation) => violation.code === 'CHANGE_CONTRACT_MISSING_EXPECTED_FILE').length;
     const blockedFilesTouched = violations.filter((violation) => violation.code === 'CHANGE_CONTRACT_BLOCKED_FILE_TOUCHED').length;
     const actionMismatches = violations.filter((violation) => violation.code === 'CHANGE_CONTRACT_ACTION_MISMATCH').length;
@@ -700,6 +850,10 @@ function evaluateChangeContract(contract, input) {
             missingExpectedFiles,
             blockedFilesTouched,
             actionMismatches,
+            serviceBoundaryBreaches,
+            infraBoundaryBreaches,
+            dependencyBoundaryBreaches,
+            sensitiveBoundaryBreaches,
             expectedSymbols: expectedSymbols.length,
             changedSymbols: changedSymbols.length,
             missingExpectedSymbols,
@@ -726,6 +880,11 @@ function formatViolationItem(violation) {
         case 'CHANGE_CONTRACT_MISSING_EXPECTED_FILE':
         case 'CHANGE_CONTRACT_BLOCKED_FILE_TOUCHED':
             return violation.file || violation.message;
+        case 'CHANGE_CONTRACT_SERVICE_BOUNDARY_BREACH':
+        case 'CHANGE_CONTRACT_INFRA_BOUNDARY_BREACH':
+        case 'CHANGE_CONTRACT_DEPENDENCY_BOUNDARY_BREACH':
+        case 'CHANGE_CONTRACT_SENSITIVE_BOUNDARY_BREACH':
+            return `${violation.file || 'unknown_file'}${violation.expected || violation.actual ? ` (expected ${violation.expected || 'unknown'}, actual ${violation.actual || 'unknown'})` : ''}`;
         case 'CHANGE_CONTRACT_ACTION_MISMATCH':
             return `${violation.file || 'unknown_file'} (expected ${violation.expected || 'unknown'}, actual ${violation.actual || 'unknown'})`;
         case 'CHANGE_CONTRACT_MISSING_EXPECTED_SYMBOL':
@@ -767,6 +926,16 @@ function groupChangeContractViolations(violations) {
                 key = 'out_of_scope_changes';
                 title = 'Out-of-scope changes';
                 break;
+            case 'CHANGE_CONTRACT_SERVICE_BOUNDARY_BREACH':
+            case 'CHANGE_CONTRACT_INFRA_BOUNDARY_BREACH':
+            case 'CHANGE_CONTRACT_SENSITIVE_BOUNDARY_BREACH':
+                key = 'architectural_boundary_breaches';
+                title = 'Architectural boundary breaches';
+                break;
+            case 'CHANGE_CONTRACT_DEPENDENCY_BOUNDARY_BREACH':
+                key = 'dependency_boundary_breaches';
+                title = 'Dependency boundary breaches';
+                break;
             case 'CHANGE_CONTRACT_MISSING_EXPECTED_FILE':
                 key = 'missing_expected_files';
                 title = 'Missing expected files';
@@ -807,6 +976,8 @@ function groupChangeContractViolations(violations) {
         group.items.push(formatViolationItem(violation));
     }
     const order = [
+        'architectural_boundary_breaches',
+        'dependency_boundary_breaches',
         'out_of_scope_changes',
         'missing_expected_files',
         'blocked_files_touched',
@@ -827,6 +998,10 @@ function groupChangeContractViolations(violations) {
 }
 function explainImpactByGroupKey(key) {
     switch (key) {
+        case 'architectural_boundary_breaches':
+            return 'Changes crossed an architectural boundary that was not part of the approved implementation scope.';
+        case 'dependency_boundary_breaches':
+            return 'Dependency or package-surface drift was introduced outside approved scope and can widen rollout risk quickly.';
         case 'out_of_scope_changes':
             return 'Changes escaped intended scope and may introduce architectural drift or hidden side effects.';
         case 'missing_expected_files':

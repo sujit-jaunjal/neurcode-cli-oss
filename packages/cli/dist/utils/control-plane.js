@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.readControlPlaneState = readControlPlaneState;
 exports.previewControlPlaneUpdate = previewControlPlaneUpdate;
 exports.applyControlPlaneUpdate = applyControlPlaneUpdate;
+exports.captureControlPlaneSnapshot = captureControlPlaneSnapshot;
 exports.readControlPlaneSnapshotHistory = readControlPlaneSnapshotHistory;
 const crypto_1 = require("crypto");
 const fs_1 = require("fs");
@@ -11,6 +12,7 @@ const policy_governance_1 = require("./policy-governance");
 const secret_masking_1 = require("./secret-masking");
 const execution_bus_1 = require("./execution-bus");
 const runtime_events_1 = require("./runtime-events");
+const artifact_io_1 = require("./artifact-io");
 const CONTROL_PLANE_SCHEMA = 'neurcode.control-plane.v1';
 const CONTROL_PLANE_SNAPSHOT_SCHEMA = 'neurcode.control-plane.snapshot.v1';
 const RUNTIME_SCHEMA = 'neurcode.control-plane.runtime.v1';
@@ -443,9 +445,9 @@ function readState(cwd) {
     };
 }
 function writeConfigFile(pathValue, payload) {
-    (0, fs_1.writeFileSync)(pathValue, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    (0, artifact_io_1.atomicWriteJsonFileSync)(pathValue, payload);
 }
-function writeSnapshot(cwd, actor, source, reason, before, after, impact) {
+function writeSnapshot(cwd, actor, source, reason, before, after, impact, options) {
     const paths = toPaths(cwd);
     const createdAt = nowIso();
     const digest = (0, crypto_1.createHash)('sha256')
@@ -478,12 +480,14 @@ function writeSnapshot(cwd, actor, source, reason, before, after, impact) {
         actor,
         source,
         reason,
+        ...(options?.captureKind ? { captureKind: options.captureKind } : {}),
+        ...(options?.lineage ? { lineage: sanitizeForSnapshot(options.lineage) } : {}),
         impact,
         beforeHash: hashPayload(beforeState),
         afterHash: hashPayload(afterState),
         state: sanitizeForSnapshot(afterState),
     };
-    (0, fs_1.writeFileSync)(snapshotPath, `${JSON.stringify(record, null, 2)}\n`, 'utf-8');
+    (0, artifact_io_1.atomicWriteJsonFileSync)(snapshotPath, record);
     pruneSnapshots(paths, parseSnapshotRetention());
     return { snapshotPath, snapshotId };
 }
@@ -586,7 +590,9 @@ function applyControlPlaneUpdate(patch, options) {
     const impact = buildImpact(previous, current, patch);
     persistState(projectRoot, current, patch);
     const persisted = readState(projectRoot);
-    const snapshot = writeSnapshot(projectRoot, actor, source, reason, previous, persisted, impact);
+    const snapshot = writeSnapshot(projectRoot, actor, source, reason, previous, persisted, impact, {
+        captureKind: 'mutation',
+    });
     const syntheticExecution = (0, execution_bus_1.recordSyntheticExecution)({
         cwd: projectRoot,
         type: 'policy-sync',
@@ -654,6 +660,27 @@ function applyControlPlaneUpdate(patch, options) {
         snapshotId: snapshot.snapshotId,
         executionId: syntheticExecution.id,
     };
+}
+function captureControlPlaneSnapshot(options) {
+    const projectRoot = (0, path_1.resolve)(options?.cwd || process.cwd());
+    const actor = options?.actor && options.actor.trim().length > 0 ? options.actor.trim() : 'verify-attestor';
+    const source = options?.source || 'unknown';
+    const reason = options?.reason && options.reason.trim().length > 0
+        ? (0, secret_masking_1.maskSecretsInText)(options.reason.trim()).masked
+        : 'Verify replay custody attestation';
+    const current = readState(projectRoot);
+    const impact = {
+        schemaVersion: 'neurcode.control-plane.impact.v1',
+        generatedAt: nowIso(),
+        riskLevel: 'low',
+        changedSections: [],
+        changedKeys: [],
+        items: [],
+    };
+    return writeSnapshot(projectRoot, actor, source, reason, current, current, impact, {
+        captureKind: 'attestation',
+        lineage: options?.lineage,
+    });
 }
 function readControlPlaneSnapshotHistory(cwd = process.cwd(), limit = 25) {
     const projectRoot = (0, path_1.resolve)(cwd);

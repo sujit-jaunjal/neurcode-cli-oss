@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolveLocalPlanPath = resolveLocalPlanPath;
 exports.ensureLocalPlan = ensureLocalPlan;
 exports.addExpectedFilesToLocalPlan = addExpectedFilesToLocalPlan;
+exports.replaceExpectedFilesInLocalPlan = replaceExpectedFilesInLocalPlan;
 exports.initializeLocalPlanFromIntent = initializeLocalPlanFromIntent;
 const fs_1 = require("fs");
 const path_1 = require("path");
@@ -164,6 +165,28 @@ function addExpectedFilesToLocalPlan(projectRoot, files) {
     return {
         path: plan.path,
         addedFiles,
+        expectedFiles: nextPlan.expectedFiles,
+        intent: nextPlan.intent,
+        constraints: nextPlan.constraints,
+        createdAt: nextPlan.createdAt,
+        lastUpdated: nextPlan.lastUpdated,
+    };
+}
+function replaceExpectedFilesInLocalPlan(projectRoot, files) {
+    const plan = ensureLocalPlan(projectRoot);
+    const nextExpectedFiles = dedupePaths(files);
+    const nextLastUpdated = nowIso();
+    const nextPlan = {
+        intent: plan.intent,
+        expectedFiles: nextExpectedFiles,
+        constraints: plan.constraints,
+        createdAt: plan.createdAt,
+        lastUpdated: nextLastUpdated,
+    };
+    writeLocalPlan(plan.path, nextPlan);
+    return {
+        path: plan.path,
+        addedFiles: nextExpectedFiles,
         expectedFiles: nextPlan.expectedFiles,
         intent: nextPlan.intent,
         constraints: nextPlan.constraints,

@@ -8,6 +8,7 @@ exports.getRuntimeEventsFilePath = getRuntimeEventsFilePath;
 const crypto_1 = require("crypto");
 const fs_1 = require("fs");
 const path_1 = require("path");
+const artifact_io_1 = require("./artifact-io");
 const RUNTIME_EVENT_SCHEMA = 'neurcode.runtime-event.v1';
 const DEFAULT_EVENT_RETENTION = 5000;
 const MAX_QUERY_LIMIT = 500;
@@ -53,8 +54,9 @@ function parseRetention(cwd) {
 function toRuntimeEventPaths(cwd) {
     const rootDir = (0, path_1.resolve)(cwd, '.neurcode/runtime-events');
     const eventsFile = (0, path_1.join)(rootDir, 'events.jsonl');
+    const eventsLockFile = (0, path_1.join)(rootDir, '.events.lock');
     (0, fs_1.mkdirSync)(rootDir, { recursive: true });
-    return { rootDir, eventsFile };
+    return { rootDir, eventsFile, eventsLockFile };
 }
 function toEventId(input) {
     const digest = (0, crypto_1.createHash)('sha256')
@@ -105,15 +107,33 @@ function parseEvent(line) {
     }
 }
 function appendEventLine(eventsFile, event) {
-    const line = `${JSON.stringify(event)}\n`;
-    (0, fs_1.writeFileSync)(eventsFile, line, { encoding: 'utf8', flag: 'a' });
+    (0, artifact_io_1.appendJsonLineSync)(eventsFile, event, { fsync: false });
 }
 function pruneRuntimeEvents(eventsFile, keepLatest) {
     const lines = readRawLines(eventsFile);
     if (lines.length <= keepLatest)
         return;
     const kept = lines.slice(lines.length - keepLatest).join('\n');
-    (0, fs_1.writeFileSync)(eventsFile, `${kept}\n`, { encoding: 'utf8' });
+    (0, artifact_io_1.atomicWriteUtf8FileSync)(eventsFile, `${kept}\n`, { fsync: false });
+}
+function persistRuntimeEvent(paths, event, keepLatest) {
+    try {
+        (0, artifact_io_1.withFileLockSync)(paths.eventsLockFile, () => {
+            appendEventLine(paths.eventsFile, event);
+            pruneRuntimeEvents(paths.eventsFile, keepLatest);
+        }, { timeoutMs: 1500, staleMs: 30000, retryMs: 25 });
+    }
+    catch {
+        // Event persistence is diagnostic rather than the custody source of truth.
+        // If the lock is saturated, append without pruning so we avoid losing the
+        // event behind a prune/overwrite race.
+        try {
+            appendEventLine(paths.eventsFile, event);
+        }
+        catch {
+            // Runtime event persistence must not alter deterministic execution.
+        }
+    }
 }
 function matchesQuery(event, query) {
     if (query.executionId && event.executionId !== query.executionId)
@@ -154,8 +174,7 @@ function emitRuntimeEvent(cwd = process.cwd(), input) {
         severity: input.severity,
         payload,
     };
-    appendEventLine(paths.eventsFile, event);
-    pruneRuntimeEvents(paths.eventsFile, parseRetention(resolvedCwd));
+    persistRuntimeEvent(paths, event, parseRetention(resolvedCwd));
     for (const listener of listeners) {
         try {
             listener(event);

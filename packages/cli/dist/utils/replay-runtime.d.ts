@@ -82,6 +82,8 @@ interface ReplayEvidenceDigest {
     commitSha: string | null;
     governanceFindingsCount: number;
     governanceDeterminismCounts: Record<string, number>;
+    intentGovernance: Record<string, unknown> | null;
+    intentGovernanceFindingCount: number;
     semanticTruncationCount: number;
     federationTruncationCount: number;
     graphTruncationCount: number;

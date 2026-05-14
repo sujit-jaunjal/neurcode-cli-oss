@@ -146,6 +146,14 @@ export interface ControlPlaneUpdateResult {
     snapshotId: string | null;
     executionId: string | null;
 }
+export interface ControlPlaneSnapshotLineage {
+    provenanceRunId?: string | null;
+    replayChecksum?: string | null;
+    verificationSource?: string | null;
+    planId?: string | null;
+    policyLockFingerprint?: string | null;
+    compiledPolicyFingerprint?: string | null;
+}
 export declare function readControlPlaneState(cwd?: string): ControlPlaneState;
 export declare function previewControlPlaneUpdate(patch: ControlPlaneUpdatePatch, cwd?: string): {
     previous: ControlPlaneState;
@@ -158,6 +166,16 @@ export declare function applyControlPlaneUpdate(patch: ControlPlaneUpdatePatch, 
     source?: ExecutionSource;
     reason?: string;
 }): ControlPlaneUpdateResult;
+export declare function captureControlPlaneSnapshot(options?: {
+    cwd?: string;
+    actor?: string;
+    source?: ExecutionSource;
+    reason?: string;
+    lineage?: ControlPlaneSnapshotLineage;
+}): {
+    snapshotPath: string;
+    snapshotId: string;
+};
 export declare function readControlPlaneSnapshotHistory(cwd?: string, limit?: number): Array<{
     snapshotId: string;
     createdAt: string;

@@ -141,12 +141,12 @@ async function quickstartCommand(options = {}) {
     }
     // 4. Explain the verify flow
     printBanner('How Neurcode Verify Works');
-    printStep(1, 'Set intent', 'Run `neurcode plan "I am adding X feature to Y service"` to declare your change intent.');
+    printStep(1, 'Set intent', 'Run `neurcode start "I am adding X feature to Y service"` to declare governance intent and expected scope.');
     printStep(2, 'Write code', 'Use your AI tools (Cursor, Claude Code, Codex) to generate or write code.');
-    printStep(3, 'Run verify', 'Run `neurcode verify` to check your code against the plan and structural rules.');
+    printStep(3, 'Run verify', 'Run `neurcode verify --evidence` to check your code against intent, policies, and structural rules.');
     printStep(4, 'Review findings', 'BLOCKING findings must be resolved. ADVISORY findings are informational.\n' +
         '  Structural rules (SR001–SR010) are deterministic — same code = same result, always.');
-    printStep(5, 'Iterate', 'Fix blocking findings, re-run verify. When passing, the PR is governance-cleared.');
+    printStep(5, 'Iterate', 'Export remediation context if needed, apply external edits, then re-run verify. When passing, the PR is governance-cleared.');
     // 5. Explain local-only mode
     printBanner('Local-Only Mode (No Network Required)');
     console.log(chalk_1.default.dim('\n  `neurcode verify --local-only` runs deterministic structural analysis'));

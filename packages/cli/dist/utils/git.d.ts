@@ -20,6 +20,7 @@ export declare function execGitCommand(command: string, options?: {
     stdio?: any;
     cwd?: string;
 }): string;
+export declare function gitRefExists(ref: string, cwd?: string): boolean;
 export declare function detectCurrentGitBranch(cwd?: string): string | null;
 export declare function detectDefaultBaseRef(cwd?: string): string | null;
 export declare function resolveDefaultDiffContext(cwd?: string): DefaultDiffContext;

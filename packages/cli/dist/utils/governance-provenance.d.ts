@@ -74,7 +74,7 @@ export declare function buildProvenanceRecord(input: {
  * Updates the index file atomically.
  * Index retains last 1000 records (trims oldest first).
  */
-export declare function saveProvenanceRecord(repoRoot: string, record: ProvenanceRecord): void;
+export declare function saveProvenanceRecord(repoRoot: string, record: ProvenanceRecord): boolean;
 /**
  * Load the provenance index.
  */

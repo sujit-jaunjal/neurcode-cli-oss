@@ -39,14 +39,15 @@ exports.startDaemon = startDaemon;
 const http = __importStar(require("node:http"));
 const path = __importStar(require("node:path"));
 const fs = __importStar(require("node:fs"));
-const node_crypto_1 = require("node:crypto");
-const node_child_process_1 = require("node:child_process");
-const patch_engine_1 = require("../patch-engine");
-const diff_1 = require("../patch-engine/diff");
 const execution_bus_1 = require("../utils/execution-bus");
+const execution_actions_1 = require("../utils/execution-actions");
 const runtime_events_1 = require("../utils/runtime-events");
 const control_plane_1 = require("../utils/control-plane");
 const workspace_runtime_1 = require("../utils/workspace-runtime");
+const routes_1 = require("./routes");
+const shaping_1 = require("./shaping");
+const execution_1 = require("./compatibility/execution");
+const mutation_1 = require("./compatibility/mutation");
 const workspace_1 = require("../workspace");
 const semantic_1 = require("../semantic");
 const intent_engine_1 = require("../intent-engine");
@@ -73,6 +74,16 @@ const daemonOpsMetrics = {
     requestsTotal: 0,
     requestsByMethod: {},
     requestsByRoute: {},
+    requestsBySubsystem: {
+        'canonical-governance': 0,
+        'compatibility-mutation': 0,
+        'runtime-execution': 0,
+        'workspace-orchestration': 0,
+        'replay-evidence': 0,
+        'operational-status': 0,
+        'docs-transport': 0,
+        unknown: 0,
+    },
     failuresTotal: 0,
     retriableFailuresTotal: 0,
     stalePreviewRejections: 0,
@@ -84,18 +95,15 @@ const daemonOpsMetrics = {
     rollbackRejected: 0,
     recentErrors: [],
 };
-function normalizeRoutePath(url) {
-    const pathOnly = url.split('?')[0]?.trim() || '/';
-    return pathOnly.startsWith('/') ? pathOnly : `/${pathOnly}`;
-}
 function incrementMetricCounter(record, key) {
     record[key] = (record[key] || 0) + 1;
 }
 function recordDaemonRequest(url, method) {
     daemonOpsMetrics.requestsTotal += 1;
     incrementMetricCounter(daemonOpsMetrics.requestsByMethod, method.toUpperCase());
-    const route = normalizeRoutePath(url);
+    const route = (0, routes_1.normalizeRoutePath)(url);
     incrementMetricCounter(daemonOpsMetrics.requestsByRoute, route);
+    incrementMetricCounter(daemonOpsMetrics.requestsBySubsystem, (0, routes_1.classifyDaemonRoute)(method, route));
     // Keep route cardinality bounded for long-lived daemon sessions.
     const routeKeys = Object.keys(daemonOpsMetrics.requestsByRoute);
     if (routeKeys.length > DAEMON_MAX_ROUTE_SAMPLE) {
@@ -191,6 +199,7 @@ function buildDaemonOperationalSummary(cwd) {
             failures: daemonOpsMetrics.failuresTotal,
             retriableFailures: daemonOpsMetrics.retriableFailuresTotal,
             byMethod: daemonOpsMetrics.requestsByMethod,
+            bySubsystem: daemonOpsMetrics.requestsBySubsystem,
             topRoutes: Object.entries(daemonOpsMetrics.requestsByRoute)
                 .sort((left, right) => right[1] - left[1])
                 .slice(0, 12)
@@ -312,408 +321,6 @@ function addCorsHeaders(res, req) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', [...allowedHeaders].join(', '));
     res.setHeader('Access-Control-Max-Age', '86400');
-}
-function resolveGitRoot(cwd) {
-    const result = (0, node_child_process_1.spawnSync)('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    if (result.status !== 0)
-        return null;
-    const value = typeof result.stdout === 'string' ? result.stdout.trim() : '';
-    return value.length > 0 ? value : null;
-}
-function captureGitDirtyPaths(cwd) {
-    const gitRoot = resolveGitRoot(cwd);
-    if (!gitRoot)
-        return null;
-    const statusResult = (0, node_child_process_1.spawnSync)('git', ['-C', cwd, 'status', '--porcelain=1', '-z', '--untracked-files=all'], {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    if (statusResult.status !== 0 || typeof statusResult.stdout !== 'string')
-        return null;
-    const tokens = statusResult.stdout.split('\0').filter((entry) => entry.length > 0);
-    const dirty = new Set();
-    for (let index = 0; index < tokens.length; index += 1) {
-        const token = tokens[index];
-        if (token.length < 4)
-            continue;
-        const status = token.slice(0, 2);
-        const filePath = token.slice(3).trim();
-        if (filePath.length > 0) {
-            dirty.add(path.resolve(gitRoot, filePath));
-        }
-        const renamedOrCopied = status.includes('R') || status.includes('C');
-        if (renamedOrCopied && index + 1 < tokens.length) {
-            index += 1;
-        }
-    }
-    return dirty;
-}
-function hashFileForDiff(absPath) {
-    try {
-        const stat = fs.statSync(absPath);
-        if (!stat.isFile())
-            return '<non-file>';
-        const content = fs.readFileSync(absPath);
-        return (0, node_crypto_1.createHash)('sha256').update(content).digest('hex');
-    }
-    catch {
-        return '<missing>';
-    }
-}
-function captureDirtyFileFingerprints(cwd) {
-    const dirtyPaths = captureGitDirtyPaths(cwd);
-    if (!dirtyPaths)
-        return null;
-    const map = new Map();
-    for (const dirtyPath of dirtyPaths) {
-        map.set(dirtyPath, hashFileForDiff(dirtyPath));
-    }
-    return map;
-}
-function isAllowedPatchSideEffect(absPath, targetAbsPath, cwd) {
-    if (absPath === targetAbsPath)
-        return true;
-    const rel = path.relative(cwd, absPath);
-    if (!rel || rel.startsWith('..'))
-        return false;
-    if (rel === 'neurcode.policy.compiled.json')
-        return true;
-    return rel === '.neurcode' || rel.startsWith(`.neurcode${path.sep}`);
-}
-function collectUnexpectedPatchSideEffects(before, after, targetAbsPath, cwd) {
-    if (!before || !after)
-        return [];
-    const added = [...after].filter((entry) => !before.has(entry));
-    const unexpected = added
-        .filter((entry) => !isAllowedPatchSideEffect(entry, targetAbsPath, cwd))
-        .map((entry) => path.relative(cwd, entry).replace(/\\/g, '/'))
-        .filter((entry) => entry.length > 0)
-        .sort();
-    return unexpected;
-}
-function collectUnexpectedPatchMutations(before, after, targetAbsPath, cwd) {
-    if (!before || !after)
-        return [];
-    const keys = new Set([...before.keys(), ...after.keys()]);
-    const unexpected = [];
-    for (const key of keys) {
-        const beforeHash = before.get(key) ?? '<missing>';
-        const afterHash = after.get(key) ?? '<missing>';
-        if (beforeHash === afterHash)
-            continue;
-        if (isAllowedPatchSideEffect(key, targetAbsPath, cwd))
-            continue;
-        const rel = path.relative(cwd, key).replace(/\\/g, '/');
-        if (rel.length > 0 && !rel.startsWith('..')) {
-            unexpected.push(rel);
-        }
-    }
-    return unexpected.sort();
-}
-function patternDescriptor(kind, confidence, manualReviewRequired) {
-    const labelByKind = {
-        missing_validation: 'API input validation guard',
-        missing_timeout_handling: 'Outbound request timeout guard',
-        unsafe_fetch_without_retries: 'Outbound request retry guard',
-        missing_idempotency_keys: 'Mutation idempotency-key guard',
-        unsafe_file_uploads: 'Upload MIME/size validation guard',
-        missing_auth_middleware: 'Route authentication middleware',
-        missing_rate_limiting: 'Route rate limiting middleware',
-        missing_token_expiry: 'JWT expiry enforcement',
-        unsafe_inner_html_usage: 'Unsafe DOM sink replacement',
-        unsafe_sensitive_logging: 'Sensitive log redaction',
-        db_in_ui: 'Service-layer boundary placeholder',
-        todo_fixme: 'TODO/FIXME debt marker removal',
-    };
-    const confidenceModel = confidence === 'high'
-        ? 'high'
-        : confidence === 'medium'
-            ? 'medium'
-            : 'low';
-    return {
-        kind,
-        label: labelByKind[kind] || kind,
-        deterministic: true,
-        confidenceModel,
-        advisoryOnly: confidenceModel === 'low',
-        manualReviewRequired,
-    };
-}
-function summarizeDiff(diff) {
-    let addedLines = 0;
-    let removedLines = 0;
-    for (const line of diff.split('\n')) {
-        if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@'))
-            continue;
-        if (line.startsWith('+'))
-            addedLines += 1;
-        if (line.startsWith('-'))
-            removedLines += 1;
-    }
-    const changedLines = addedLines + removedLines;
-    return {
-        addedLines,
-        removedLines,
-        changedLines,
-        summary: `${changedLines} changed line(s): +${addedLines} / -${removedLines}`,
-    };
-}
-function extractRequestInputUsage(content) {
-    const accessMatch = content.match(/\b(req|request)\.(body|params|query)\b/);
-    if (!accessMatch)
-        return null;
-    const receiver = accessMatch[1];
-    const field = accessMatch[2];
-    const fieldRegex = new RegExp(`\\b${receiver}\\.${field}\\.([A-Za-z_$][\\w$]*)\\b`, 'g');
-    const fields = [];
-    const seen = new Set();
-    let match = fieldRegex.exec(content);
-    while (match) {
-        const fieldName = match[1];
-        if (!seen.has(fieldName)) {
-            seen.add(fieldName);
-            fields.push(fieldName);
-        }
-        match = fieldRegex.exec(content);
-    }
-    return { receiver, field, fields };
-}
-function buildPatchPreviewReasoning(patternKind, targetPath, beforeContent) {
-    if (!patternKind)
-        return null;
-    if (patternKind === 'missing_validation') {
-        const usage = extractRequestInputUsage(beforeContent);
-        if (!usage) {
-            return {
-                summary: 'Adds deterministic API input validation guard.',
-                why: `This file accesses request input without a validation boundary check.`,
-                risk: 'Malformed input can cause runtime errors or unsafe processing paths.',
-                expectedOutcome: 'Invalid requests fail fast and valid requests continue unchanged.',
-            };
-        }
-        const noun = usage.field === 'body' ? 'request body' : usage.field === 'params' ? 'route params' : 'query params';
-        const fieldSummary = usage.fields.length > 0 ? usage.fields.join(', ') : 'no explicit property access detected';
-        return {
-            summary: `Adds deterministic validation before reading ${usage.receiver}.${usage.field}.`,
-            why: `${targetPath} reads ${noun} fields (${fieldSummary}) before validation.`,
-            risk: `Without boundary validation, malformed ${noun} may propagate into handler logic.`,
-            expectedOutcome: `Invalid ${noun} returns HTTP 400 early; valid requests keep existing behavior.`,
-            fields: usage.fields,
-        };
-    }
-    if (patternKind === 'db_in_ui') {
-        return {
-            summary: 'Suggests moving direct DB access behind a service boundary.',
-            why: `${targetPath} appears to perform direct data access in a non-service layer.`,
-            risk: 'Layering violations increase coupling and make behavior harder to govern.',
-            expectedOutcome: 'Patch inserts a deterministic placeholder to redirect to service-layer logic.',
-        };
-    }
-    if (patternKind === 'missing_auth_middleware') {
-        return {
-            summary: 'Adds deterministic authentication middleware to the route definition.',
-            why: `${targetPath} appears to expose a request handler without an auth middleware guard.`,
-            risk: 'Unauthenticated routes can expose sensitive behavior to unauthorized clients.',
-            expectedOutcome: 'Route execution is gated by requireAuth before handler logic runs.',
-        };
-    }
-    if (patternKind === 'missing_rate_limiting') {
-        return {
-            summary: 'Adds deterministic rate-limit middleware to the route definition.',
-            why: `${targetPath} appears to expose a request handler without rate limiting controls.`,
-            risk: 'Unbounded request rates can increase abuse, cost, and availability risks.',
-            expectedOutcome: 'Route applies rateLimitGuard before handler execution.',
-        };
-    }
-    if (patternKind === 'missing_timeout_handling') {
-        return {
-            summary: 'Adds deterministic timeout guard to outbound fetch call.',
-            why: `${targetPath} issues a fetch request without timeout protection.`,
-            risk: 'Unbounded network calls can hang request execution and degrade reliability under upstream latency.',
-            expectedOutcome: 'Fetch call aborts after timeout and fails fast instead of hanging.',
-        };
-    }
-    if (patternKind === 'unsafe_fetch_without_retries') {
-        return {
-            summary: 'Wraps outbound fetch call in deterministic retry guard.',
-            why: `${targetPath} makes outbound network calls without transient failure retry handling.`,
-            risk: 'Single transient failures can become user-facing errors and increase instability.',
-            expectedOutcome: 'Transient upstream failures retry deterministically before failing.',
-        };
-    }
-    if (patternKind === 'missing_idempotency_keys') {
-        return {
-            summary: 'Adds deterministic idempotency-key guard for side-effecting requests.',
-            why: `${targetPath} appears to process payment/order-like mutations without idempotency key enforcement.`,
-            risk: 'Duplicate requests can cause repeated side effects (double charges/orders).',
-            expectedOutcome: 'Requests missing idempotency key fail early with explicit error.',
-        };
-    }
-    if (patternKind === 'unsafe_file_uploads') {
-        return {
-            summary: 'Adds deterministic MIME and size guards for uploaded files.',
-            why: `${targetPath} appears to process uploaded files without boundary checks.`,
-            risk: 'Unbounded or unsafe uploads increase security and stability risk.',
-            expectedOutcome: 'Invalid upload payloads are rejected before processing.',
-        };
-    }
-    if (patternKind === 'missing_token_expiry') {
-        return {
-            summary: 'Adds deterministic token expiry to JWT signing call.',
-            why: `${targetPath} signs JWT tokens without an expiresIn option.`,
-            risk: 'Long-lived tokens increase replay and account-compromise blast radius.',
-            expectedOutcome: 'Tokens gain explicit expiry to enforce credential rotation windows.',
-        };
-    }
-    if (patternKind === 'unsafe_inner_html_usage') {
-        return {
-            summary: 'Replaces unsafe innerHTML assignment with textContent.',
-            why: `${targetPath} writes HTML content directly into the DOM using innerHTML.`,
-            risk: 'innerHTML assignments can expose XSS vectors when input is not trusted.',
-            expectedOutcome: 'DOM assignment becomes text-only rendering with reduced injection risk.',
-        };
-    }
-    if (patternKind === 'unsafe_sensitive_logging') {
-        return {
-            summary: 'Removes deterministic sensitive logging line.',
-            why: `${targetPath} appears to log secret-bearing fields (token/authorization/password).`,
-            risk: 'Sensitive log content can leak credentials to observability or audit sinks.',
-            expectedOutcome: 'Sensitive logging path is replaced with a neutral warning placeholder.',
-        };
-    }
-    if (patternKind === 'todo_fixme') {
-        return {
-            summary: 'Removes TODO/FIXME marker matched by policy.',
-            why: `${targetPath} includes TODO/FIXME comments tracked as governance debt.`,
-            risk: 'Unresolved TODO markers can hide missing implementation or review debt.',
-            expectedOutcome: 'Patch removes the marker; implementation must still be verified separately.',
-        };
-    }
-    return null;
-}
-function isExecutionActionType(value) {
-    if (typeof value !== 'string')
-        return false;
-    return (value === 'verify'
-        || value === 'fix'
-        || value === 'patch'
-        || value === 'apply-safe'
-        || value === 'reverify'
-        || value === 'policy-sync'
-        || value === 'intent-update');
-}
-function asObjectRecord(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value))
-        return null;
-    return value;
-}
-function asObjectArray(value) {
-    if (!Array.isArray(value))
-        return [];
-    return value
-        .map((entry) => asObjectRecord(entry))
-        .filter((entry) => entry !== null);
-}
-function toLegacyViolation(entry, fallbackSeverity) {
-    const file = typeof entry.file === 'string' && entry.file.trim().length > 0
-        ? entry.file.trim()
-        : '';
-    const message = typeof entry.message === 'string' && entry.message.trim().length > 0
-        ? entry.message.trim()
-        : '';
-    if (!file || !message)
-        return null;
-    const severity = typeof entry.severity === 'string' && entry.severity.trim().length > 0
-        ? entry.severity.trim()
-        : fallbackSeverity;
-    const rule = typeof entry.rule === 'string' && entry.rule.trim().length > 0
-        ? entry.rule.trim()
-        : typeof entry.policy === 'string' && entry.policy.trim().length > 0
-            ? entry.policy.trim()
-            : '';
-    return { file, message, severity, rule };
-}
-function normalizeVerifyPayloadForLegacyClients(payload) {
-    if (!payload)
-        return null;
-    const existingViolations = asObjectArray(payload.violations)
-        .map((entry) => toLegacyViolation(entry, 'warn'))
-        .filter((entry) => entry !== null);
-    const blockingItems = asObjectArray(payload.blockingItems)
-        .map((entry) => toLegacyViolation(entry, 'block'))
-        .filter((entry) => entry !== null);
-    const advisoryItems = asObjectArray(payload.advisoryItems)
-        .map((entry) => toLegacyViolation(entry, 'warn'))
-        .filter((entry) => entry !== null);
-    const warnings = asObjectArray(payload.warnings)
-        .map((entry) => toLegacyViolation(entry, 'warn'))
-        .filter((entry) => entry !== null);
-    const merged = [...existingViolations];
-    const canonicalSeverity = (value) => {
-        const normalized = value.trim().toLowerCase();
-        if (normalized === 'block' || normalized === 'critical' || normalized === 'high')
-            return 'block';
-        if (normalized === 'warn' || normalized === 'warning' || normalized === 'advisory' || normalized === 'medium' || normalized === 'low')
-            return 'warn';
-        return normalized;
-    };
-    const canonicalKey = (entry) => `${entry.file}::${entry.rule}::${entry.message}::${canonicalSeverity(entry.severity)}`;
-    const seen = new Set(merged.map((entry) => canonicalKey(entry)));
-    for (const item of [...blockingItems, ...advisoryItems, ...warnings]) {
-        const key = canonicalKey(item);
-        if (seen.has(key))
-            continue;
-        seen.add(key);
-        merged.push(item);
-    }
-    if (merged.length === 0)
-        return payload;
-    return {
-        ...payload,
-        violations: merged,
-    };
-}
-function normalizeFixPayloadForLegacyClients(payload) {
-    if (!payload)
-        return null;
-    const suggestions = asObjectArray(payload.suggestions);
-    if (suggestions.length === 0)
-        return payload;
-    const deduped = [];
-    const seen = new Set();
-    for (const suggestion of suggestions) {
-        const file = typeof suggestion.file === 'string' ? suggestion.file.trim() : '';
-        const line = typeof suggestion.line === 'number' && Number.isFinite(suggestion.line)
-            ? String(Math.floor(suggestion.line))
-            : '';
-        const message = typeof suggestion.message === 'string' ? suggestion.message.trim() : '';
-        const rule = typeof suggestion.rule === 'string'
-            ? suggestion.rule.trim()
-            : typeof suggestion.policy === 'string'
-                ? suggestion.policy.trim()
-                : '';
-        const confidence = typeof suggestion.confidence === 'string' ? suggestion.confidence.trim().toLowerCase() : '';
-        const patch = asObjectRecord(suggestion.patch);
-        const patchDiff = patch && typeof patch.diff === 'string' ? patch.diff : '';
-        const key = `${file}::${line}::${rule}::${message}::${confidence}::${(0, node_crypto_1.createHash)('sha1').update(patchDiff).digest('hex')}`;
-        if (seen.has(key))
-            continue;
-        seen.add(key);
-        deduped.push(suggestion);
-    }
-    if (deduped.length === suggestions.length)
-        return payload;
-    return {
-        ...payload,
-        suggestions: deduped,
-        _normalization: {
-            ...(asObjectRecord(payload._normalization) || {}),
-            suggestionsDeduped: suggestions.length - deduped.length,
-        },
-    };
 }
 function isLoopback(req) {
     if (ALLOW_NON_LOOPBACK)
@@ -965,418 +572,15 @@ async function handleVerify(req, res) {
         failure(res, run.execution.result?.message || 'verify execution produced no payload');
         return;
     }
-    const normalizedPayload = normalizeVerifyPayloadForLegacyClients(run.primaryPayload ?? null) ?? run.primaryPayload;
+    const normalizedPayload = (0, shaping_1.normalizeVerifyPayloadForLegacyClients)(run.primaryPayload ?? null) ?? run.primaryPayload;
+    const governanceEnvelope = (0, shaping_1.buildGovernanceEnvelope)(run);
     success(res, {
         ...normalizedPayload,
-        _execution: {
-            id: run.execution.id,
-            type: run.execution.type,
-            source: run.execution.source,
-            actor: run.execution.actor,
-            status: run.execution.status,
-            trend: run.execution.verification.diff.trend,
-            evidence: run.execution.evidence.references,
-            durationMs: run.execution.durationMs,
-        },
+        governanceEnvelope,
+        _execution: (0, shaping_1.buildExecutionResponseMeta)(run),
     });
 }
-async function handleFix(req, res) {
-    const run = await (0, execution_bus_1.runExecution)({
-        type: 'fix',
-        source: toSource(req),
-        actor: toActor(req),
-        cwd: process.cwd(),
-        reverify: true,
-    });
-    if (!run.primaryPayload) {
-        failure(res, run.execution.result?.message || 'fix execution produced no payload');
-        return;
-    }
-    const normalizedFixPayload = normalizeFixPayloadForLegacyClients(run.primaryPayload) ?? run.primaryPayload;
-    const normalizedVerifyAfter = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
-    success(res, {
-        ...normalizedFixPayload,
-        verifyAfter: normalizedVerifyAfter ?? null,
-        _execution: {
-            id: run.execution.id,
-            type: run.execution.type,
-            source: run.execution.source,
-            actor: run.execution.actor,
-            status: run.execution.status,
-            trend: run.execution.verification.diff.trend,
-            evidence: run.execution.evidence.references,
-            durationMs: run.execution.durationMs,
-        },
-    });
-}
-async function handleFixApplySafe(req, res) {
-    const run = await (0, execution_bus_1.runExecution)({
-        type: 'apply-safe',
-        source: toSource(req),
-        actor: toActor(req),
-        cwd: process.cwd(),
-        reverify: true,
-    });
-    if (!run.primaryPayload) {
-        failure(res, run.execution.result?.message || 'fix --apply-safe execution produced no payload');
-        return;
-    }
-    const normalizedFixPayload = normalizeFixPayloadForLegacyClients(run.primaryPayload) ?? run.primaryPayload;
-    const normalizedVerifyAfter = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
-    success(res, {
-        ...normalizedFixPayload,
-        verifyAfter: normalizedVerifyAfter ?? null,
-        execution: run.execution,
-    });
-}
-async function handlePatch(req, res) {
-    let body = {};
-    try {
-        body = JSON.parse(await readBody(req));
-    }
-    catch {
-        failure(res, 'Invalid JSON body', 400);
-        return;
-    }
-    const file = body.file;
-    if (!file || typeof file !== 'string' || file.includes('..')) {
-        failure(res, 'Missing or unsafe "file" field', 400);
-        return;
-    }
-    const previewToken = typeof body.previewToken === 'string' && body.previewToken.trim().length > 0
-        ? body.previewToken.trim()
-        : undefined;
-    const cwd = process.cwd();
-    const targetPath = file.trim();
-    const absPath = path.resolve(cwd, targetPath);
-    const beforeDirtyPaths = captureGitDirtyPaths(cwd);
-    const beforeDirtyFingerprints = captureDirtyFileFingerprints(cwd);
-    // Capture file content before patch to detect real change
-    let contentBefore = null;
-    try {
-        contentBefore = fs.readFileSync(absPath, 'utf-8');
-    }
-    catch { /* file may not exist */ }
-    const primaryArgs = ['patch', '--file', targetPath];
-    if (previewToken) {
-        primaryArgs.push('--preview-token', previewToken);
-    }
-    const run = await (0, execution_bus_1.runExecution)({
-        type: 'patch',
-        source: toSource(req),
-        actor: toActor(req),
-        target: targetPath,
-        cwd,
-        reverify: true,
-        primaryArgs,
-    });
-    const patchData = run.primaryPayload ?? {
-        success: false,
-        file: targetPath,
-        message: run.execution.result?.message || 'No applicable patch found',
-    };
-    // Validate that the file actually changed on disk
-    let changed = false;
-    if (patchData.success && contentBefore !== null) {
-        try {
-            const contentAfter = fs.readFileSync(absPath, 'utf-8');
-            changed = contentAfter !== contentBefore;
-        }
-        catch { /* ignore read error */ }
-    }
-    const afterDirtyPaths = captureGitDirtyPaths(cwd);
-    const afterDirtyFingerprints = captureDirtyFileFingerprints(cwd);
-    const sideEffects = collectUnexpectedPatchSideEffects(beforeDirtyPaths, afterDirtyPaths, absPath, cwd);
-    const mutatedSideEffects = collectUnexpectedPatchMutations(beforeDirtyFingerprints, afterDirtyFingerprints, absPath, cwd);
-    const combinedSideEffects = [...new Set([...sideEffects, ...mutatedSideEffects])].sort();
-    const payloadFile = typeof patchData.file === 'string' ? patchData.file : '';
-    const payloadTargetMatch = payloadFile.length > 0
-        ? path.resolve(cwd, payloadFile) === absPath
-        : true;
-    const patchSucceeded = patchData.success === true;
-    const rawPatchStatus = typeof patchData.status === 'string' ? patchData.status : '';
-    const patchStatus = rawPatchStatus === 'filesystem_changed_since_preview'
-        ? 'stale_preview'
-        : !patchSucceeded
-            ? 'rejected'
-            : changed && payloadTargetMatch && combinedSideEffects.length === 0
-                ? 'applied'
-                : changed
-                    ? 'partial'
-                    : 'rejected';
-    const patchMessage = (() => {
-        if (patchStatus === 'applied') {
-            return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
-                ? patchData.message
-                : `${contracts_1.STATUS_TERMS.safePatchApplied}`;
-        }
-        if (patchStatus === 'partial') {
-            if (!payloadTargetMatch) {
-                return `${contracts_1.STATUS_TERMS.patchRejected}: patch target mismatch detected between requested file and daemon payload file.`;
-            }
-            if (combinedSideEffects.length > 0) {
-                return `${contracts_1.STATUS_TERMS.patchRejected}: patch introduced side effects in ${combinedSideEffects.length} additional file(s).`;
-            }
-            return `${contracts_1.STATUS_TERMS.safePatchApplied}. ${contracts_1.STATUS_TERMS.manualReviewRecommended}.`;
-        }
-        if (patchStatus === 'stale_preview') {
-            return `${contracts_1.STATUS_TERMS.filesystemChangedSincePreview}. Regenerate patch preview and retry. ${contracts_1.STATUS_TERMS.retrySafe}.`;
-        }
-        return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
-            ? patchData.message
-            : `${contracts_1.STATUS_TERMS.patchRejected}; no deterministic file-scoped change applied`;
-    })();
-    const reverifyRequired = patchStatus === 'applied' || patchStatus === 'partial';
-    const stateLabel = patchStatus === 'stale_preview'
-        ? contracts_1.STATUS_TERMS.filesystemChangedSincePreview.toLowerCase()
-        : (0, contracts_1.toPatchStateLabel)(patchStatus).toLowerCase();
-    recordPatchOutcome(patchStatus);
-    const normalizedVerifyPayload = normalizeVerifyPayloadForLegacyClients(run.verificationPayload);
-    success(res, {
-        patch: {
-            ...patchData,
-            file: payloadFile || targetPath,
-            success: patchStatus === 'applied',
-            rawSuccess: patchData.success === true,
-            changed,
-            status: patchStatus,
-            targetMatch: payloadTargetMatch,
-            sideEffects: combinedSideEffects,
-            message: patchMessage,
-            reverifyRequired,
-            stateLabel,
-            previewTokenUsed: previewToken ? true : false,
-        },
-        verify: normalizedVerifyPayload ?? null,
-        execution: run.execution,
-    });
-}
-async function handlePatchRollback(req, res) {
-    let body = {};
-    try {
-        body = JSON.parse(await readBody(req));
-    }
-    catch {
-        failure(res, 'Invalid JSON body', 400);
-        return;
-    }
-    const file = body.file;
-    const receiptId = typeof body.receiptId === 'string' ? body.receiptId.trim() : '';
-    if (!file || typeof file !== 'string' || file.includes('..')) {
-        failure(res, 'Missing or unsafe "file" field', 400);
-        return;
-    }
-    if (!receiptId) {
-        failure(res, 'Missing "receiptId" field', 400);
-        return;
-    }
-    const cwd = process.cwd();
-    const targetPath = file.trim();
-    const absPath = path.resolve(cwd, targetPath);
-    const beforeDirtyPaths = captureGitDirtyPaths(cwd);
-    const beforeDirtyFingerprints = captureDirtyFileFingerprints(cwd);
-    let contentBefore = null;
-    try {
-        contentBefore = fs.readFileSync(absPath, 'utf-8');
-    }
-    catch { /* file may not exist */ }
-    const run = await (0, execution_bus_1.runExecution)({
-        type: 'patch',
-        source: toSource(req),
-        actor: toActor(req),
-        target: targetPath,
-        cwd,
-        reverify: true,
-        primaryArgs: ['patch', '--file', targetPath, '--rollback-receipt', receiptId, '--json'],
-    });
-    const patchData = run.primaryPayload ?? {
-        success: false,
-        file: targetPath,
-        message: run.execution.result?.message || 'No rollback receipt could be applied',
-    };
-    let changed = false;
-    if (patchData.success && contentBefore !== null) {
-        try {
-            const contentAfter = fs.readFileSync(absPath, 'utf-8');
-            changed = contentAfter !== contentBefore;
-        }
-        catch {
-            // ignore read error
-        }
-    }
-    const afterDirtyPaths = captureGitDirtyPaths(cwd);
-    const afterDirtyFingerprints = captureDirtyFileFingerprints(cwd);
-    const sideEffects = collectUnexpectedPatchSideEffects(beforeDirtyPaths, afterDirtyPaths, absPath, cwd);
-    const mutatedSideEffects = collectUnexpectedPatchMutations(beforeDirtyFingerprints, afterDirtyFingerprints, absPath, cwd);
-    const combinedSideEffects = [...new Set([...sideEffects, ...mutatedSideEffects])].sort();
-    const payloadFile = typeof patchData.file === 'string' ? patchData.file : '';
-    const payloadTargetMatch = payloadFile.length > 0
-        ? path.resolve(cwd, payloadFile) === absPath
-        : true;
-    const rawStatus = typeof patchData.status === 'string' ? patchData.status : '';
-    const rollbackStatus = rawStatus === 'rollback_applied'
-        ? 'rollback_applied'
-        : rawStatus === 'rollback_stale' || rawStatus === 'filesystem_changed_since_patch'
-            ? 'rollback_stale'
-            : 'rollback_rejected';
-    const rollbackSucceeded = patchData.success === true && rollbackStatus === 'rollback_applied' && payloadTargetMatch && combinedSideEffects.length === 0;
-    const rollbackMessage = (() => {
-        if (rollbackSucceeded) {
-            return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
-                ? patchData.message
-                : contracts_1.STATUS_TERMS.rollbackApplied;
-        }
-        if (!payloadTargetMatch) {
-            return `${contracts_1.STATUS_TERMS.patchRejected}: rollback receipt target mismatch detected.`;
-        }
-        if (combinedSideEffects.length > 0) {
-            return `${contracts_1.STATUS_TERMS.patchRejected}: rollback side effects detected in ${combinedSideEffects.length} additional file(s).`;
-        }
-        return (typeof patchData.message === 'string' && patchData.message.trim().length > 0)
-            ? patchData.message
-            : contracts_1.STATUS_TERMS.patchRejected;
-    })();
-    recordPatchOutcome(rollbackStatus);
-    success(res, {
-        patch: {
-            ...patchData,
-            file: payloadFile || targetPath,
-            success: rollbackSucceeded,
-            rawSuccess: patchData.success === true,
-            changed,
-            status: rollbackStatus,
-            targetMatch: payloadTargetMatch,
-            sideEffects: combinedSideEffects,
-            message: rollbackMessage,
-            reverifyRequired: rollbackSucceeded,
-            stateLabel: rollbackSucceeded
-                ? contracts_1.STATUS_TERMS.rollbackApplied.toLowerCase()
-                : rollbackStatus === 'rollback_stale'
-                    ? contracts_1.STATUS_TERMS.filesystemChangedSincePreview.toLowerCase()
-                    : contracts_1.STATUS_TERMS.patchRejected.toLowerCase(),
-            previewTokenUsed: false,
-        },
-        verify: normalizeVerifyPayloadForLegacyClients(run.verificationPayload) ?? null,
-        execution: run.execution,
-    });
-}
-async function handlePatchPreview(req, res) {
-    let body = {};
-    try {
-        body = JSON.parse(await readBody(req));
-    }
-    catch {
-        failure(res, 'Invalid JSON body', 400);
-        return;
-    }
-    const file = body.file;
-    if (!file || typeof file !== 'string' || file.includes('..')) {
-        failure(res, 'Missing or unsafe "file" field', 400);
-        return;
-    }
-    const cwd = process.cwd();
-    const targetPath = file.trim();
-    const absPath = path.resolve(cwd, targetPath);
-    let contentBefore = '';
-    try {
-        contentBefore = fs.readFileSync(absPath, 'utf-8');
-    }
-    catch {
-        failure(res, `File not found: ${targetPath}`, 404);
-        return;
-    }
-    const preview = (0, patch_engine_1.applyFirstMatchingPatch)(targetPath, contentBefore);
-    if (!preview) {
-        success(res, {
-            success: false,
-            file: targetPath,
-            status: 'rejected',
-            message: `No deterministic patch preview available for ${targetPath}`,
-            beforeContent: contentBefore,
-            afterContent: null,
-            diff: null,
-            changed: false,
-            patternKind: null,
-            patchConfidence: null,
-            patchHash: null,
-            previewToken: null,
-            validation: null,
-            recipe: null,
-            pattern: null,
-            whatChanges: null,
-            rollbackPreviewDiff: null,
-            whySafe: null,
-            manualReviewRequired: true,
-            supportedDeterministicPattern: false,
-            reasoning: null,
-        });
-        return;
-    }
-    const reasoning = buildPatchPreviewReasoning(preview.patternKind, targetPath, contentBefore);
-    const rollbackPreviewDiff = (0, diff_1.generateUnifiedDiff)(targetPath, preview.updatedContent, contentBefore);
-    const changeSummary = summarizeDiff(preview.diff);
-    const manualReviewRequired = preview.patchConfidence === 'low'
-        || preview.validation.safe !== true
-        || preview.recipe.requiresManualReview === true;
-    const pattern = patternDescriptor(preview.patternKind, preview.patchConfidence, manualReviewRequired);
-    const whySafe = {
-        deterministic: true,
-        validationPassed: preview.validation.safe === true,
-        confidence: preview.patchConfidence,
-        checks: preview.validation.checks,
-        reasonCodes: preview.validation.reasonCodes,
-    };
-    if (!preview.validation.safe) {
-        success(res, {
-            success: false,
-            file: targetPath,
-            status: 'rejected',
-            message: `Patch preview rejected by deterministic safety validation (${preview.validation.reasonCodes.join(', ') || 'unknown'}).`,
-            beforeContent: contentBefore,
-            afterContent: null,
-            diff: preview.diff,
-            changed: false,
-            patternKind: preview.patternKind,
-            patchConfidence: preview.patchConfidence,
-            patchHash: preview.patchHash,
-            previewToken: preview.previewToken,
-            validation: preview.validation,
-            recipe: preview.recipe,
-            pattern,
-            whatChanges: changeSummary,
-            rollbackPreviewDiff,
-            whySafe,
-            manualReviewRequired,
-            supportedDeterministicPattern: true,
-            reasoning,
-        });
-        return;
-    }
-    success(res, {
-        success: true,
-        file: targetPath,
-        status: 'preview',
-        message: 'Patch preview generated',
-        beforeContent: contentBefore,
-        afterContent: preview.updatedContent,
-        diff: preview.diff,
-        changed: contentBefore !== preview.updatedContent,
-        patternKind: preview.patternKind,
-        patchConfidence: preview.patchConfidence,
-        patchHash: preview.patchHash,
-        previewToken: preview.previewToken,
-        validation: preview.validation,
-        recipe: preview.recipe,
-        pattern,
-        whatChanges: changeSummary,
-        rollbackPreviewDiff,
-        whySafe,
-        manualReviewRequired,
-        supportedDeterministicPattern: true,
-        reasoning,
-    });
-}
-async function handleExecute(req, res) {
+async function handleExecute(req, res, compatibilityExecutionHandlers) {
     let body = {};
     try {
         body = JSON.parse(await readBody(req));
@@ -1386,8 +590,15 @@ async function handleExecute(req, res) {
         return;
     }
     const type = body.type;
-    if (!isExecutionActionType(type)) {
+    if (!(0, execution_actions_1.isExecutionActionType)(type)) {
         failure(res, 'Invalid or missing "type" field', 400);
+        return;
+    }
+    const actionClass = (0, execution_actions_1.getExecutionActionClass)(type);
+    if ((0, execution_actions_1.isCompatibilityExecutionActionType)(type) && compatibilityExecutionHandlers) {
+        await compatibilityExecutionHandlers.handleExecuteBody(req, res, body, {
+            dispatchMode: 'legacy-generic-route',
+        });
         return;
     }
     const run = await (0, execution_bus_1.runExecution)({
@@ -1397,13 +608,28 @@ async function handleExecute(req, res) {
         target: body.target ?? null,
         intentText: body.intentText ?? null,
         cwd: process.cwd(),
-        reverify: body.reverify !== false,
+        reverify: typeof body.reverify === 'boolean'
+            ? body.reverify
+            : actionClass === 'compatibility-mutation',
         ciMode: typeof body.ciMode === 'boolean' ? body.ciMode : undefined,
         evidenceDir: typeof body.evidenceDir === 'string' ? body.evidenceDir : undefined,
         dedupeWindowMs: typeof body.dedupeWindowMs === 'number' ? body.dedupeWindowMs : undefined,
     });
+    const executionBoundary = {
+        routeScope: actionClass === 'canonical-governance' ? 'canonical-governance' : 'runtime-operation',
+        actionClass,
+        compatibilityAction: false,
+        canonicalRuntime: actionClass === 'canonical-governance',
+        genericExecution: true,
+    };
+    const governanceEnvelope = (0, shaping_1.buildGovernanceEnvelope)(run, { executionBoundary });
     success(res, {
         execution: run.execution,
+        _execution: (0, shaping_1.buildExecutionResponseMeta)(run, { executionBoundary }),
+        actionClass,
+        compatibilityAction: false,
+        executionBoundary,
+        governanceEnvelope,
         payload: run.primaryPayload,
         verification: run.verificationPayload,
     });
@@ -1742,7 +968,7 @@ async function handleUpdateWorkspace(req, res, workspaceId) {
     });
     success(res, result);
 }
-async function handleExecuteWorkspace(req, res) {
+async function handleExecuteWorkspace(req, res, compatibilityExecutionHandlers) {
     let body = {};
     try {
         body = JSON.parse(await readBody(req));
@@ -1751,8 +977,14 @@ async function handleExecuteWorkspace(req, res) {
         failure(res, 'Invalid JSON body', 400);
         return;
     }
-    if (!isExecutionActionType(body.type)) {
+    if (!(0, execution_actions_1.isExecutionActionType)(body.type)) {
         failure(res, 'Invalid or missing execution type', 400);
+        return;
+    }
+    if ((0, execution_actions_1.isCompatibilityExecutionActionType)(body.type) && compatibilityExecutionHandlers) {
+        await compatibilityExecutionHandlers.handleWorkspaceExecuteBody(req, res, body, {
+            dispatchMode: 'legacy-generic-route',
+        });
         return;
     }
     const request = {
@@ -1763,7 +995,9 @@ async function handleExecuteWorkspace(req, res) {
         actor: toActor(req),
         target: body.target === null ? null : asNonEmptyString(body.target) || null,
         intentText: body.intentText === null ? null : asNonEmptyString(body.intentText) || null,
-        reverify: typeof body.reverify === 'boolean' ? body.reverify : true,
+        reverify: typeof body.reverify === 'boolean'
+            ? body.reverify
+            : (0, execution_actions_1.getExecutionActionClass)(body.type) === 'compatibility-mutation',
         ciMode: typeof body.ciMode === 'boolean' ? body.ciMode : undefined,
         evidenceDir: asNonEmptyString(body.evidenceDir),
         dedupeWindowMs: typeof body.dedupeWindowMs === 'number' ? body.dedupeWindowMs : undefined,
@@ -1771,7 +1005,54 @@ async function handleExecuteWorkspace(req, res) {
     const result = await (0, workspace_runtime_1.executeWorkspaceAction)(request, {
         cwd: process.cwd(),
     });
-    success(res, result);
+    const workspaceActionClass = (0, execution_actions_1.getExecutionActionClass)(body.type);
+    const executionBoundary = {
+        routeScope: workspaceActionClass === 'canonical-governance'
+            ? 'workspace-canonical-governance'
+            : 'workspace-runtime-operation',
+        actionClass: workspaceActionClass,
+        compatibilityAction: false,
+        canonicalRuntime: workspaceActionClass === 'canonical-governance',
+        workspaceExecution: true,
+    };
+    success(res, {
+        ...result,
+        actionClass: workspaceActionClass,
+        compatibilityAction: false,
+        executionBoundary,
+        governanceEnvelope: {
+            schemaVersion: 'neurcode.governance-envelope.v1',
+            identity: {
+                executionId: result.executionId,
+                executionType: result.type,
+                source: result.source,
+                actor: result.actor,
+                completedAt: result.completedAt,
+            },
+            boundary: {
+                actionClass: workspaceActionClass,
+                runtimeBoundary: workspaceActionClass,
+                mutatesCode: false,
+                compatibilityAction: false,
+                executionBoundary,
+                compatibilityBoundary: null,
+            },
+            custody: {
+                evidence: { generated: false, references: [], retentionLimit: null },
+                replay: { checksum: null, mode: null, integrity: null },
+                provenance: { runId: null, generatedAt: null },
+                policy: { policyLockFingerprint: null, compiledPolicyFingerprint: null },
+                receipts: { ids: [] },
+            },
+            lineage: {
+                verificationTrend: result.totals.failed > 0 ? 'regressed' : 'unchanged',
+                repositories: result.totals.repositories,
+                attempted: result.totals.attempted,
+                succeeded: result.totals.succeeded,
+                failed: result.totals.failed,
+            },
+        },
+    });
 }
 // ── Semantic Search Handlers ──────────────────────────────────────────────────
 /**
@@ -2213,7 +1494,10 @@ async function handleGovernanceFindings(req, res) {
                 const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8'));
                 if (parsed && typeof parsed === 'object') {
                     envelope = parsed;
-                    const findings = parsed.findings;
+                    const governanceVerification = parsed.governanceVerification;
+                    const findings = parsed.governanceFindings
+                        || governanceVerification?.findings
+                        || parsed.findings;
                     if (Array.isArray(findings)) {
                         rawFindings = findings;
                     }
@@ -2286,6 +1570,8 @@ async function handleGovernanceFindings(req, res) {
         advisoryCount,
         structuralCount: rawFindings.filter((f) => f.category === 'structural').length,
         semanticCount: rawFindings.filter((f) => f.category === 'semantic').length,
+        intentGovernance: envelope.intentGovernance || null,
+        intentGovernanceCount: rawFindings.filter((f) => f.sourceSystem === 'intent-engine').length,
         sourceFile: sourceFile || null,
         filtered: filtered.length,
         returned: paginated.length,
@@ -2884,6 +2170,21 @@ async function handlePilotReport(_req, res) {
 }
 // ── Server factory ─────────────────────────────────────────────────────────────
 function createDaemonServer() {
+    const compatibilityExecutionHandlers = (0, execution_1.createCompatibilityExecutionHandlers)({
+        readBody,
+        success,
+        failure,
+        toSource,
+        toActor,
+    });
+    const compatibilityMutationHandlers = (0, mutation_1.createCompatibilityMutationHandlers)({
+        readBody,
+        success,
+        failure,
+        toSource,
+        toActor,
+        recordPatchOutcome,
+    });
     const server = http.createServer(async (req, res) => {
         const incomingRequestIdRaw = req.headers[REQUEST_ID_HEADER];
         const incomingRequestId = Array.isArray(incomingRequestIdRaw)
@@ -2906,7 +2207,7 @@ function createDaemonServer() {
         }
         const url = req.url ?? '/';
         const method = req.method ?? 'GET';
-        const normalizedRoutePath = normalizeRoutePath(url);
+        const normalizedRoutePath = (0, routes_1.normalizeRoutePath)(url);
         recordDaemonRequest(normalizedRoutePath, method);
         res.__neurcodeRoutePath = normalizedRoutePath;
         try {
@@ -2925,7 +2226,19 @@ function createDaemonServer() {
                     operational,
                     executionBus: {
                         schemaVersion: 'neurcode.execution.v1',
-                        supportedActions: ['verify', 'fix', 'patch', 'apply-safe', 'reverify', 'policy-sync', 'intent-update'],
+                        supportedActions: execution_actions_1.EXECUTION_ACTION_TYPES,
+                        genericActions: [
+                            ...execution_actions_1.CANONICAL_EXECUTION_ACTION_TYPES,
+                            ...execution_actions_1.RUNTIME_OPERATION_EXECUTION_ACTION_TYPES,
+                        ],
+                        canonicalActions: execution_actions_1.CANONICAL_EXECUTION_ACTION_TYPES,
+                        runtimeOperationActions: execution_actions_1.RUNTIME_OPERATION_EXECUTION_ACTION_TYPES,
+                        compatibilityActions: execution_actions_1.COMPATIBILITY_EXECUTION_ACTION_TYPES,
+                        compatibilityBoundary: {
+                            explicitRoute: '/execute/compatibility',
+                            workspaceExplicitRoute: '/workspaces/execute/compatibility',
+                            legacyGenericDispatch: 'accepted-but-quarantined',
+                        },
                     },
                     runtimeEvents: {
                         schemaVersion: 'neurcode.runtime-event.v1',
@@ -2947,6 +2260,15 @@ function createDaemonServer() {
                     replayRuntime: {
                         schemaVersion: 'neurcode.replay.state.v1',
                         path: '/replay/state',
+                    },
+                    routeGroups: {
+                        canonicalGovernance: routes_1.CANONICAL_GOVERNANCE_ROUTE_DESCRIPTIONS,
+                        compatibilityMutation: routes_1.COMPATIBILITY_MUTATION_ROUTE_DESCRIPTIONS,
+                        runtimeExecution: routes_1.DAEMON_ROUTE_GROUPS['runtime-execution'],
+                        workspaceOrchestration: routes_1.DAEMON_ROUTE_GROUPS['workspace-orchestration'],
+                        replayEvidence: routes_1.DAEMON_ROUTE_GROUPS['replay-evidence'],
+                        operationalStatus: routes_1.DAEMON_ROUTE_GROUPS['operational-status'],
+                        docsTransport: routes_1.DAEMON_ROUTE_GROUPS['docs-transport'],
                     },
                 });
                 return;
@@ -3077,7 +2399,11 @@ function createDaemonServer() {
                 return;
             }
             if (method === 'POST' && (url === '/workspaces/execute' || url.startsWith('/workspaces/execute?'))) {
-                await handleExecuteWorkspace(req, res);
+                await handleExecuteWorkspace(req, res, compatibilityExecutionHandlers);
+                return;
+            }
+            if (method === 'POST' && (url === '/workspaces/execute/compatibility' || url.startsWith('/workspaces/execute/compatibility?'))) {
+                await compatibilityExecutionHandlers.handleWorkspaceExecute(req, res);
                 return;
             }
             if (method === 'GET' && url.startsWith('/replay')) {
@@ -3135,8 +2461,12 @@ function createDaemonServer() {
                 await handleDocsContent(res, decodeURIComponent(docsContentMatch[1]));
                 return;
             }
+            if (method === 'POST' && (url === '/execute/compatibility' || url.startsWith('/execute/compatibility?'))) {
+                await compatibilityExecutionHandlers.handleExecute(req, res);
+                return;
+            }
             if (method === 'POST' && (url === '/execute' || url.startsWith('/execute?'))) {
-                await handleExecute(req, res);
+                await handleExecute(req, res, compatibilityExecutionHandlers);
                 return;
             }
             if (method === 'POST' && (url === '/verify' || url.startsWith('/verify?'))) {
@@ -3144,23 +2474,23 @@ function createDaemonServer() {
                 return;
             }
             if (method === 'POST' && (url === '/fix' || url.startsWith('/fix?'))) {
-                await handleFix(req, res);
+                await compatibilityMutationHandlers.handleFix(req, res);
                 return;
             }
             if (method === 'POST' && (url === '/fix/apply-safe' || url.startsWith('/fix/apply-safe?'))) {
-                await handleFixApplySafe(req, res);
+                await compatibilityMutationHandlers.handleFixApplySafe(req, res);
                 return;
             }
             if (method === 'POST' && (url === '/patch/preview' || url.startsWith('/patch/preview?'))) {
-                await handlePatchPreview(req, res);
+                await compatibilityMutationHandlers.handlePatchPreview(req, res);
                 return;
             }
             if (method === 'POST' && (url === '/patch/rollback' || url.startsWith('/patch/rollback?'))) {
-                await handlePatchRollback(req, res);
+                await compatibilityMutationHandlers.handlePatchRollback(req, res);
                 return;
             }
             if (method === 'POST' && (url === '/patch' || url.startsWith('/patch?'))) {
-                await handlePatch(req, res);
+                await compatibilityMutationHandlers.handlePatch(req, res);
                 return;
             }
             failure(res, `No route for ${method} ${url}`, 404);
@@ -3246,46 +2576,13 @@ function startDaemon() {
     });
     server.listen(exports.DAEMON_PORT, exports.DAEMON_HOST, () => {
         console.log(`\nNeurcode daemon v2 running on http://localhost:${exports.DAEMON_PORT}`);
-        console.log(`  POST /verify         → execution bus: verify`);
-        console.log(`  POST /fix            → execution bus: fix + reverify`);
-        console.log(`  POST /fix/apply-safe → execution bus: apply-safe + reverify`);
-        console.log(`  POST /patch/preview  → deterministic patch preview (before/after diff)`);
-        console.log(`  POST /patch/rollback → deterministic rollback apply by receipt`);
-        console.log(`  POST /patch          → execution bus: patch + reverify`);
-        console.log(`  POST /execute        → unified execution endpoint`);
-        console.log(`  GET  /executions     → execution history`);
-        console.log(`  GET  /executions/:id → execution detail`);
-        console.log(`  GET  /executions/:id/timeline → phase timeline + durations`);
-        console.log(`  GET  /executions/:id/diff     → verification + patch inspection`);
-        console.log(`  GET  /events         → runtime event history`);
-        console.log(`  GET  /events/stream  → SSE deterministic governance runtime`);
-        console.log(`  GET  /ops/summary    → daemon operational health + reliability metrics`);
-        console.log(`  GET  /control-plane  → governance control-plane state + snapshots`);
-        console.log(`  POST /control-plane/preview → deterministic config impact preview`);
-        console.log(`  PUT  /control-plane  → apply deterministic governance config update`);
-        console.log(`  GET  /workspaces     → workspace catalog + active pointer`);
-        console.log(`  GET  /workspaces/runtime → workspace governance runtime snapshot`);
-        console.log(`  GET  /workspaces/:id/runtime → workspace-specific runtime snapshot`);
-        console.log(`  GET  /workspaces/:id → workspace definition`);
-        console.log(`  POST /workspaces     → create workspace`);
-        console.log(`  PUT  /workspaces/:id → update workspace`);
-        console.log(`  POST /workspaces/:id/activate → set active workspace`);
-        console.log(`  POST /workspaces/:id/repositories → add repository to workspace`);
-        console.log(`  POST /workspaces/execute → workspace-scoped deterministic execution`);
-        console.log(`  GET  /workspaces/:id/cross-repo-graph → detected cross-repo dependency edges`);
-        console.log(`  POST /workspaces/:id/federated-context → multi-repo blast radius analysis`);
-        console.log(`  POST /workspaces/:id/semantic-search → TF-IDF vector similarity file search`);
-        console.log(`  POST /workspaces/:id/semantic-index/build → rebuild semantic index from brain context`);
-        console.log(`  POST /workspaces/:id/intent-expand → signed semantic intent governance artifact`);
-        console.log(`  GET  /replay/state → deterministic governance state replay`);
-        console.log(`  GET  /replay/execution/:id → deterministic execution replay`);
-        console.log(`  GET  /replay/workspace/:id → deterministic workspace replay`);
-        console.log(`  GET  /replay/timeline → deterministic governance timeline replay`);
-        console.log(`  GET  /governance/findings → canonical governance findings (last verify output)`);
-        console.log(`  GET  /governance/overview → governance posture summary`);
-        console.log(`  GET  /brain/cache-status → brain cache manifest and freshness`);
-        console.log(`  GET  /remediation/status → remediation artifacts and receipts`);
-        console.log(`  GET  /pilot-report       → governance health metrics and trend`);
+        (0, routes_1.logDaemonRouteGroup)('\nCanonical governance routes:', routes_1.CANONICAL_GOVERNANCE_ROUTE_DESCRIPTIONS);
+        (0, routes_1.logDaemonRouteGroup)('\nCompatibility mutation routes (legacy):', routes_1.COMPATIBILITY_MUTATION_ROUTE_DESCRIPTIONS);
+        (0, routes_1.logDaemonRouteGroup)('\nRuntime execution routes:', routes_1.DAEMON_ROUTE_GROUPS['runtime-execution']);
+        (0, routes_1.logDaemonRouteGroup)('\nWorkspace orchestration routes:', routes_1.DAEMON_ROUTE_GROUPS['workspace-orchestration']);
+        (0, routes_1.logDaemonRouteGroup)('\nReplay and evidence routes:', routes_1.DAEMON_ROUTE_GROUPS['replay-evidence']);
+        (0, routes_1.logDaemonRouteGroup)('\nOperational status routes:', routes_1.DAEMON_ROUTE_GROUPS['operational-status']);
+        (0, routes_1.logDaemonRouteGroup)('\nDocs transport routes:', routes_1.DAEMON_ROUTE_GROUPS['docs-transport']);
         console.log(`\n  CWD: ${cwd}`);
         console.log(`  Press Ctrl+C to stop.\n`);
     });

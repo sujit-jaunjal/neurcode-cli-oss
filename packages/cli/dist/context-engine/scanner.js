@@ -3,7 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.scanProject = scanProject;
 const fs_1 = require("fs");
 const path_1 = require("path");
-const INCLUDE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx']);
+const INCLUDE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py']);
 const EXCLUDE_DIRS = new Set([
     'node_modules',
     '.git',
@@ -14,6 +14,13 @@ const EXCLUDE_DIRS = new Set([
     '.next',
     '.turbo',
 ]);
+function shouldSkipDir(entry) {
+    if (EXCLUDE_DIRS.has(entry))
+        return true;
+    if (entry.startsWith('.') && entry !== '.github')
+        return true;
+    return false;
+}
 function walkDir(dir, rootPath, result) {
     let entries;
     try {
@@ -23,7 +30,7 @@ function walkDir(dir, rootPath, result) {
         return;
     }
     for (const entry of entries) {
-        if (EXCLUDE_DIRS.has(entry))
+        if (shouldSkipDir(entry))
             continue;
         const fullPath = (0, path_1.join)(dir, entry);
         let stat;

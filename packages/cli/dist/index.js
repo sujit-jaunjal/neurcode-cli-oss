@@ -64,7 +64,9 @@ const export_1 = require("./commands/export");
 const control_plane_1 = require("./commands/control-plane");
 const workspace_1 = require("./commands/workspace");
 const replay_1 = require("./commands/replay");
+const governance_1 = require("./commands/governance");
 const execution_bus_1 = require("./utils/execution-bus");
+const execution_actions_1 = require("./utils/execution-actions");
 // Read version from package.json
 let version = '0.1.2'; // fallback
 try {
@@ -79,38 +81,87 @@ const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
     {
         command: 'neurcode start "<intent>"',
-        description: 'Declare intent and initialize plan context',
+        description: 'Declare governance context and bounded implementation scope',
     },
     {
-        command: 'neurcode verify',
-        description: 'Check code against policies and plan',
+        command: 'neurcode verify --evidence',
+        description: 'Verify the current diff against intent, policy, and change contracts',
     },
     {
-        command: 'neurcode fix',
-        description: 'Get prioritized, file-level remediation guidance',
+        command: 'neurcode replay --json',
+        description: 'Inspect deterministic replay and provenance receipts from the last run',
     },
     {
-        command: 'neurcode patch --file <path>',
-        description: 'Apply a deterministic fix to a specific file',
+        command: 'neurcode remediate-export --finding-index 0',
+        description: 'Export bounded remediation context for an external remediation tool',
     },
     {
-        command: 'neurcode verify',
-        description: 'Confirm patches resolve all findings',
+        command: 'neurcode verify --ci',
+        description: 'Re-verify in CI with deterministic receipts and governance artifacts',
     },
 ];
-const PRIMARY_COMMAND_NAMES = new Set(['start', 'generate', 'export', 'verify', 'fix', 'patch', 'daemon']);
-const EXECUTION_ACTION_TYPES = [
+const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
+    'start',
+    'quickstart',
     'verify',
-    'fix',
+    'remediate-export',
+    'replay',
+]);
+const ENTERPRISE_OPERATIONS_COMMAND_NAMES = new Set([
+    'policy',
+    'governance',
+    'workspace',
+    'control-plane',
+    'pilot-report',
+    'daemon',
+    'doctor',
+    'compat',
+    'login',
+    'logout',
+    'init',
+    'whoami',
+    'config',
+    'repo',
+    'approve',
+    'bootstrap-policy',
+]);
+const RUNTIME_ENGINEERING_COMMAND_NAMES = new Set([
+    'audit',
+    'contract',
+    'feedback',
+    'guard',
+    'bootstrap',
+    'map',
+    'execute',
+    'executions',
+    'session',
+    'brain',
+]);
+const LEGACY_COMPATIBILITY_COMMAND_NAMES = new Set([
+    'check',
+    'refactor',
+    'security',
+    'ask',
+    'plan',
+    'plan-slo',
+    'ship',
+    'ship-resume',
+    'ship-runs',
+    'ship-attestation-verify',
+    'apply',
+    'allow',
+    'simulate',
+    'watch',
+    'remediate',
+    'remediate-validate',
+    'remediate-status',
+    'generate',
     'patch',
-    'apply-safe',
-    'reverify',
-    'policy-sync',
-    'intent-update',
-];
-function isExecutionActionType(value) {
-    return EXECUTION_ACTION_TYPES.includes(value);
-}
+    'fix',
+    'prompt',
+    'revert',
+    'export',
+]);
 function shouldRouteJsonLegacyCommandThroughExecutionBus(jsonEnabled) {
     if (!jsonEnabled)
         return false;
@@ -129,27 +180,31 @@ function emitJsonPayloadWithExitCode(payload, exitCode) {
 function formatCoreWorkflowStep(step) {
     return `  * ${step.command.padEnd(28)} ${step.description}`;
 }
-function buildAdvancedLegacyCommandsList(root) {
-    const advancedCommands = [];
-    for (const subcommand of root.commands) {
-        const commandName = subcommand.name();
-        if (commandName === 'help' || PRIMARY_COMMAND_NAMES.has(commandName)) {
-            continue;
-        }
-        advancedCommands.push(commandName);
-    }
-    return advancedCommands.sort((left, right) => left.localeCompare(right));
+function collectCommandLayer(root, commandNames, preferredOrder) {
+    const visible = new Set(root.commands
+        .map((subcommand) => subcommand.name())
+        .filter((commandName) => commandName !== 'help' && commandNames.has(commandName)));
+    const ordered = preferredOrder.filter((commandName) => visible.has(commandName));
+    const remainder = [...visible]
+        .filter((commandName) => !preferredOrder.includes(commandName))
+        .sort((left, right) => left.localeCompare(right));
+    return [...ordered, ...remainder];
 }
 function buildAdvancedLegacyHints(root) {
-    return buildAdvancedLegacyCommandsList(root).map((commandName) => `neurcode ${commandName}`);
+    const fallbackCommands = root.commands
+        .map((subcommand) => subcommand.name())
+        .filter((commandName) => commandName !== 'help'
+        && !CANONICAL_OPERATOR_COMMAND_NAMES.has(commandName))
+        .sort((left, right) => left.localeCompare(right));
+    return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['start', 'generate', 'verify', 'fix'];
+    const primaryOrder = ['start', 'quickstart', 'verify', 'remediate-export', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
                 const commandName = subcommand.name();
-                return commandName === 'help' || PRIMARY_COMMAND_NAMES.has(commandName);
+                return commandName === 'help' || CANONICAL_OPERATOR_COMMAND_NAMES.has(commandName);
             });
             return filtered.sort((left, right) => {
                 const leftIndex = primaryOrder.indexOf(left.name());
@@ -162,28 +217,93 @@ function configurePrimaryHelpView(root) {
     });
 }
 function printCoreWorkflowGuide() {
-    console.log(chalk.bold.cyan('\n🚀 Neurcode Start\n'));
-    console.log(chalk.bold.white('Core Workflow:'));
+    console.log(chalk.bold.cyan('\n🛡️  Neurcode Governance Workflow\n'));
+    console.log(chalk.bold.white('Canonical Workflow:'));
     CORE_WORKFLOW_STEPS.forEach((step) => console.log(chalk.dim(formatCoreWorkflowStep(step))));
     console.log('');
-    console.log(chalk.dim('Run `neurcode --help` to see advanced and legacy commands.\n'));
+    console.log(chalk.dim('Run `neurcode --help` to see enterprise, runtime-engineering, and compatibility commands.\n'));
 }
-function renderHelpFooter(advancedCommands) {
-    const advancedLines = advancedCommands.map((commandName) => `  * neurcode ${commandName}`);
+function formatCommandList(commandNames) {
+    return commandNames.length > 0
+        ? commandNames.map((commandName) => `  * neurcode ${commandName}`)
+        : ['  * (none)'];
+}
+function renderHelpFooter(root) {
+    const enterpriseOperations = collectCommandLayer(root, ENTERPRISE_OPERATIONS_COMMAND_NAMES, [
+        'policy',
+        'governance',
+        'workspace',
+        'control-plane',
+        'pilot-report',
+        'daemon',
+        'doctor',
+        'compat',
+        'login',
+        'logout',
+        'init',
+        'whoami',
+        'config',
+        'repo',
+        'approve',
+        'bootstrap-policy',
+    ]);
+    const runtimeEngineering = collectCommandLayer(root, RUNTIME_ENGINEERING_COMMAND_NAMES, [
+        'audit',
+        'contract',
+        'feedback',
+        'guard',
+        'bootstrap',
+        'map',
+        'execute',
+        'executions',
+        'session',
+        'brain',
+    ]);
+    const compatibilityCommands = collectCommandLayer(root, LEGACY_COMPATIBILITY_COMMAND_NAMES, [
+        'fix',
+        'patch',
+        'generate',
+        'prompt',
+        'plan',
+        'ask',
+        'remediate',
+        'remediate-validate',
+        'remediate-status',
+        'ship',
+        'ship-resume',
+        'ship-runs',
+        'ship-attestation-verify',
+        'apply',
+        'export',
+        'revert',
+        'check',
+        'refactor',
+        'security',
+        'simulate',
+        'watch',
+        'allow',
+        'plan-slo',
+    ]);
     return [
         '',
         'Core Workflow',
         ...CORE_WORKFLOW_STEPS.map((step) => formatCoreWorkflowStep(step)),
         '',
-        'Advanced / Legacy Commands',
-        ...(advancedLines.length > 0 ? advancedLines : ['  * (none)']),
+        'Enterprise Operations',
+        ...formatCommandList(enterpriseOperations),
+        '',
+        'Runtime Engineering',
+        ...formatCommandList(runtimeEngineering),
+        '',
+        'Compatibility / Legacy',
+        ...formatCommandList(compatibilityCommands),
         '',
         'Run `neurcode <command> --help` for command-specific details.',
     ].join('\n');
 }
 program
     .name('neurcode')
-    .description('AI-powered code governance and diff analysis')
+    .description('Intent-aware deterministic governance infrastructure for AI-assisted engineering')
     .version(version);
 // Show welcome banner before parsing (for help or unauthenticated users)
 async function showWelcomeIfNeeded() {
@@ -202,7 +322,7 @@ showWelcomeIfNeeded().catch(() => {
 });
 program
     .command('start [intent...]')
-    .description('Initialize what you are building')
+    .description('Declare governance intent and initialize bounded change context')
     .option('--run-init', 'Run `neurcode init` immediately after showing the guide')
     .option('--json', 'Output machine-readable onboarding metadata')
     .action(async (intentParts, options) => {
@@ -253,6 +373,7 @@ program
 (0, security_1.securityCommand)(program);
 (0, brain_1.brainCommand)(program);
 (0, policy_1.policyCommand)(program);
+(0, governance_1.governanceCommand)(program);
 (0, control_plane_1.controlPlaneCommand)(program);
 (0, workspace_1.workspaceCommand)(program);
 (0, replay_1.replayCommand)(program);
@@ -438,7 +559,7 @@ program
 });
 program
     .command('ask')
-    .description('Ask a repo question with grounded, citation-backed answers')
+    .description('Advanced: ask a repo question with grounded, citation-backed answers')
     .argument('<question...>', 'Question about the codebase')
     .option('--project-id <id>', 'Project ID')
     .option('--json', 'Output machine-readable JSON')
@@ -462,7 +583,7 @@ program
 });
 program
     .command('plan')
-    .description('Generate an execution plan for a user intent')
+    .description('Legacy: generate an execution plan for a user intent')
     .argument('<intent...>', 'Description of what you want to accomplish')
     .option('--project-id <id>', 'Project ID')
     .option('--ticket <id>', 'Ticket ID from Linear or Jira (e.g., PROJ-123, ABC-123)')
@@ -527,7 +648,7 @@ planSloCmd
 });
 program
     .command('ship')
-    .description('Plan, apply, verify, auto-remediate, and produce a merge confidence card')
+    .description('Legacy: run the older autonomous ship loop and produce a merge confidence card')
     .argument('<goal...>', 'Implementation goal to ship')
     .option('--project-id <id>', 'Project ID')
     .option('--max-fix-attempts <n>', 'Maximum auto-remediation attempts (default: 2)', (val) => parseInt(val, 10))
@@ -563,7 +684,7 @@ program
 });
 program
     .command('ship-resume')
-    .description('Resume a previously started ship run from its checkpoint')
+    .description('Legacy: resume a previously started ship run from its checkpoint')
     .argument('<run-id>', 'Ship run ID (see neurcode ship-runs)')
     .option('--project-id <id>', 'Project ID override')
     .option('--max-fix-attempts <n>', 'Maximum auto-remediation attempts override', (val) => parseInt(val, 10))
@@ -593,7 +714,7 @@ program
 });
 program
     .command('ship-runs')
-    .description('List persisted ship runs for this repository')
+    .description('Legacy: list persisted ship runs for this repository')
     .option('--limit <n>', 'Maximum runs to show (default: 20)', (val) => parseInt(val, 10))
     .option('--json', 'Output machine-readable JSON')
     .action((options) => {
@@ -604,7 +725,7 @@ program
 });
 program
     .command('ship-attestation-verify')
-    .description('Verify a ship release attestation against the referenced merge card artifact')
+    .description('Legacy: verify a ship release attestation against the referenced merge card artifact')
     .argument('<path>', 'Path to release attestation JSON file')
     .option('--hmac-key <key>', 'HMAC key override for signature verification (defaults to NEURCODE_ATTEST_HMAC_KEY)')
     .option('--json', 'Output machine-readable JSON')
@@ -616,7 +737,7 @@ program
 });
 program
     .command('apply')
-    .description('Apply a saved architect plan by generating and writing code files')
+    .description('Legacy: apply a saved architect plan by generating and writing code files')
     .argument('<planId>', 'Plan ID (UUID) to apply')
     .option('--force', 'Overwrite existing files without confirmation')
     .option('--json', 'Output machine-readable JSON')
@@ -654,7 +775,7 @@ program
 });
 program
     .command('simulate')
-    .description('Predict blast radius and likely regressions before merge ("what would have broken?")')
+    .description('Advanced: predict blast radius and likely regressions before merge ("what would have broken?")')
     .option('--staged', 'Analyze staged changes only')
     .option('--head', 'Analyze changes against HEAD')
     .option('--base <ref>', 'Analyze changes against a specific base ref')
@@ -673,14 +794,14 @@ program
 });
 program
     .command('watch')
-    .description('Start Neurcode Watch - A local background service that records file changes for Time Machine feature')
+    .description('Legacy: start the local file-change recorder used by Time Machine workflows')
     .action(() => {
     (0, watch_1.watchCommand)();
 });
 // Session management commands
 const sessionCmd = program
     .command('session')
-    .description('Manage AI coding sessions');
+    .description('Manage cloud sessions and local intent-runtime continuity');
 sessionCmd
     .command('list')
     .description('List all sessions for the current project')
@@ -714,9 +835,51 @@ sessionCmd
         projectId: options.projectId,
     });
 });
+sessionCmd
+    .command('list-local')
+    .description('List local intent-runtime session snapshots for this repository')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.listLocalSessionsCommand)({
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('current-local')
+    .description('Show the active local intent-runtime session')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.currentLocalSessionCommand)({
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('resume-local')
+    .description('Restore a stored local intent-runtime session snapshot')
+    .option('--session-id <id>', 'Local session ID to restore (defaults to the active or latest snapshot)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.resumeLocalSessionCommand)({
+        sessionId: options.sessionId,
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('compare-local')
+    .description('Compare the approved scope and boundary expectations of two local intent sessions')
+    .requiredOption('--left <id>', 'Left local session ID')
+    .requiredOption('--right <id>', 'Right local session ID')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.compareLocalSessionsCommand)({
+        left: options.left,
+        right: options.right,
+        json: options.json === true,
+    });
+});
 program
     .command('remediate')
-    .description('Run verify, auto-remediate using ship loop, then re-verify')
+    .description('Legacy: run verify, auto-remediate using the older ship loop, then re-verify')
     .option('--goal <text>', 'Goal text for remediation ship loop')
     .option('--plan-id <id>', 'Plan ID for verify scope checks')
     .option('--project-id <id>', 'Project ID override')
@@ -776,8 +939,8 @@ program
 program
     .command('remediate-export')
     .description('Export a structured deterministic remediation payload for a governance finding.\n' +
-    'Pass the output to Cursor, Claude, Codex, or any AI coding assistant.\n' +
-    'This command NEVER modifies any file. Neurcode detects. Your AI assistant remediates.')
+    'Pass the output to an external remediation tool or coding workflow.\n' +
+    'This command NEVER modifies any file. Neurcode verifies. External remediation owns the code change.')
     .option('--finding <id>', 'Export payload for a specific finding ID')
     .option('--finding-id <id>', 'Alias for --finding (backward compatible)')
     .option('--finding-index <n>', 'Export payload for finding at 0-based index')
@@ -835,7 +998,7 @@ program
 });
 program
     .command('generate')
-    .description('Generate a governed plan context (reads intent from plan.json if no prompt given)')
+    .description('Legacy: generate governed plan context (reads intent from plan.json if no prompt given)')
     .argument('[prompt...]', 'Implementation prompt — omit to use intent from plan.json')
     .option('--plan-id <id>', 'Plan ID override for scope context')
     .option('--json', 'Output machine-readable JSON')
@@ -850,7 +1013,7 @@ program
 });
 program
     .command('patch')
-    .description('Apply a deterministic fix patch to a file (from neurcode fix suggestions)')
+    .description('Legacy: apply a deterministic fix patch to a file (from neurcode fix suggestions)')
     .requiredOption('--file <path>', 'Path to the file to patch')
     .option('--preview-token <token>', 'Preview token generated by deterministic patch preview')
     .option('--rollback-receipt <id>', 'Rollback a previously applied deterministic patch receipt')
@@ -888,7 +1051,7 @@ program
 });
 program
     .command('fix')
-    .description('Get actionable fixes')
+    .description('Review prioritized governance findings and optional legacy patch suggestions')
     .option('--plan-id <id>', 'Plan ID for verify scope checks')
     .option('--project-id <id>', 'Project ID override')
     .option('--ci', 'CI mode: deterministic verification-only flow, no local interactive/runtime assumptions')
@@ -958,7 +1121,7 @@ program
 });
 program
     .command('verify')
-    .description('Check code against policies and plan')
+    .description('Run intent-aware deterministic verification against policy and bounded change scope')
     .option('--plan-id <id>', 'Plan ID to verify against (required unless --policy-only)')
     .option('--project-id <id>', 'Project ID')
     .option('--ci', 'CI mode: deterministic verification-only flow, no daemon/interactive/local-state assumptions')
@@ -1103,7 +1266,7 @@ program
 });
 program
     .command('prompt [plan-id]')
-    .description('Generate a Cursor/Claude prompt from an Architect Plan (uses last plan if ID not provided)')
+    .description('Legacy: generate an external prompt from an Architect Plan (uses last plan if ID not provided)')
     .option('--json', 'Output machine-readable JSON')
     .option('--output <path>', 'Write prompt output to a file')
     .option('--no-copy', 'Do not copy prompt to clipboard')
@@ -1154,7 +1317,7 @@ revertCmd
 // ── Export ────────────────────────────────────────────────────────────────────
 program
     .command('export')
-    .description('Export current plan as structured JSON for agent consumption')
+    .description('Legacy: export current plan as structured JSON for external workflow consumption')
     .option('--json', 'Output machine-readable JSON to stdout')
     .option('--file <path>', 'Write exported plan to a file (e.g. plan.json)')
     .action((options) => {
@@ -1166,7 +1329,7 @@ program
 // ── Daemon ────────────────────────────────────────────────────────────────────
 program
     .command('daemon')
-    .description('Start local dashboard bridge for verify/fix/patch actions (http://localhost:4321)')
+    .description('Start the local governance bridge for verify, findings, replay, and remediation export (http://localhost:4321)')
     .action(() => {
     (0, server_1.startDaemon)();
 });
@@ -1184,9 +1347,9 @@ program
     .option('--no-reverify', 'Skip post-action deterministic reverify stage')
     .option('--json', 'Output full execution record as JSON')
     .action(async (type, options) => {
-    if (!isExecutionActionType(type)) {
+    if (!(0, execution_actions_1.isExecutionActionType)(type)) {
         console.error(`❌ Unsupported execution type: ${type}`);
-        console.error(`   Supported: ${EXECUTION_ACTION_TYPES.join(', ')}`);
+        console.error(`   Supported: ${execution_actions_1.EXECUTION_ACTION_TYPES.join(', ')}`);
         process.exit(1);
     }
     const run = await (0, execution_bus_1.runExecution)({
@@ -1272,7 +1435,6 @@ program
     console.log('');
 });
 configurePrimaryHelpView(program);
-const advancedLegacyCommands = buildAdvancedLegacyCommandsList(program);
-program.addHelpText('after', renderHelpFooter(advancedLegacyCommands));
+program.addHelpText('after', renderHelpFooter(program));
 program.parse();
 //# sourceMappingURL=index.js.map

@@ -1,0 +1,30 @@
+export declare const LOCAL_INTELLIGENCE_SCHEMA_VERSION: 1;
+export declare const NEURCODE_DIRNAME = ".neurcode";
+export declare const SESSIONS_DIRNAME = "sessions";
+export declare const ACTIVE_INTENT_PACK_FILENAME = "intent-pack.json";
+export declare const ACTIVE_CONTEXT_PACK_FILENAME = "context-pack.json";
+export declare const ACTIVE_REPOSITORY_GRAPH_FILENAME = "repository-intelligence.json";
+export declare const ACTIVE_INVARIANT_MEMORY_FILENAME = "engineering-invariants.json";
+export declare const ACTIVE_SESSION_RUNTIME_FILENAME = "session-runtime.json";
+export declare const SESSION_INDEX_FILENAME = "session-index.json";
+export declare function nowIso(): string;
+export declare function normalizeText(value: string): string;
+export declare function normalizeRepoPath(pathValue: string): string;
+export declare function dedupeSorted(values: string[]): string[];
+export declare function dedupeSortedPaths(values: string[]): string[];
+export declare function sha256Hex(input: string): string;
+export declare function fingerprintValue(value: unknown): string;
+export declare function ensureNeurcodeRuntimeDir(projectRoot: string): string;
+export declare function ensureSessionsDir(projectRoot: string): string;
+export declare function writeJsonFile(pathValue: string, payload: unknown): void;
+export declare function readJsonFile<T>(pathValue: string): T | null;
+export declare function getGitBranchName(projectRoot: string): string | null;
+export declare function getGitHeadSha(projectRoot: string): string | null;
+export declare function createLocalSessionId(projectRoot: string, intent: string): string;
+export declare function classifyBoundaryPath(pathValue: string): {
+    sensitive: boolean;
+    infra: boolean;
+    ci: boolean;
+    dependencyManifest: boolean;
+};
+//# sourceMappingURL=intelligence-runtime-common.d.ts.map

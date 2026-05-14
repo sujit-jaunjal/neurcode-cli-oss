@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.workspaceCommand = workspaceCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
+const execution_actions_1 = require("../utils/execution-actions");
 const workspace_runtime_1 = require("../utils/workspace-runtime");
 function asPrettyJson(value) {
     return JSON.stringify(value, null, 2);
@@ -36,18 +37,6 @@ function toExecutionSource(value) {
         return normalized;
     }
     return 'unknown';
-}
-const WORKSPACE_ACTION_TYPES = [
-    'verify',
-    'fix',
-    'patch',
-    'apply-safe',
-    'reverify',
-    'policy-sync',
-    'intent-update',
-];
-function isWorkspaceActionType(value) {
-    return WORKSPACE_ACTION_TYPES.includes(value);
 }
 function parseWorkspacePatchInput(options) {
     const parseRecord = (value) => {
@@ -353,9 +342,9 @@ function workspaceCommand(program) {
         .option('--no-reverify', 'Skip deterministic post-action reverify')
         .option('--json', 'Output JSON')
         .action(async (type, options) => {
-        if (!isWorkspaceActionType(type)) {
+        if (!(0, execution_actions_1.isExecutionActionType)(type)) {
             console.error(`❌ Unsupported workspace execution type: ${type}`);
-            console.error(`   Supported: ${WORKSPACE_ACTION_TYPES.join(', ')}`);
+            console.error(`   Supported: ${execution_actions_1.EXECUTION_ACTION_TYPES.join(', ')}`);
             process.exit(1);
         }
         const request = {

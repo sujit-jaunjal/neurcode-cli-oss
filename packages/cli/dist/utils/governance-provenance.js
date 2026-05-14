@@ -22,6 +22,7 @@ exports.verifyProvenanceIntegrity = verifyProvenanceIntegrity;
 const crypto_1 = require("crypto");
 const fs_1 = require("fs");
 const path_1 = require("path");
+const artifact_io_1 = require("./artifact-io");
 const MAX_INDEX_RECORDS = 1000;
 function provenanceDir(repoRoot) {
     return (0, path_1.join)(repoRoot, '.neurcode', 'provenance');
@@ -35,11 +36,6 @@ function indexPath(repoRoot) {
 function computeFingerprint(runId, runAt, ruleIds, blockingCount, verdict) {
     const canonical = `${runId}|${runAt}|${ruleIds.slice().sort().join(',')}|${blockingCount}|${verdict}`;
     return (0, crypto_1.createHash)('sha256').update(canonical, 'utf8').digest('hex');
-}
-function atomicWrite(filePath, content) {
-    const tmp = `${filePath}.tmp`;
-    (0, fs_1.writeFileSync)(tmp, content, 'utf8');
-    (0, fs_1.renameSync)(tmp, filePath);
 }
 /**
  * Build a provenance record from verify run results.
@@ -94,7 +90,7 @@ function saveProvenanceRecord(repoRoot, record) {
             (0, fs_1.mkdirSync)(dir, { recursive: true });
         }
         // Write the record file atomically
-        atomicWrite(recordPath(repoRoot, record.runId), JSON.stringify(record, null, 2));
+        (0, artifact_io_1.atomicWriteJsonFileSync)(recordPath(repoRoot, record.runId), record);
         // Update the index atomically
         const idx = loadProvenanceIndex(repoRoot);
         idx.records.push({
@@ -109,10 +105,12 @@ function saveProvenanceRecord(repoRoot, record) {
         if (idx.records.length > MAX_INDEX_RECORDS) {
             idx.records = idx.records.slice(0, MAX_INDEX_RECORDS);
         }
-        atomicWrite(indexPath(repoRoot), JSON.stringify(idx, null, 2));
+        (0, artifact_io_1.atomicWriteJsonFileSync)(indexPath(repoRoot), idx);
+        return true;
     }
     catch {
         // Never throw — provenance persistence is best-effort
+        return false;
     }
 }
 /**

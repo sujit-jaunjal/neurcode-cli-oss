@@ -46,10 +46,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.listSessionsCommand = listSessionsCommand;
 exports.endSessionCommand = endSessionCommand;
 exports.sessionStatusCommand = sessionStatusCommand;
+exports.listLocalSessionsCommand = listLocalSessionsCommand;
+exports.currentLocalSessionCommand = currentLocalSessionCommand;
+exports.resumeLocalSessionCommand = resumeLocalSessionCommand;
+exports.compareLocalSessionsCommand = compareLocalSessionsCommand;
 const config_1 = require("../config");
 const api_client_1 = require("../api-client");
 const state_1 = require("../utils/state");
 const messages_1 = require("../utils/messages");
+const project_root_1 = require("../utils/project-root");
+const session_continuity_1 = require("../utils/session-continuity");
 const readline = __importStar(require("readline"));
 // Import chalk with fallback
 let chalk;
@@ -376,6 +382,156 @@ async function sessionStatusCommand(options) {
         else {
             (0, messages_1.printError)('Failed to Get Session Status', String(error));
         }
+        process.exit(1);
+    }
+}
+function listLocalSessionsCommand(options = {}) {
+    try {
+        const projectRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+        const sessions = (0, session_continuity_1.listLocalIntentSessions)(projectRoot);
+        if (options.json) {
+            console.log(JSON.stringify({
+                success: true,
+                projectRoot,
+                count: sessions.length,
+                sessions,
+            }, null, 2));
+            return;
+        }
+        (0, messages_1.printSection)('Local Intent Sessions');
+        if (sessions.length === 0) {
+            (0, messages_1.printInfo)('No Local Sessions', 'Run `neurcode start "<intent>"` to create a persistent intent runtime session.');
+            return;
+        }
+        const rows = [['Session ID', 'Created', 'Branch', 'Intent']];
+        for (const session of sessions.slice(0, 12)) {
+            rows.push([
+                session.sessionId.length > 26 ? `${session.sessionId.slice(0, 26)}...` : session.sessionId,
+                new Date(session.createdAt).toLocaleString(),
+                session.branchName || '—',
+                session.intentSummary.length > 42 ? `${session.intentSummary.slice(0, 42)}...` : session.intentSummary,
+            ]);
+        }
+        (0, messages_1.printTable)(rows);
+    }
+    catch (error) {
+        (0, messages_1.printError)('Failed to List Local Sessions', error instanceof Error ? error : String(error));
+        process.exit(1);
+    }
+}
+function currentLocalSessionCommand(options = {}) {
+    try {
+        const projectRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+        const active = (0, session_continuity_1.getActiveLocalIntentSession)(projectRoot);
+        if (!active) {
+            if (options.json) {
+                console.log(JSON.stringify({
+                    success: false,
+                    message: 'No active local intent session found.',
+                }, null, 2));
+                process.exit(1);
+                return;
+            }
+            (0, messages_1.printInfo)('No Active Local Session', 'Run `neurcode start "<intent>"` to create the canonical local session runtime.');
+            return;
+        }
+        if (options.json) {
+            console.log(JSON.stringify({
+                success: true,
+                projectRoot,
+                sessionRuntime: active.sessionRuntime,
+                intentPack: active.intentPack,
+                contextPack: active.contextPack,
+            }, null, 2));
+            return;
+        }
+        (0, messages_1.printSection)('Active Local Intent Session');
+        console.log(chalk.white(`   Session ID: ${active.sessionRuntime.sessionId}`));
+        console.log(chalk.white(`   Intent: ${active.intentPack.intent.normalized}`));
+        console.log(chalk.white(`   Branch: ${active.sessionRuntime.branchName || '—'}`));
+        console.log(chalk.white(`   Intent Pack: ${active.intentPack.intentPackId}`));
+        console.log(chalk.white(`   Context Pack: ${active.contextPack.contextPackId}`));
+        console.log(chalk.white(`   Repo Graph: ${active.repositoryGraph.graphId}`));
+        console.log(chalk.dim(`   Created: ${new Date(active.sessionRuntime.createdAt).toLocaleString()}`));
+        console.log('');
+    }
+    catch (error) {
+        (0, messages_1.printError)('Failed to Read Local Session', error instanceof Error ? error : String(error));
+        process.exit(1);
+    }
+}
+function resumeLocalSessionCommand(options = {}) {
+    try {
+        const projectRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+        const resumed = (0, session_continuity_1.resumeLocalIntentSession)(projectRoot, options.sessionId);
+        if (!resumed) {
+            if (options.json) {
+                console.log(JSON.stringify({
+                    success: false,
+                    message: 'Unable to resume local session. No stored session matched the requested ID.',
+                }, null, 2));
+                process.exit(1);
+                return;
+            }
+            (0, messages_1.printError)('Unable to Resume Local Session', undefined, ['No stored session matched the requested ID.', 'List available sessions with: neurcode session list-local']);
+            process.exit(1);
+        }
+        if (options.json) {
+            console.log(JSON.stringify({
+                success: true,
+                sessionId: resumed.sessionRuntime.sessionId,
+                intentPackId: resumed.intentPack.intentPackId,
+                contextPackId: resumed.contextPack.contextPackId,
+                repositoryGraphId: resumed.repositoryGraph.graphId,
+                activePaths: resumed.activePaths,
+            }, null, 2));
+            return;
+        }
+        (0, messages_1.printSuccess)('Local Session Restored', [
+            `Session ${resumed.sessionRuntime.sessionId} is now active.`,
+            `Intent: ${resumed.intentPack.intent.normalized}`,
+            `Intent pack: ${resumed.intentPack.intentPackId}`,
+        ].join('\n   • '));
+    }
+    catch (error) {
+        (0, messages_1.printError)('Failed to Resume Local Session', error instanceof Error ? error : String(error));
+        process.exit(1);
+    }
+}
+function compareLocalSessionsCommand(options = {}) {
+    try {
+        if (!options.left || !options.right) {
+            throw new Error('Both --left and --right session IDs are required.');
+        }
+        const projectRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+        const comparison = (0, session_continuity_1.compareLocalIntentSessions)(projectRoot, options.left, options.right);
+        if (!comparison) {
+            throw new Error('Unable to load one or both local sessions.');
+        }
+        if (options.json) {
+            console.log(JSON.stringify({
+                success: true,
+                comparison,
+            }, null, 2));
+            return;
+        }
+        (0, messages_1.printSection)('Local Session Comparison');
+        console.log(chalk.white(`   Left: ${comparison.leftSessionId}`));
+        console.log(chalk.white(`   Right: ${comparison.rightSessionId}`));
+        console.log(chalk.white(`   Same intent: ${comparison.sameIntent ? 'yes' : 'no'}`));
+        console.log(chalk.white(`   Same branch: ${comparison.sameBranch ? 'yes' : 'no'}`));
+        console.log('');
+        (0, messages_1.printInfo)('Scope Delta', [
+            `Approved files added: ${comparison.approvedFilesAdded.length || 0}`,
+            `Approved files removed: ${comparison.approvedFilesRemoved.length || 0}`,
+            `Modules added: ${comparison.modulesAdded.length || 0}`,
+            `Modules removed: ${comparison.modulesRemoved.length || 0}`,
+            `Boundary expectations added: ${comparison.boundariesAdded.length || 0}`,
+            `Boundary expectations removed: ${comparison.boundariesRemoved.length || 0}`,
+        ].join('\n   • '));
+    }
+    catch (error) {
+        (0, messages_1.printError)('Failed to Compare Local Sessions', error instanceof Error ? error : String(error));
         process.exit(1);
     }
 }

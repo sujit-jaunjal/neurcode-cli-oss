@@ -80,7 +80,7 @@ export interface ReadChangeContractResult {
     error?: string;
 }
 export interface ChangeContractViolation {
-    code: 'CHANGE_CONTRACT_PLAN_MISMATCH' | 'CHANGE_CONTRACT_UNEXPECTED_FILE' | 'CHANGE_CONTRACT_MISSING_EXPECTED_FILE' | 'CHANGE_CONTRACT_BLOCKED_FILE_TOUCHED' | 'CHANGE_CONTRACT_ACTION_MISMATCH' | 'CHANGE_CONTRACT_MISSING_EXPECTED_SYMBOL' | 'CHANGE_CONTRACT_BLOCKED_SYMBOL_TOUCHED' | 'CHANGE_CONTRACT_SYMBOL_ACTION_MISMATCH' | 'CHANGE_CONTRACT_POLICY_LOCK_MISMATCH' | 'CHANGE_CONTRACT_COMPILED_POLICY_MISMATCH';
+    code: 'CHANGE_CONTRACT_PLAN_MISMATCH' | 'CHANGE_CONTRACT_UNEXPECTED_FILE' | 'CHANGE_CONTRACT_SERVICE_BOUNDARY_BREACH' | 'CHANGE_CONTRACT_INFRA_BOUNDARY_BREACH' | 'CHANGE_CONTRACT_DEPENDENCY_BOUNDARY_BREACH' | 'CHANGE_CONTRACT_SENSITIVE_BOUNDARY_BREACH' | 'CHANGE_CONTRACT_MISSING_EXPECTED_FILE' | 'CHANGE_CONTRACT_BLOCKED_FILE_TOUCHED' | 'CHANGE_CONTRACT_ACTION_MISMATCH' | 'CHANGE_CONTRACT_MISSING_EXPECTED_SYMBOL' | 'CHANGE_CONTRACT_BLOCKED_SYMBOL_TOUCHED' | 'CHANGE_CONTRACT_SYMBOL_ACTION_MISMATCH' | 'CHANGE_CONTRACT_POLICY_LOCK_MISMATCH' | 'CHANGE_CONTRACT_COMPILED_POLICY_MISMATCH';
     message: string;
     file?: string;
     symbol?: string;
@@ -98,6 +98,10 @@ export interface ChangeContractEvaluation {
         missingExpectedFiles: number;
         blockedFilesTouched: number;
         actionMismatches: number;
+        serviceBoundaryBreaches: number;
+        infraBoundaryBreaches: number;
+        dependencyBoundaryBreaches: number;
+        sensitiveBoundaryBreaches: number;
         expectedSymbols: number;
         changedSymbols: number;
         missingExpectedSymbols: number;
@@ -151,7 +155,7 @@ export declare function evaluateChangeContract(contract: ChangeContract, input: 
     compiledPolicyFingerprint?: string | null;
 }): ChangeContractEvaluation;
 export interface ChangeContractViolationGroup {
-    key: 'out_of_scope_changes' | 'missing_expected_files' | 'blocked_files_touched' | 'file_action_mismatches' | 'missing_expected_symbols' | 'blocked_symbols_touched' | 'symbol_action_mismatches' | 'contract_metadata_mismatches' | 'other';
+    key: 'out_of_scope_changes' | 'architectural_boundary_breaches' | 'dependency_boundary_breaches' | 'missing_expected_files' | 'blocked_files_touched' | 'file_action_mismatches' | 'missing_expected_symbols' | 'blocked_symbols_touched' | 'symbol_action_mismatches' | 'contract_metadata_mismatches' | 'other';
     title: string;
     impact: string;
     items: string[];

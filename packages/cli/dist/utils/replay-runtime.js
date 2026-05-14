@@ -11,6 +11,7 @@ const fs_1 = require("fs");
 const path_1 = require("path");
 const execution_bus_1 = require("./execution-bus");
 const canonical_pipeline_1 = require("../governance/canonical-pipeline");
+const artifact_io_1 = require("./artifact-io");
 const REPLAY_STATE_SCHEMA = 'neurcode.replay.state.v1';
 const REPLAY_EXECUTION_SCHEMA = 'neurcode.replay.execution.v1';
 const REPLAY_WORKSPACE_SCHEMA = 'neurcode.replay.workspace.v1';
@@ -195,6 +196,7 @@ function parseEvidenceDigest(root, filePath) {
     const flowIssues = Array.isArray(parsed.flowIssues) ? parsed.flowIssues : [];
     const coverage = asNumber(canonical.driftScore) ?? asNumber(canonical.score);
     const governanceVerification = asObject(canonical.governanceVerification);
+    const intentGovernance = asObject(canonical.intentGovernance) || asObject(parsed.intentGovernance);
     const governanceFindingsRaw = Array.isArray(canonical.governanceFindings)
         ? canonical.governanceFindings
         : (Array.isArray(governanceVerification?.findings) ? governanceVerification?.findings : []);
@@ -243,6 +245,8 @@ function parseEvidenceDigest(root, filePath) {
         commitSha: asString(git.commitSha),
         governanceFindingsCount: governanceFindings.length,
         governanceDeterminismCounts: determinismCounts,
+        intentGovernance,
+        intentGovernanceFindingCount: Math.floor(asNumber(intentGovernance?.canonicalFindingCount) ?? 0),
         semanticTruncationCount,
         federationTruncationCount,
         graphTruncationCount,
@@ -401,7 +405,7 @@ function loadCache(paths) {
 }
 function saveCache(paths, cache) {
     cache.generatedAt = nowIso();
-    (0, fs_1.writeFileSync)(paths.cacheFile, `${JSON.stringify(cache, null, 2)}\n`, 'utf-8');
+    (0, artifact_io_1.atomicWriteJsonFileSync)(paths.cacheFile, cache, { fsync: false });
 }
 function listFiles(dirPath, filter) {
     if (!(0, fs_1.existsSync)(dirPath))
@@ -582,12 +586,31 @@ function normalizeTimelineLimit(limit) {
     }
     return DEFAULT_TIMELINE_LIMIT;
 }
-function buildDeterminismWarnings(index, controlPlane, workspace) {
+function workspaceSnapshotRequired(paths, requestWorkspaceId, index) {
+    if (requestWorkspaceId && requestWorkspaceId.trim().length > 0) {
+        return true;
+    }
+    if (index.workspaceSnapshots.length > 0) {
+        return true;
+    }
+    const definitionsDir = (0, path_1.resolve)(paths.projectRoot, '.neurcode/workspaces/definitions');
+    if (!(0, fs_1.existsSync)(definitionsDir)) {
+        return false;
+    }
+    const definitionFiles = (0, fs_1.readdirSync)(definitionsDir)
+        .filter((name) => name.endsWith('.json'));
+    if (definitionFiles.length === 0) {
+        return false;
+    }
+    const workspaceIndex = readJsonFile((0, path_1.resolve)(paths.projectRoot, '.neurcode/workspaces/index.json'));
+    return typeof workspaceIndex?.activeWorkspaceId === 'string' && workspaceIndex.activeWorkspaceId.trim().length > 0;
+}
+function buildDeterminismWarnings(index, controlPlane, workspace, workspaceRequired) {
     const warnings = [];
     if (controlPlane === null) {
         warnings.push('No immutable control-plane snapshot existed at this timestamp.');
     }
-    if (workspace === null) {
+    if (workspaceRequired && workspace === null) {
         warnings.push('No immutable workspace snapshot existed at this timestamp.');
     }
     if (index.executions.length === 0) {
@@ -643,7 +666,7 @@ function buildReplayRecoveryGuidance(input) {
     return [...new Set(lines)];
 }
 function summarizeReplayGovernanceReport(input) {
-    const { warnings, evidences, controlPlane, workspace, executionRecordCount } = input;
+    const { warnings, evidences, controlPlane, workspace, workspaceRequired, executionRecordCount } = input;
     const latestEvidence = evidences[evidences.length - 1] || null;
     const missingArtifactSummaries = [];
     const semanticDegradationSummaries = [];
@@ -654,7 +677,7 @@ function summarizeReplayGovernanceReport(input) {
     if (!controlPlane) {
         missingArtifactSummaries.push('Missing control-plane snapshot at replay timestamp.');
     }
-    if (!workspace) {
+    if (workspaceRequired && !workspace) {
         missingArtifactSummaries.push('Missing workspace snapshot at replay timestamp.');
     }
     if (!latestEvidence) {
@@ -756,7 +779,7 @@ function summarizeReplayGovernanceReport(input) {
     const integritySummary = buildReplayIntegritySummary(reconstructionStatus, overall, latestEvidence !== null);
     const snapshotCompleteness = {
         controlPlaneSnapshot: controlPlane !== null,
-        workspaceSnapshot: workspace !== null,
+        workspaceSnapshot: workspaceRequired ? workspace !== null : true,
         verifyEvidenceArtifact: latestEvidence !== null,
         executionRecordsIndexed: executionRecordCount > 0,
     };
@@ -939,12 +962,14 @@ function replayGovernanceState(request, cwd = process.cwd()) {
     });
     const posture = computePosture(executions, evidences);
     const hotspots = buildHotspots(executions);
-    const warnings = buildDeterminismWarnings(index, controlPlane, workspace);
+    const workspaceRequired = workspaceSnapshotRequired(paths, request.workspaceId, index);
+    const warnings = buildDeterminismWarnings(index, controlPlane, workspace, workspaceRequired);
     const reconstruction = summarizeReplayGovernanceReport({
         warnings,
         evidences,
         controlPlane,
         workspace,
+        workspaceRequired,
         executionRecordCount: index.executions.length,
     });
     const determinismPayload = {
@@ -1281,7 +1306,8 @@ function replayTimeline(request = {}, cwd = process.cwd()) {
         return left.id.localeCompare(right.id);
     });
     const trimmed = items.slice(0, limit);
-    const warnings = buildDeterminismWarnings(index, index.controlPlaneSnapshots[index.controlPlaneSnapshots.length - 1] || null, index.workspaceSnapshots[index.workspaceSnapshots.length - 1] || null);
+    const workspaceRequired = workspaceSnapshotRequired(paths, request.workspaceId || undefined, index);
+    const warnings = buildDeterminismWarnings(index, index.controlPlaneSnapshots[index.controlPlaneSnapshots.length - 1] || null, index.workspaceSnapshots[index.workspaceSnapshots.length - 1] || null, workspaceRequired);
     return {
         schemaVersion: REPLAY_TIMELINE_SCHEMA,
         generatedAt: nowIso(),
@@ -1342,7 +1368,7 @@ function writeWorkspaceReplaySnapshot(input) {
         snapshotId,
         ...seed,
     };
-    (0, fs_1.writeFileSync)(snapshotPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    (0, artifact_io_1.atomicWriteJsonFileSync)(snapshotPath, payload);
     return { snapshotId, snapshotPath };
 }
 //# sourceMappingURL=replay-runtime.js.map
