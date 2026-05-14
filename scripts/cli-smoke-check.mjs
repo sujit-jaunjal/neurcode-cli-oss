@@ -38,14 +38,16 @@ function assert(condition, message) {
 
 function run() {
   const rootHelp = runCli(['--help']);
+  // Root help lists primary commands in Commander form and legacy commands as
+  // curated bullets (`* neurcode <cmd>`). Match both shapes so smoke stays stable.
   const requiredCommands = [
     'start [options] [intent...]',
-    'generate [options] [prompt...]',
+    'neurcode generate',
     'verify [options]',
-    'fix [options]',
-    'patch [options]',
-    'export [options]',
-    'daemon',
+    'neurcode fix',
+    'neurcode patch',
+    'neurcode export',
+    'neurcode daemon',
   ];
   for (const command of requiredCommands) {
     assertContains(rootHelp, command, 'root help output');
