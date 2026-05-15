@@ -1,8 +1,8 @@
 # @neurcode-ai/cli
 
-Neurcode CLI is a governance-focused AI coding runtime.
+Neurcode CLI is the execution path for deterministic governance in AI-assisted software delivery.
 
-It helps teams plan changes, ask grounded repository questions, verify policy/scope adherence, and ship with deterministic controls.
+It runs policy and scope verification against the working tree, exports bounded remediation context for findings, produces evidence artifacts for audit, and gates CI with the same deterministic output every run.
 
 ## Install
 

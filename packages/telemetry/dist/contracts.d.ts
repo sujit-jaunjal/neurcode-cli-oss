@@ -29,7 +29,7 @@ export interface GovernanceVerifyCompletedPayload {
     structuralRuleTriggerHistogram: Record<string, number>;
     structuralRuleSuppressionHistogram: Record<string, number>;
     compressedDuplicateCount: number;
-    replayIntegrityStatus?: 'exact' | 'bounded-degradation' | null;
+    replayIntegrityStatus?: 'exact' | 'bounded-degradation' | 'invalidated' | null;
     ciMode: boolean;
     policyOnly: boolean;
     /** Counts only — never file paths or code excerpts. */

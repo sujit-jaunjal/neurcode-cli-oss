@@ -5,22 +5,20 @@ This reference follows one canonical workflow.
 ## Core Workflow
 
 ```bash
-neurcode start "<intent>"
-neurcode verify
-neurcode fix
-neurcode patch --file <path>
-neurcode verify
+neurcode init
+neurcode verify --ci --policy-only --json    # policy check, exits non-zero on blocking
+neurcode remediation-export --finding-index 0 --output remediation-export.json
+# fix in your AI assistant using the suggestedPromptHint from the export
+neurcode verify --ci --policy-only --json    # confirm resolved
 ```
 
-Manual workflow:
+Primary loop:
 
-`intent → verify → fix → patch → verify`
+`verify → remediation-export → fix externally (via AI assistant) → verify`
 
-Autonomous workflow:
+Neurcode detects and governs. Your AI coding assistant (Cursor, Claude, Copilot) performs remediation. Neurcode does not autonomously modify production code.
 
-`start → generate/export plan → agent execution → verify → fix → patch → verify → CI`
-
-Deterministic remediation is the default engine. AI-assisted remediation proposals are optional, advisory-only, and must be reviewed before apply.
+See also: `neurcode prompt "<intent>"` for governed AI prompts, `neurcode ship "<intent>"` for one-command delivery.
 
 ## Core Command Reference
 

@@ -2030,6 +2030,7 @@ async function handlePilotReport(_req, res) {
     // Replay integrity distribution from verify.completed telemetry payloads
     let replayExact = 0;
     let replayBounded = 0;
+    let replayInvalidated = 0;
     let replayUnknown = 0;
     let lastReplayIntegrityStatus = null;
     for (const ev of verifyCompletedInWindow) {
@@ -2039,6 +2040,8 @@ async function handlePilotReport(_req, res) {
             replayExact += 1;
         else if (ri === 'bounded-degradation')
             replayBounded += 1;
+        else if (ri === 'invalidated')
+            replayInvalidated += 1;
         else
             replayUnknown += 1;
         if (!lastReplayIntegrityStatus && ri)
@@ -2152,6 +2155,7 @@ async function handlePilotReport(_req, res) {
         replayIntegrity: {
             exact: replayExact,
             boundedDegradation: replayBounded,
+            invalidated: replayInvalidated,
             unknown: replayUnknown,
             lastStatus: lastReplayIntegrityStatus,
         },
