@@ -143,11 +143,25 @@ function toCanonicalVerifyOutput(payload) {
     const seenViolations = new Set();
     const seenWarnings = new Set();
     const seenScopeIssues = new Set();
-    const addScopeIssue = (fileRaw, messageRaw) => {
+    const addScopeIssue = (fileRaw, messageRaw, extra) => {
         const file = asStringValue(fileRaw) || 'unknown';
         const message = normalizeScopeIssueMessage(messageRaw);
         const key = file.toLowerCase();
-        pushVerifyIssue(scopeIssues, seenScopeIssues, key, { file, message });
+        const issue = { file, message };
+        // Preserve intent-runtime governance classification when the local
+        // scope-guard produced it. These fields are part of the canonical
+        // contract and must not be silently dropped during canonicalisation.
+        const rawPolicy = asStringValue(extra?.policy);
+        if (rawPolicy === 'forbidden' || rawPolicy === 'review-required' || rawPolicy === 'out-of-scope' || rawPolicy === 'generated-code' || rawPolicy === 'unscoped') {
+            issue.policy = rawPolicy;
+        }
+        const rawBoundary = asStringValue(extra?.boundaryType);
+        if (rawBoundary === 'sensitive' || rawBoundary === 'infra' || rawBoundary === 'ci' ||
+            rawBoundary === 'dependency-manifest' || rawBoundary === 'service' || rawBoundary === 'module' ||
+            rawBoundary === 'generated-code' || rawBoundary === 'unspecified') {
+            issue.boundaryType = rawBoundary;
+        }
+        pushVerifyIssue(scopeIssues, seenScopeIssues, key, issue);
     };
     const addWarning = (fileRaw, messageRaw, policyRaw) => {
         const file = asStringValue(fileRaw) || 'unknown';
@@ -168,7 +182,7 @@ function toCanonicalVerifyOutput(payload) {
     for (const item of rawScopeIssues) {
         const record = asObjectRecord(item);
         if (record) {
-            addScopeIssue(record.file, record.message);
+            addScopeIssue(record.file, record.message, { policy: record.policy, boundaryType: record.boundaryType });
         }
         else {
             addScopeIssue(item, null);
@@ -439,6 +453,16 @@ function toCanonicalVerifyOutput(payload) {
         'structuralViolations',
         'structuralRulesApplied',
         'structuralSuppressedCount',
+        // Intent-runtime activation envelope: surfaces which runtime mode the
+        // verify ran in (full / synthesised-context / structural-only) plus the
+        // identifiers needed to reconnect dashboard + replay surfaces to the
+        // active intent contract. Must survive canonicalisation.
+        'intentRuntime',
+        // Capability envelope: machine-readable declaration of which governance
+        // layers actually executed (deterministic vs degraded vs unavailable),
+        // so enterprise CI never has to infer silent downgrades from absence
+        // of fields.
+        'runtimeCapabilities',
     ];
     const canonicalMutable = canonical;
     for (const key of passthroughKeys) {

@@ -2,7 +2,20 @@
 /**
  * Verify Command
  *
- * Compares current work (git diff) against an Architect Plan to measure adherence and detect bloat.
+ * Runs deterministic operational governance against the current diff:
+ *   - Intent contract enforcement (approved scope + forbidden boundaries)
+ *   - Structural rules (PY/SR/DS catalogues)
+ *   - Drift narrative synthesis + governance posture rollup
+ *   - Generated-code spillover + boundary classification
+ *   - Replay continuity (canonical replay checksum, byte-stable per inputs)
+ *
+ * Emits a single canonical envelope plus a `runtimeCapabilities` declaration so
+ * enterprise CI gates can assert what actually executed instead of inferring
+ * from absent fields. The command is the verification step in the canonical
+ * governance lifecycle; remediation is performed by an external AI assistant,
+ * never by this command.
+ *
+ * See `docs/governance-vocabulary.md` for canonical terminology.
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -85,6 +98,8 @@ const runtime_guard_1 = require("../utils/runtime-guard");
 const artifact_signature_1 = require("../utils/artifact-signature");
 const policy_1 = require("@neurcode-ai/policy");
 const active_engineering_context_1 = require("../utils/active-engineering-context");
+const core_1 = require("@neurcode-ai/core");
+const path_boundary_classifier_1 = require("../utils/path-boundary-classifier");
 const ai_debt_budget_1 = require("../utils/ai-debt-budget");
 const verification_evidence_1 = require("../utils/verification-evidence");
 const verify_runtime_stability_1 = require("../utils/verify-runtime-stability");
@@ -2323,6 +2338,11 @@ async function verifyCommand(options) {
                 console.log(chalk.dim('   Tip: Ensure changes are staged or run against a base branch.'));
             }
             else {
+                // Surface runtime capabilities even on the empty-diff path so
+                // CI gates that assert `runtimeCapabilities.intentRuntime` etc.
+                // never receive a payload that omits the envelope. The intent
+                // runtime is reported as `inactive` here regardless of whether
+                // an intent-pack exists — there are no findings to govern.
                 emitVerifyJson({
                     grade: 'F',
                     score: 0,
@@ -2335,6 +2355,24 @@ async function verifyCommand(options) {
                     totalPlannedFiles: 0,
                     message: 'No changes detected in current diff context.',
                     scopeGuardPassed: false,
+                    runtimeCapabilities: {
+                        schemaVersion: 'neurcode.runtime-capabilities.v1',
+                        executionPath: localOnlyMode ? 'local-only' : 'unresolved',
+                        intentRuntime: 'inactive',
+                        intentContractSource: 'none',
+                        intentRuntimeRequired: options.requireIntentRuntime === true || isEnabledFlag(process.env.NEURCODE_REQUIRE_INTENT_RUNTIME),
+                        intentRuntimeRequirementSatisfied: true,
+                        driftIntelligence: 'inactive',
+                        scopeGuard: 'unenforced',
+                        forbiddenBoundaryEnforcement: 'unenforced',
+                        generatedCodeGovernance: 'pattern-deterministic',
+                        structuralRules: 'inactive',
+                        replayDeterminism: 'enforced',
+                        apiContractStatus: localOnlyMode ? 'offline' : 'unresolved',
+                        observedScopeCategories: [],
+                        observedBoundaryTypes: [],
+                        noChangesDetected: true,
+                    },
                 });
             }
             recordVerifyEvent('NO_CHANGES', 'diff=empty');
@@ -2365,54 +2403,305 @@ async function verifyCommand(options) {
         // Deterministic structural governance MUST work offline, with zero API dependency.
         if (localOnlyMode) {
             if (!options.json) {
-                console.log(chalk.cyan('\n🔍 Local-only mode: deterministic structural verification (no API required)...'));
+                console.log(chalk.cyan('\n🔍 Local-only mode: deterministic intent-runtime verification (no API required)...'));
             }
             const localStructural = (0, structural_on_diff_1.runStructuralOnDiffFiles)(projectRoot, diffFiles);
             const localStructuralFindings = localStructural.violations.map(canonical_pipeline_1.findingFromStructural);
-            const localReplayChecksum = (0, canonical_invariants_1.computeCanonicalFindingChecksum)(localStructuralFindings);
             const blockingViolations = localStructural.violations.filter((v) => v.severity === 'BLOCKING');
             const advisoryViolations = localStructural.violations.filter((v) => v.severity !== 'BLOCKING');
-            const localVerdict = blockingViolations.length > 0 ? 'FAIL' : 'PASS';
-            const localGrade = blockingViolations.length > 0 ? 'F' : 'B';
-            const localScore = blockingViolations.length > 0 ? 0 : 70;
+            // ─── Intent-runtime activation (deterministic, offline) ──────────────────
+            // When an intent-pack is present in `.neurcode/intent-pack.json` the local
+            // verify path now activates the full governance runtime: scope checks,
+            // forbidden-boundary enforcement, drift narratives and posture synthesis.
+            // Companion artefacts (context-pack, repository-graph, session-runtime)
+            // are deterministically synthesised when they are absent so the runtime
+            // does NOT silently collapse into structural-only mode.
+            let localActiveContext = null;
+            let localGovernanceResult = null;
+            const localScopeIssues = [];
+            try {
+                localActiveContext = (0, active_engineering_context_1.loadOrSynthesizeEngineeringContext)(projectRoot);
+            }
+            catch (err) {
+                if (!options.json && (process.env.DEBUG || process.env.VERBOSE)) {
+                    console.log(chalk.dim(`   [intent-runtime] context load skipped: ${err.message}`));
+                }
+            }
+            if (localActiveContext) {
+                try {
+                    localGovernanceResult = (0, governance_1.evaluateGovernance)({
+                        projectRoot,
+                        task: localActiveContext.intentPack.intent.normalized,
+                        expectedFiles: localActiveContext.intentPack.approvedScope.files,
+                        expectedDependencies: localActiveContext.intentPack.expectedDependencies,
+                        diffFiles,
+                        contextCandidates: localActiveContext.contextPack.selectedFiles.map((f) => f.path),
+                        activeEngineeringContext: localActiveContext,
+                    });
+                    // Deterministic scope-guard intersection against intent-pack approvedScope
+                    // PLUS explicit forbiddenBoundaries. Drift intelligence already flags
+                    // narrative-level drift; this surfaces direct path violations as
+                    // first-class scope issues regardless of drift heuristics.
+                    const intent = localActiveContext.intentPack;
+                    const approvedFileSet = new Set(intent.approvedScope.files.map(core_1.normalizeRepoPath));
+                    const approvedModulePaths = intent.approvedScope.modules.map(core_1.normalizeRepoPath);
+                    const approvedServicePaths = intent.approvedScope.services.map(core_1.normalizeRepoPath);
+                    const matchesPrefix = (file, prefixes) => prefixes.some((p) => p && (file === p || file.startsWith(`${p}/`)));
+                    const changedNormalized = diffFiles
+                        .map((f) => (0, core_1.normalizeRepoPath)(f.path))
+                        .filter((p) => Boolean(p));
+                    const isAllowedBoundaryType = (value) => value === 'sensitive' || value === 'infra' || value === 'ci' ||
+                        value === 'dependency-manifest' || value === 'service' || value === 'module' ||
+                        value === 'generated-code' || value === 'unspecified';
+                    // First pass: explicit forbidden boundaries always surface (even if
+                    // they also happen to be inside an approved module).
+                    for (const boundary of intent.forbiddenBoundaries) {
+                        const boundaryPath = (0, core_1.normalizeRepoPath)(boundary.path);
+                        if (!boundaryPath)
+                            continue;
+                        for (const file of changedNormalized) {
+                            if (file === boundaryPath || file.startsWith(`${boundaryPath}/`)) {
+                                if (boundary.policy === 'allowed')
+                                    continue;
+                                const alreadyFlagged = localScopeIssues.some((s) => s.file === file && s.boundaryType === boundary.type);
+                                if (alreadyFlagged)
+                                    continue;
+                                const boundaryType = isAllowedBoundaryType(boundary.type) ? boundary.type : 'unspecified';
+                                localScopeIssues.push({
+                                    file,
+                                    message: `Forbidden boundary touched (${boundary.type}, policy=${boundary.policy}): ${boundary.reason}`,
+                                    policy: boundary.policy === 'forbidden' ? 'forbidden' : 'review-required',
+                                    boundaryType,
+                                });
+                            }
+                        }
+                    }
+                    // Second pass: out-of-scope files (not in approved file/module/service set).
+                    // Only run if any approvedScope dimension is non-empty — empty scope means
+                    // intent-pack is in observation mode and we should not synthesise FPs.
+                    // When a file falls outside scope, we additionally classify it against
+                    // well-known path patterns (generated-code, infra, CI, dependency-manifest)
+                    // so reviewers see WHY the boundary matters, not just THAT it was breached.
+                    const hasApprovedScope = approvedFileSet.size > 0 || approvedModulePaths.length > 0 || approvedServicePaths.length > 0;
+                    if (hasApprovedScope) {
+                        for (const file of changedNormalized) {
+                            if (approvedFileSet.has(file))
+                                continue;
+                            if (matchesPrefix(file, approvedModulePaths))
+                                continue;
+                            if (matchesPrefix(file, approvedServicePaths))
+                                continue;
+                            if (localScopeIssues.some((s) => s.file === file))
+                                continue;
+                            const classification = (0, path_boundary_classifier_1.classifyPathBoundary)(file);
+                            if (classification) {
+                                // generated-code is a stronger signal than plain out-of-scope:
+                                // generated files should not be hand-edited regardless of
+                                // approval status.
+                                if (classification.category === 'generated-code') {
+                                    localScopeIssues.push({
+                                        file,
+                                        message: `Generated-code edit outside approved scope (${classification.reason}). Regenerate from source or update the intent-pack to declare this surface.`,
+                                        policy: 'generated-code',
+                                        boundaryType: 'generated-code',
+                                    });
+                                    continue;
+                                }
+                                const boundaryType = isAllowedBoundaryType(classification.category) ? classification.category : 'unspecified';
+                                localScopeIssues.push({
+                                    file,
+                                    message: `File modified outside the declared intent scope (${classification.category}: ${classification.reason}).`,
+                                    policy: 'out-of-scope',
+                                    boundaryType,
+                                });
+                                continue;
+                            }
+                            localScopeIssues.push({
+                                file,
+                                message: 'File modified outside the declared intent scope.',
+                                policy: 'out-of-scope',
+                            });
+                        }
+                    }
+                    else {
+                        // Observation mode (no approved scope): only surface generated-code
+                        // edits, because those are usually wrong regardless of intent.
+                        for (const file of changedNormalized) {
+                            if (localScopeIssues.some((s) => s.file === file))
+                                continue;
+                            const classification = (0, path_boundary_classifier_1.classifyPathBoundary)(file);
+                            if (classification?.category === 'generated-code') {
+                                localScopeIssues.push({
+                                    file,
+                                    message: `Generated-code edit detected (${classification.reason}). Regenerate from source.`,
+                                    policy: 'generated-code',
+                                    boundaryType: 'generated-code',
+                                });
+                            }
+                        }
+                    }
+                }
+                catch (err) {
+                    if (!options.json && (process.env.DEBUG || process.env.VERBOSE)) {
+                        console.log(chalk.dim(`   [intent-runtime] governance evaluation skipped: ${err.message}`));
+                    }
+                }
+            }
+            const blockingScopeCount = localScopeIssues.filter((s) => s.policy === 'forbidden' || s.policy === 'out-of-scope' || s.policy === 'generated-code').length;
+            const advisoryScopeCount = localScopeIssues.filter((s) => s.policy === 'review-required').length;
+            const intentRuntimeActive = Boolean(localGovernanceResult);
+            const localScopeGuardPassed = blockingScopeCount === 0;
+            // `--require-intent-runtime` (or NEURCODE_REQUIRE_INTENT_RUNTIME=1) makes
+            // silent downgrade into a hard failure. Without this flag the runtime
+            // gracefully degrades to structural-only when no intent contract exists;
+            // with it, enterprise CI gates can assert intent governance was applied.
+            const requireIntentRuntimeFlag = options.requireIntentRuntime === true || isEnabledFlag(process.env.NEURCODE_REQUIRE_INTENT_RUNTIME);
+            const intentRuntimeRequirementFailed = requireIntentRuntimeFlag && !intentRuntimeActive;
+            const localVerdict = blockingViolations.length > 0 || blockingScopeCount > 0 || intentRuntimeRequirementFailed ? 'FAIL' : 'PASS';
+            const localGrade = localVerdict === 'FAIL' ? 'F' : 'B';
+            const localScore = localVerdict === 'FAIL' ? 0 : 70;
+            const scopeViolationRows = localScopeIssues
+                .filter((s) => s.policy === 'forbidden' || s.policy === 'out-of-scope' || s.policy === 'generated-code')
+                .map((s) => ({
+                file: s.file,
+                rule: 'scope_guard',
+                severity: 'block',
+                message: s.message,
+            }));
+            const scopeWarningRows = localScopeIssues
+                .filter((s) => s.policy === 'review-required')
+                .map((s) => ({
+                file: s.file,
+                rule: 'scope_guard',
+                severity: 'warn',
+                message: s.message,
+            }));
+            // Surface the intent-runtime requirement failure as a first-class
+            // governance row so CI logs, dashboards, and PR comments all see the
+            // same explanation. The row sits next to scope_guard rows so it shares
+            // their treatment (block, blocking-count, exit code).
+            const intentRuntimeRequirementRows = intentRuntimeRequirementFailed
+                ? [{
+                        file: '.neurcode/intent-pack.json',
+                        rule: 'intent_runtime_required',
+                        severity: 'block',
+                        message: 'Intent-governed runtime required (--require-intent-runtime / NEURCODE_REQUIRE_INTENT_RUNTIME=1) but no `.neurcode/intent-pack.json` was found or it could not be synthesised. Either author an intent pack (`neurcode start`) or drop the requirement to allow structural-only verification.',
+                    }]
+                : [];
             const localPayload = {
                 grade: localGrade,
                 score: localScore,
                 verdict: localVerdict,
-                violations: localStructural.violations.map((v) => ({
-                    file: v.filePath,
-                    rule: v.ruleId,
-                    severity: v.severity === 'BLOCKING' ? 'block' : 'warn',
-                    message: `${v.ruleName}: ${v.evidence.slice(0, 120)}`,
-                })),
+                violations: [
+                    ...localStructural.violations.map((v) => ({
+                        file: v.filePath,
+                        rule: v.ruleId,
+                        severity: v.severity === 'BLOCKING' ? 'block' : 'warn',
+                        message: `${v.ruleName}: ${v.evidence.slice(0, 120)}`,
+                    })),
+                    ...scopeViolationRows,
+                    ...scopeWarningRows,
+                    ...intentRuntimeRequirementRows,
+                ],
                 adherenceScore: localScore,
-                bloatCount: 0,
-                bloatFiles: [],
+                bloatCount: blockingScopeCount,
+                bloatFiles: scopeViolationRows.map((r) => r.file),
                 plannedFilesModified: 0,
                 totalPlannedFiles: 0,
-                message: `Local-only structural verification: ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking.`,
-                scopeGuardPassed: true,
-                mode: 'local_only_structural',
+                message: intentRuntimeRequirementFailed
+                    ? 'Intent-runtime requirement failed: no `.neurcode/intent-pack.json` available to activate scope + forbidden-boundary enforcement.'
+                    : (intentRuntimeActive
+                        ? `Local intent-runtime verification: ${localStructural.violations.length} structural finding(s), ${blockingViolations.length} blocking; ${blockingScopeCount} scope violation(s), ${advisoryScopeCount} advisory boundary issue(s).`
+                        : `Local-only structural verification: ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking.`),
+                scopeGuardPassed: localScopeGuardPassed,
+                scopeIssues: localScopeIssues.map((s) => ({ file: s.file, message: s.message, policy: s.policy, boundaryType: s.boundaryType })),
+                mode: intentRuntimeActive ? 'local_intent_runtime' : 'local_only_structural',
                 policyOnly: true,
-                replayChecksum: localReplayChecksum,
-                replayMode: 'local-structural',
+                // NOTE: this is the structural-only checksum. When the canonical
+                // envelope is attached below, `governanceVerification.replayChecksum`
+                // becomes the authoritative hash over the merged finding set
+                // (structural + drift + scope). The top-level `replayChecksum` is
+                // rewritten post-attach so enterprise CI sees a single canonical
+                // hash for the activated runtime.
+                replayChecksum: (0, canonical_invariants_1.computeCanonicalFindingChecksum)(localStructuralFindings),
+                replayMode: intentRuntimeActive ? 'local-intent-runtime' : 'local-structural',
                 structuralViolations: localStructural.violations,
                 structuralBlockingCount: blockingViolations.length,
                 structuralRulesApplied: localStructural.rulesApplied,
                 changeContract: changeContractSummary,
+                // driftIntelligence drives intentGovernance summary + drift findings
+                // inside attachCanonicalGovernance.
+                driftIntelligence: localGovernanceResult?.driftIntelligence ?? null,
+                engineeringContext: localGovernanceResult?.engineeringContext ?? null,
+                intentRuntime: localActiveContext
+                    ? {
+                        active: true,
+                        synthesized: Boolean(localActiveContext.synthesized),
+                        intentPackId: localActiveContext.intentPack.intentPackId,
+                        contextPackId: localActiveContext.contextPack.contextPackId,
+                        repositoryGraphId: localActiveContext.repositoryGraph.graphId,
+                        warnings: localActiveContext.warnings,
+                    }
+                    : { active: false, synthesized: false, intentPackId: null, contextPackId: null, repositoryGraphId: null, warnings: [] },
+                // Machine-readable capability declaration for enterprise CI. Every
+                // field is "what actually executed", not "what we wished happened".
+                // CI gates that need a specific guarantee (e.g. intent-runtime active,
+                // generated-code governance active) can assert against this envelope
+                // rather than inferring from absence of fields. See
+                // docs/validation/2026-05-16-activated/activation-report-2026-05-16.md
+                // §6 for the rationale.
+                runtimeCapabilities: {
+                    schemaVersion: 'neurcode.runtime-capabilities.v1',
+                    executionPath: 'local-only',
+                    intentRuntime: intentRuntimeActive
+                        ? (localActiveContext?.synthesized ? 'active-synthesized' : 'active-authored')
+                        : 'inactive',
+                    intentContractSource: localActiveContext
+                        ? (localActiveContext.synthesized ? 'intent-pack-only' : 'full-bundle')
+                        : 'none',
+                    // Reflect whether the caller required intent runtime to be active.
+                    // Mirrors how `requireRuntimeGuard` is surfaced; lets dashboards
+                    // distinguish "intent runtime inactive by choice" from
+                    // "intent runtime inactive against caller policy".
+                    intentRuntimeRequired: requireIntentRuntimeFlag,
+                    intentRuntimeRequirementSatisfied: !intentRuntimeRequirementFailed,
+                    driftIntelligence: localGovernanceResult?.driftIntelligence ? 'active' : 'inactive',
+                    scopeGuard: intentRuntimeActive ? 'enforced' : 'unenforced',
+                    forbiddenBoundaryEnforcement: intentRuntimeActive ? 'enforced' : 'unenforced',
+                    generatedCodeGovernance: 'pattern-deterministic',
+                    structuralRules: 'active',
+                    replayDeterminism: 'enforced',
+                    apiContractStatus: 'offline',
+                    // Counts of categories observed in THIS run (not capacity).
+                    observedScopeCategories: Array.from(new Set(localScopeIssues.map((s) => s.policy))).sort(),
+                    observedBoundaryTypes: Array.from(new Set(localScopeIssues
+                        .map((s) => s.boundaryType)
+                        .filter((b) => Boolean(b)))).sort(),
+                },
             };
-            captureEvidencePayload((0, canonical_pipeline_1.attachCanonicalGovernance)(localPayload));
+            // Run the canonical pipeline once so we can extract the merged-finding
+            // replayChecksum (structural + drift + scope) and back-write it to the
+            // top-level payload + custody envelope. This keeps a single authoritative
+            // hash visible at every replay surface when the intent runtime is active.
+            const enrichedLocalPayload = (0, canonical_pipeline_1.attachCanonicalGovernance)(localPayload);
+            const envelopeReplayChecksum = (() => {
+                const env = enrichedLocalPayload.governanceVerification;
+                return env && typeof env.replayChecksum === 'string' ? env.replayChecksum : localPayload.replayChecksum;
+            })();
+            enrichedLocalPayload.replayChecksum = envelopeReplayChecksum;
+            localPayload.replayChecksum = envelopeReplayChecksum;
+            captureEvidencePayload(enrichedLocalPayload);
             const localReplayCustody = (0, replay_custody_1.captureVerifyReplayCustody)({
                 projectRoot,
                 diffContext: `${options.base || 'HEAD'} vs working tree`,
                 filesAnalyzed: diffFiles.length,
                 planId: null,
-                verificationSource: 'local_only_structural',
+                verificationSource: intentRuntimeActive ? 'local_intent_runtime' : 'local_only_structural',
                 policyLockFingerprint: null,
                 compiledPolicyFingerprint: null,
                 ruleIds: localStructural.rulesApplied,
-                blockingCount: blockingViolations.length,
-                advisoryCount: advisoryViolations.length,
+                blockingCount: blockingViolations.length + blockingScopeCount,
+                advisoryCount: advisoryViolations.length + advisoryScopeCount,
                 suppressedCount: localStructural.suppressedCount,
                 structuralBlockingCount: blockingViolations.length,
                 structuralAdvisoryCount: advisoryViolations.length,
@@ -2422,10 +2711,12 @@ async function verifyCommand(options) {
                     ? Math.round((localStructural.violations.filter((v) => v.determinism === 'deterministic-structural').length / localStructural.violations.length) * 100)
                     : 100,
                 verdict: localVerdict,
-                governanceDecision: 'local deterministic structural verification',
+                governanceDecision: intentRuntimeActive
+                    ? `local intent-runtime verification${localActiveContext?.synthesized ? ' (synthesised context)' : ''}`
+                    : 'local deterministic structural verification',
                 actor: custodyActor,
                 source: custodySource,
-                replayChecksum: localReplayChecksum,
+                replayChecksum: envelopeReplayChecksum,
             });
             applyCapturedReplayCustody(lastCanonicalOutput, localReplayCustody);
             if (options.json) {
@@ -2435,8 +2726,10 @@ async function verifyCommand(options) {
                 });
             }
             else {
-                if (localStructural.violations.length === 0) {
-                    console.log(chalk.green('\n✅ No structural violations found (local-only mode).'));
+                if (localStructural.violations.length === 0 && localScopeIssues.length === 0) {
+                    console.log(chalk.green(intentRuntimeActive
+                        ? '\n✅ No structural or scope violations found (intent-runtime active, local-only).'
+                        : '\n✅ No structural violations found (local-only mode).'));
                 }
                 else {
                     localStructural.violations.forEach((v) => {
@@ -2445,14 +2738,42 @@ async function verifyCommand(options) {
                         console.log(chalk.dim(`     ${v.ruleName}`));
                         console.log(chalk.dim(`     ${v.evidence.slice(0, 100)}`));
                     });
+                    for (const issue of localScopeIssues) {
+                        const prefix = issue.policy === 'forbidden' || issue.policy === 'out-of-scope'
+                            ? chalk.red('  ⛔ SCOPE   ')
+                            : chalk.yellow('  ⚠  SCOPE  ');
+                        console.log(`${prefix} ${issue.file}`);
+                        console.log(chalk.dim(`     ${issue.message}`));
+                    }
                 }
-                console.log(chalk.dim(`\n[Local-only] ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking. ` +
-                    `Structural analysis ran on this checkout only (no verify API).\n`));
-                console.log(chalk.dim('   Replay: same commit + same flags → same structural findings.\n' +
-                    '   Full plan/adherence + remote verify: drop --local-only when policy allows network/API.\n'));
+                const modeLabel = intentRuntimeActive
+                    ? (localActiveContext?.synthesized ? 'Local intent-runtime (synthesised context)' : 'Local intent-runtime')
+                    : 'Local-only structural';
+                console.log(chalk.dim(`\n[${modeLabel}] ${localStructural.violations.length} structural finding(s), ` +
+                    `${blockingViolations.length} blocking; ${localScopeIssues.length} scope issue(s), ${blockingScopeCount} blocking.\n`));
+                // Governance posture banner: surface gate + rollout trust prominently
+                // when the intent runtime is active so the most-glanced terminal line
+                // reflects the canonical governance lifecycle, not just verify counts.
+                if (intentRuntimeActive && localGovernanceResult?.driftIntelligence) {
+                    const drift = localGovernanceResult.driftIntelligence;
+                    const gate = drift.riskSynthesis?.governanceGate || drift.governancePosture?.governanceGate;
+                    const rolloutTrust = drift.riskSynthesis?.rolloutTrust || drift.governancePosture?.rolloutTrust;
+                    if (gate || rolloutTrust) {
+                        const gateLabel = gate ? `gate=${chalk.bold(gate)}` : 'gate=advisory';
+                        const trustLabel = rolloutTrust ? `rollout-trust=${chalk.bold(rolloutTrust)}` : 'rollout-trust=rollout-safe';
+                        console.log(chalk.dim(`   Governance posture: ${gateLabel} · ${trustLabel}\n`));
+                    }
+                }
+                console.log(chalk.dim(`   Replay: same commit + same flags + same intent-pack → same canonical checksum.\n` +
+                    `   Replay checksum: ${envelopeReplayChecksum.slice(0, 16)}…\n` +
+                    (intentRuntimeActive
+                        ? '   Intent governance: ACTIVE (offline). Add full intent-runtime artefacts for richer semantic narratives.\n'
+                        : '   Intent governance: INACTIVE. Add `.neurcode/intent-pack.json` to activate scope + forbidden-boundary enforcement locally.\n')));
             }
-            recordVerifyEvent(localVerdict, `local_only;structural=${localStructural.violations.length}`, diffFiles.map((f) => f.path));
-            exitWithEvidence(blockingViolations.length > 0 ? 2 : 0);
+            recordVerifyEvent(localVerdict, intentRuntimeActive
+                ? `local_intent_runtime;structural=${localStructural.violations.length};scope=${localScopeIssues.length}`
+                : `local_only;structural=${localStructural.violations.length}`, diffFiles.map((f) => f.path));
+            exitWithEvidence(localVerdict === 'FAIL' ? 2 : 0);
         }
         const summary = (0, diff_parser_1.getDiffSummary)(diffFiles);
         if (diffFiles.length === 0) {

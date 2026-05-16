@@ -1153,6 +1153,7 @@ program
     .option('--api-key <key>', 'Neurcode API Key (overrides config and env var)')
     .option('--api-url <url>', 'Override API URL (default: https://api.neurcode.com)')
     .option('--local-only', 'Offline structural fallback: skip API, run deterministic structural rules only (sets NEURCODE_VERIFY_LOCAL_ONLY=1)')
+    .option('--require-intent-runtime', 'Fail if the intent-governed runtime is not active for this run (no silent downgrade to structural-only). Honours NEURCODE_REQUIRE_INTENT_RUNTIME=1.')
     .action(async (options) => {
     if (options.localOnly === true) {
         process.env.NEURCODE_VERIFY_LOCAL_ONLY = '1';
@@ -1217,6 +1218,8 @@ program
             verifyArgs.push('--api-key', options.apiKey);
         if (options.apiUrl)
             verifyArgs.push('--api-url', options.apiUrl);
+        if (options.requireIntentRuntime === true)
+            verifyArgs.push('--require-intent-runtime');
         const run = await (0, execution_bus_1.runExecution)({
             type: 'verify',
             source: 'cli',
@@ -1262,6 +1265,7 @@ program
         verifyJobTimeoutMs: Number.isFinite(options.verifyJobTimeoutMs) ? options.verifyJobTimeoutMs : undefined,
         verifyIdempotencyKey: options.verifyIdempotencyKey,
         verifyJobMaxAttempts: Number.isFinite(options.verifyJobMaxAttempts) ? options.verifyJobMaxAttempts : undefined,
+        requireIntentRuntime: options.requireIntentRuntime === true,
     });
 });
 program

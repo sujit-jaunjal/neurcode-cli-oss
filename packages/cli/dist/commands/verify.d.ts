@@ -1,7 +1,20 @@
 /**
  * Verify Command
  *
- * Compares current work (git diff) against an Architect Plan to measure adherence and detect bloat.
+ * Runs deterministic operational governance against the current diff:
+ *   - Intent contract enforcement (approved scope + forbidden boundaries)
+ *   - Structural rules (PY/SR/DS catalogues)
+ *   - Drift narrative synthesis + governance posture rollup
+ *   - Generated-code spillover + boundary classification
+ *   - Replay continuity (canonical replay checksum, byte-stable per inputs)
+ *
+ * Emits a single canonical envelope plus a `runtimeCapabilities` declaration so
+ * enterprise CI gates can assert what actually executed instead of inferring
+ * from absent fields. The command is the verification step in the canonical
+ * governance lifecycle; remediation is performed by an external AI assistant,
+ * never by this command.
+ *
+ * See `docs/governance-vocabulary.md` for canonical terminology.
  */
 interface VerifyOptions {
     planId?: string;
@@ -55,6 +68,14 @@ interface VerifyOptions {
     verifyIdempotencyKey?: string;
     /** Max backend retry attempts for queue-backed verify jobs. */
     verifyJobMaxAttempts?: number;
+    /**
+     * Fail (exit 2) if the intent runtime is not active for this run — i.e.
+     * `intent-pack.json` is missing, unreadable, or the synthesised context
+     * could not be built. Equivalent env var: `NEURCODE_REQUIRE_INTENT_RUNTIME=1`.
+     * Honoured by the local-only execution path; the cloud path treats it as
+     * "fail if plan/intent context absent" via the existing `requirePlan` flag.
+     */
+    requireIntentRuntime?: boolean;
 }
 export declare function verifyCommand(options: VerifyOptions): Promise<undefined>;
 export {};
