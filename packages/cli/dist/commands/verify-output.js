@@ -153,6 +153,18 @@ function toCanonicalVerifyOutput(payload) {
         const importEdgeRaw = extra?.importEdge && typeof extra.importEdge === 'object' && !Array.isArray(extra.importEdge)
             ? extra.importEdge
             : null;
+        const policyRaw = asStringValue(extra?.policy);
+        const hasMeaningfulMetadata = importEdgeRaw || (policyRaw && policyRaw.length > 0);
+        // Reviewer-ergonomics fix (final-pilot §6.7): when the same file is
+        // already represented in scopeIssues by a structured entry (import-edge
+        // OR policy-bearing path-touch), suppress further unstructured
+        // duplicate entries. They contribute noise without adding signal.
+        if (!hasMeaningfulMetadata) {
+            const fileLower = file.toLowerCase();
+            const dupeExists = scopeIssues.some((s) => s.file.toLowerCase() === fileLower && (s.policy || s.importEdge));
+            if (dupeExists)
+                return;
+        }
         const key = importEdgeRaw
             ? `${file.toLowerCase()}|edge|${(asStringValue(importEdgeRaw.importTarget) ?? '').toLowerCase()}|${(asStringValue(importEdgeRaw.resolvedBoundary) ?? '').toLowerCase()}`
             : file.toLowerCase();
@@ -226,8 +238,18 @@ function toCanonicalVerifyOutput(payload) {
             addScopeIssue(item, null);
         }
     }
+    // Legacy `bloatFiles` passthrough — preserves backward-compat with
+    // pre-intent-runtime envelopes that did not emit structured scopeIssues.
+    // When the modern intent-runtime is active, the canonical scopeIssues
+    // already carry `policy` + `boundaryType` for every breach, so we skip
+    // any bloat entry whose file path is already represented to avoid the
+    // null-policy duplicate (closes deep-OSS §6.7 / final-pilot §6.7).
     const rawBloatFiles = Array.isArray(payload.bloatFiles) ? payload.bloatFiles : [];
+    const knownScopeFiles = new Set(scopeIssues.map((s) => s.file.toLowerCase()));
     for (const item of rawBloatFiles) {
+        const fileStr = asStringValue(item);
+        if (fileStr && knownScopeFiles.has(fileStr.toLowerCase()))
+            continue;
         addScopeIssue(item, null);
     }
     const rawWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];

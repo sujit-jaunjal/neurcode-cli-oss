@@ -547,9 +547,13 @@ function asDriftIntelligenceReport(value) {
         return null;
     return record;
 }
-function buildIntentGovernanceSummary(drift, envelope) {
+function buildIntentGovernanceSummary(drift, envelope, importEdgeBlockingCount = 0) {
     const intentFindings = envelope.findings.filter((finding) => finding.sourceSystem === 'intent-engine');
     const blocking = intentFindings.filter((finding) => finding.severity === 'BLOCKING').length;
+    // Import-edge findings are blocking signals that live on `scopeIssues`
+    // rather than `governanceVerification.findings`. For gate-promotion
+    // purposes we treat them as equivalent to intent-engine blocking findings.
+    const totalBlocking = blocking + (importEdgeBlockingCount > 0 ? importEdgeBlockingCount : 0);
     return {
         schemaVersion: 'neurcode.intent-governance.v1',
         source: drift?.source ?? null,
@@ -568,12 +572,27 @@ function buildIntentGovernanceSummary(drift, envelope) {
         impactedModules: drift?.impactedModules ?? [],
         impactedServices: drift?.impactedServices ?? [],
         riskSummary: drift?.riskSynthesis?.summary ?? null,
-        governanceGate: drift?.riskSynthesis?.governanceGate ?? null,
+        // Reviewer-ergonomics fix (final-pilot §6.1): when there are blocking
+        // findings, "advisory" reads as low-severity to non-runtime-savvy
+        // reviewers even though the verdict is FAIL. Promote `advisory` →
+        // `architecture-blocker` whenever the canonical finding set carries
+        // any blocking entry. Deterministic; same inputs → same gate.
+        // `architecture-blocker` is an existing tier in the gate vocabulary
+        // (drift-intelligence.ts gateRank table), so dashboards / Action /
+        // VSCode that already understand the vocabulary handle it without
+        // change.
+        governanceGate: promoteAdvisoryGateForBlockingFindings(drift?.riskSynthesis?.governanceGate ?? null, totalBlocking),
         rolloutTrust: drift?.riskSynthesis?.rolloutTrust ?? null,
         governancePosture: drift?.governancePosture ?? null,
         governanceDecisions: drift?.governanceDecisions ?? null,
         replayChecksum: envelope.replayChecksum ?? null,
     };
+}
+function promoteAdvisoryGateForBlockingFindings(gate, blockingFindingCount) {
+    if (gate === 'advisory' && blockingFindingCount > 0) {
+        return 'architecture-blocker';
+    }
+    return gate;
 }
 function scopeHintsFromPayload(payload) {
     const scopeIssues = payload.scopeIssues;
@@ -630,8 +649,15 @@ function attachCanonicalGovernance(payload) {
         ...payload,
         governanceVerification: envelope,
         governanceFindings: envelope.findings,
-        intentGovernance: buildIntentGovernanceSummary(driftIntelligence, envelope),
+        intentGovernance: buildIntentGovernanceSummary(driftIntelligence, envelope, readImportEdgeBlockingCount(payload)),
     };
+}
+function readImportEdgeBlockingCount(payload) {
+    const rc = payload.runtimeCapabilities;
+    if (!rc || typeof rc !== 'object' || Array.isArray(rc))
+        return 0;
+    const raw = rc.importEdgeBlockingFindings;
+    return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 function evaluateGovernanceReplayIntegrity(input) {
     const missingArtifacts = [];

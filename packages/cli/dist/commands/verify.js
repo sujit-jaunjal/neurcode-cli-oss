@@ -2406,11 +2406,17 @@ async function verifyCommand(options) {
             }
         }
         // Filter out internal/system files before analysis
-        // This prevents self-interference where the tool flags its own files as bloat
+        // This prevents self-interference where the tool flags its own files as bloat.
+        // Two layers:
+        //   1. `isExcludedFile` — built-in policy/governance artifact patterns
+        //   2. `.neurcodeignore` — per-repo user patterns (closes dogfooding gap
+        //      where OSS-clone working trees and scratch dirs were showing up as
+        //      out-of-scope noise in self-governance runs)
+        const ignoreFilterAllPaths = (0, ignore_1.loadIgnore)(projectRoot);
         const diffFiles = allDiffFiles.filter(file => {
             // Check both path and oldPath (for renames) against exclusion list
-            const excludePath = isExcludedFile(file.path);
-            const excludeOldPath = file.oldPath ? isExcludedFile(file.oldPath) : false;
+            const excludePath = isExcludedFile(file.path) || ignoreFilterAllPaths(file.path);
+            const excludeOldPath = file.oldPath ? (isExcludedFile(file.oldPath) || ignoreFilterAllPaths(file.oldPath)) : false;
             return !excludePath && !excludeOldPath;
         });
         // ── Local-only mode (Part 8): run structural analysis and exit, no API calls ──
