@@ -100,6 +100,7 @@ const policy_1 = require("@neurcode-ai/policy");
 const active_engineering_context_1 = require("../utils/active-engineering-context");
 const core_1 = require("@neurcode-ai/core");
 const path_boundary_classifier_1 = require("../utils/path-boundary-classifier");
+const import_edge_governance_1 = require("../utils/import-edge-governance");
 const ai_debt_budget_1 = require("../utils/ai-debt-budget");
 const verification_evidence_1 = require("../utils/verification-evidence");
 const verify_runtime_stability_1 = require("../utils/verify-runtime-stability");
@@ -2419,6 +2420,7 @@ async function verifyCommand(options) {
             let localActiveContext = null;
             let localGovernanceResult = null;
             const localScopeIssues = [];
+            let localImportEdgeResult = null;
             try {
                 localActiveContext = (0, active_engineering_context_1.loadOrSynthesizeEngineeringContext)(projectRoot);
             }
@@ -2540,6 +2542,64 @@ async function verifyCommand(options) {
                             }
                         }
                     }
+                    // ─── Import-edge governance ──────────────────────────────────────
+                    // Deterministic import-edge classifier: even when every touched
+                    // path is in-scope, an `import` statement that crosses a
+                    // forbidden boundary surfaces as a scope issue. Closes the
+                    // semantic blind spot documented in
+                    // docs/validation/2026-05-17-deep-oss/.
+                    try {
+                        localImportEdgeResult = (0, import_edge_governance_1.evaluateImportEdgeGovernance)({
+                            diffFiles,
+                            projectRoot,
+                            intent: {
+                                approvedScope: {
+                                    files: intent.approvedScope.files,
+                                    modules: intent.approvedScope.modules,
+                                    services: intent.approvedScope.services,
+                                },
+                                forbiddenBoundaries: intent.forbiddenBoundaries.map((b) => ({
+                                    type: b.type,
+                                    path: b.path,
+                                    policy: b.policy,
+                                    reason: b.reason,
+                                })),
+                            },
+                        });
+                        for (const finding of localImportEdgeResult.findings) {
+                            // Avoid double-flagging when the same source file already has
+                            // a path-touch issue for the same boundary; import-edge is
+                            // additive metadata in that case.
+                            const dupe = localScopeIssues.some((s) => s.file === finding.sourceFile
+                                && s.importEdge
+                                && s.importEdge.importTarget === finding.importTarget
+                                && s.importEdge.resolvedBoundary === finding.resolvedBoundary);
+                            if (dupe)
+                                continue;
+                            localScopeIssues.push({
+                                file: finding.sourceFile,
+                                message: `Import-edge crosses ${finding.boundaryType} boundary (policy=${finding.policy}): \`${finding.importTarget}\` resolves to \`${finding.resolvedTargetPath}\` inside \`${finding.resolvedBoundary}\`. ${finding.reason}`,
+                                policy: finding.policy,
+                                boundaryType: finding.boundaryType,
+                                importEdge: {
+                                    sourceFile: finding.sourceFile,
+                                    sourceLine: finding.sourceLine,
+                                    importTarget: finding.importTarget,
+                                    resolvedTargetPath: finding.resolvedTargetPath,
+                                    resolvedBoundary: finding.resolvedBoundary,
+                                    edgeKind: finding.edgeKind,
+                                    language: finding.language,
+                                    deterministic: true,
+                                    replayStable: true,
+                                },
+                            });
+                        }
+                    }
+                    catch (importErr) {
+                        if (!options.json && (process.env.DEBUG || process.env.VERBOSE)) {
+                            console.log(chalk.dim(`   [intent-runtime] import-edge governance skipped: ${importErr.message}`));
+                        }
+                    }
                 }
                 catch (err) {
                     if (!options.json && (process.env.DEBUG || process.env.VERBOSE)) {
@@ -2614,7 +2674,13 @@ async function verifyCommand(options) {
                         ? `Local intent-runtime verification: ${localStructural.violations.length} structural finding(s), ${blockingViolations.length} blocking; ${blockingScopeCount} scope violation(s), ${advisoryScopeCount} advisory boundary issue(s).`
                         : `Local-only structural verification: ${localStructural.violations.length} finding(s), ${blockingViolations.length} blocking.`),
                 scopeGuardPassed: localScopeGuardPassed,
-                scopeIssues: localScopeIssues.map((s) => ({ file: s.file, message: s.message, policy: s.policy, boundaryType: s.boundaryType })),
+                scopeIssues: localScopeIssues.map((s) => ({
+                    file: s.file,
+                    message: s.message,
+                    policy: s.policy,
+                    boundaryType: s.boundaryType,
+                    ...(s.importEdge ? { importEdge: s.importEdge } : {}),
+                })),
                 mode: intentRuntimeActive ? 'local_intent_runtime' : 'local_only_structural',
                 policyOnly: true,
                 // NOTE: this is the structural-only checksum. When the canonical
@@ -2669,6 +2735,10 @@ async function verifyCommand(options) {
                     scopeGuard: intentRuntimeActive ? 'enforced' : 'unenforced',
                     forbiddenBoundaryEnforcement: intentRuntimeActive ? 'enforced' : 'unenforced',
                     generatedCodeGovernance: 'pattern-deterministic',
+                    // Import-edge governance is enforced whenever the intent runtime
+                    // is active. Pattern-deterministic (regex over diff additions +
+                    // path classifier), no AST, no probability.
+                    importEdgeGovernance: intentRuntimeActive ? 'pattern-deterministic' : 'inactive',
                     structuralRules: 'active',
                     replayDeterminism: 'enforced',
                     apiContractStatus: 'offline',
@@ -2677,6 +2747,13 @@ async function verifyCommand(options) {
                     observedBoundaryTypes: Array.from(new Set(localScopeIssues
                         .map((s) => s.boundaryType)
                         .filter((b) => Boolean(b)))).sort(),
+                    // Import-edge observability — counts only, plus a sorted list of
+                    // observed boundary types from the edge pass. Helpful for CI gates
+                    // that want to assert "this run had ≥0 edges analysed".
+                    importEdgesAnalyzed: localImportEdgeResult?.edgeCount ?? 0,
+                    importEdgeBlockingFindings: localImportEdgeResult?.blockingFindingCount ?? 0,
+                    importEdgeAdvisoryFindings: localImportEdgeResult?.advisoryFindingCount ?? 0,
+                    observedImportEdgeBoundaryTypes: localImportEdgeResult?.observedBoundaryTypes ?? [],
                 },
             };
             // Run the canonical pipeline once so we can extract the merged-finding

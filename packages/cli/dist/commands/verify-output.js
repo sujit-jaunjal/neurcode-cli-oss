@@ -146,7 +146,16 @@ function toCanonicalVerifyOutput(payload) {
     const addScopeIssue = (fileRaw, messageRaw, extra) => {
         const file = asStringValue(fileRaw) || 'unknown';
         const message = normalizeScopeIssueMessage(messageRaw);
-        const key = file.toLowerCase();
+        // Import-edge findings live on a different keying axis than path-touch
+        // findings: the same source file can host multiple distinct edges (e.g.
+        // `from forbidden.a import x` and `from forbidden.b import y`). Use the
+        // resolved boundary + target to keep both as separate issues.
+        const importEdgeRaw = extra?.importEdge && typeof extra.importEdge === 'object' && !Array.isArray(extra.importEdge)
+            ? extra.importEdge
+            : null;
+        const key = importEdgeRaw
+            ? `${file.toLowerCase()}|edge|${(asStringValue(importEdgeRaw.importTarget) ?? '').toLowerCase()}|${(asStringValue(importEdgeRaw.resolvedBoundary) ?? '').toLowerCase()}`
+            : file.toLowerCase();
         const issue = { file, message };
         // Preserve intent-runtime governance classification when the local
         // scope-guard produced it. These fields are part of the canonical
@@ -160,6 +169,31 @@ function toCanonicalVerifyOutput(payload) {
             rawBoundary === 'dependency-manifest' || rawBoundary === 'service' || rawBoundary === 'module' ||
             rawBoundary === 'generated-code' || rawBoundary === 'unspecified') {
             issue.boundaryType = rawBoundary;
+        }
+        if (importEdgeRaw) {
+            const sourceFile = asStringValue(importEdgeRaw.sourceFile) ?? '';
+            const importTarget = asStringValue(importEdgeRaw.importTarget) ?? '';
+            const resolvedTargetPath = asStringValue(importEdgeRaw.resolvedTargetPath) ?? '';
+            const resolvedBoundary = asStringValue(importEdgeRaw.resolvedBoundary) ?? '';
+            const sourceLineRaw = importEdgeRaw.sourceLine;
+            const sourceLine = typeof sourceLineRaw === 'number' && Number.isFinite(sourceLineRaw) ? sourceLineRaw : 0;
+            const edgeKind = asStringValue(importEdgeRaw.edgeKind) ?? '';
+            const language = asStringValue(importEdgeRaw.language) ?? '';
+            const allowedKinds = new Set(['static', 'relative', 'dynamic', 'require', 'side-effect']);
+            const allowedLanguages = new Set(['python', 'typescript', 'javascript']);
+            if (sourceFile && importTarget && resolvedBoundary && allowedKinds.has(edgeKind) && allowedLanguages.has(language)) {
+                issue.importEdge = {
+                    sourceFile,
+                    sourceLine,
+                    importTarget,
+                    resolvedTargetPath: resolvedTargetPath || resolvedBoundary,
+                    resolvedBoundary,
+                    edgeKind,
+                    language,
+                    deterministic: true,
+                    replayStable: true,
+                };
+            }
         }
         pushVerifyIssue(scopeIssues, seenScopeIssues, key, issue);
     };
@@ -182,7 +216,11 @@ function toCanonicalVerifyOutput(payload) {
     for (const item of rawScopeIssues) {
         const record = asObjectRecord(item);
         if (record) {
-            addScopeIssue(record.file, record.message, { policy: record.policy, boundaryType: record.boundaryType });
+            addScopeIssue(record.file, record.message, {
+                policy: record.policy,
+                boundaryType: record.boundaryType,
+                importEdge: record.importEdge,
+            });
         }
         else {
             addScopeIssue(item, null);
