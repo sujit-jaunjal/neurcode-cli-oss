@@ -1731,6 +1731,20 @@ async function verifyCommand(options) {
                     console.log(chalk.yellow(`\n⚠️  Failed to write verification evidence artifact: ${message}`));
                 }
             }
+            // Mirror the canonical envelope into `.neurcode/last-verify-output.json`
+            // so downstream commands (`remediate-export`, `replay --html`) can pick
+            // up the latest run without the user threading paths through stdout
+            // redirection. Closes deep-OSS validation §5.8.
+            try {
+                if (lastCanonicalOutput) {
+                    const verifyOutputPath = require('path').resolve(projectRoot, '.neurcode/last-verify-output.json');
+                    require('fs').mkdirSync(require('path').dirname(verifyOutputPath), { recursive: true });
+                    require('fs').writeFileSync(verifyOutputPath, `${JSON.stringify(lastCanonicalOutput, null, 2)}\n`, 'utf-8');
+                }
+            }
+            catch {
+                // Persisting the canonical output is best-effort; never block exit.
+            }
         };
         const exitWithEvidence = (exitCode) => {
             finalizeEvidence(exitCode);

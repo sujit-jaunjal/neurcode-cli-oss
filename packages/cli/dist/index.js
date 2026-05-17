@@ -377,6 +377,31 @@ program
 (0, control_plane_1.controlPlaneCommand)(program);
 (0, workspace_1.workspaceCommand)(program);
 (0, replay_1.replayCommand)(program);
+// Top-level discoverability alias for `neurcode replay timeline`. Reviewers
+// asking "what changed and when?" should not need to know the subcommand
+// hierarchy. Same canonical artifact source, same deterministic output.
+program
+    .command('timeline')
+    .description('Operational governance timeline (alias for `replay timeline`)')
+    .option('--workspace <workspaceId>', 'Workspace scope')
+    .option('--from <timestamp>', 'ISO start timestamp')
+    .option('--to <timestamp>', 'ISO end timestamp')
+    .option('--limit <count>', 'Maximum timeline items to return', (value) => Number.parseInt(value, 10))
+    .option('--json', 'Output JSON')
+    .action(async (options) => {
+    const args = ['replay', 'timeline'];
+    if (options.workspace)
+        args.push('--workspace', String(options.workspace));
+    if (options.from)
+        args.push('--from', String(options.from));
+    if (options.to)
+        args.push('--to', String(options.to));
+    if (Number.isFinite(options.limit))
+        args.push('--limit', String(options.limit));
+    if (options.json)
+        args.push('--json');
+    await program.parseAsync(['node', 'neurcode', ...args]);
+});
 (0, audit_1.auditCommand)(program);
 (0, contract_1.contractCommand)(program);
 (0, feedback_1.feedbackCommand)(program);

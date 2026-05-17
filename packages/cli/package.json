@@ -1,7 +1,7 @@
 {
   "name": "@neurcode-ai/cli",
-  "version": "0.11.0",
-  "description": "Neurcode CLI - intent-aware deterministic governance for AI-assisted engineering",
+  "version": "0.12.0",
+  "description": "Neurcode CLI — deterministic operational governance runtime for AI-assisted engineering (intent contracts, import-edge governance, replay continuity)",
   "bin": {
     "neurcode": "dist/index.js"
   },

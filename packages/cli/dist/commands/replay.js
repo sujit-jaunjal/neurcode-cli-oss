@@ -4,6 +4,7 @@ exports.replayCommand = replayCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
 const replay_runtime_1 = require("../utils/replay-runtime");
+const replay_html_report_1 = require("../utils/replay-html-report");
 function asPrettyJson(value) {
     return JSON.stringify(value, null, 2);
 }
@@ -175,11 +176,15 @@ function replayCommand(program) {
         .option('--event-limit <count>', 'Limit included runtime events', (value) => Number.parseInt(value, 10))
         .option('--json', 'Output JSON')
         .option('--export <path>', 'Write deterministic replay output to file')
+        .option('--html <path>', 'Write self-contained audit-grade HTML report to file')
+        .option('--verify <path>', 'Path to verify --json output to fold into the HTML report (defaults to .neurcode/last-verify-output.json)')
         .action((options) => {
         try {
             const rootOptions = root.opts();
             const jsonEnabled = optionEnabled(options, rootOptions, 'json');
             const exportPath = optionString(options, rootOptions, 'export');
+            const htmlPath = optionString(options, rootOptions, 'html');
+            const verifyPath = optionString(options, rootOptions, 'verify');
             const at = options.at ? ensureIso(options.at) : new Date().toISOString();
             const state = (0, replay_runtime_1.replayGovernanceState)({
                 at,
@@ -191,6 +196,37 @@ function replayCommand(program) {
                 const outputPath = writeDeterministicExport(exportPath, state);
                 if (!jsonEnabled) {
                     console.log(`\nReplay export written: ${outputPath}\n`);
+                }
+            }
+            if (htmlPath) {
+                const resolvedHtmlPath = (0, path_1.resolve)(htmlPath);
+                (0, fs_1.mkdirSync)((0, path_1.dirname)(resolvedHtmlPath), { recursive: true });
+                // Locate the verify payload to fold into the report. Priority: explicit
+                // --verify flag → .neurcode/last-verify-output.json → none.
+                const candidate = verifyPath
+                    ? (0, path_1.resolve)(verifyPath)
+                    : (0, path_1.resolve)(process.cwd(), '.neurcode/last-verify-output.json');
+                let verifyPayload = null;
+                if ((0, fs_1.existsSync)(candidate)) {
+                    try {
+                        const raw = (0, fs_1.readFileSync)(candidate, 'utf-8');
+                        const parsed = JSON.parse(raw);
+                        verifyPayload = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                            ? parsed
+                            : null;
+                    }
+                    catch {
+                        verifyPayload = null;
+                    }
+                }
+                const html = (0, replay_html_report_1.renderReplayHtmlReport)({ state, verify: verifyPayload });
+                (0, fs_1.writeFileSync)(resolvedHtmlPath, html, 'utf-8');
+                if (!jsonEnabled) {
+                    console.log(`\nHTML replay report written: ${resolvedHtmlPath}`);
+                    console.log(verifyPayload
+                        ? `Folded verify payload: ${candidate}`
+                        : 'No verify payload folded (run `neurcode verify --local-only --head --json` first for full envelope).');
+                    console.log('');
                 }
             }
             if (jsonEnabled) {
