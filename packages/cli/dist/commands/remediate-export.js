@@ -25,6 +25,7 @@ const fs_1 = require("fs");
 const path_1 = require("path");
 const crypto_1 = require("crypto");
 const child_process_1 = require("child_process");
+const runtime_state_1 = require("../utils/runtime-state");
 const cli_json_1 = require("../utils/cli-json");
 const chalk = (0, cli_json_1.loadChalk)();
 // ── Trust boundary statement — fixed, never changes ──────────────────────────
@@ -115,9 +116,23 @@ async function remediateExportCommand(options) {
         ? (0, path_1.resolve)(options.verifyOutputFile)
         : (0, path_1.join)(projectRoot, '.neurcode', 'last-verify-output.json');
     if (!(0, fs_1.existsSync)(verifyPath)) {
+        // Promote to structured operational-state guidance (lifecycle hardening
+        // §2.1). If the user explicitly passed --verify-output-file, the issue
+        // is a path mismatch, not a lifecycle gap — keep the original message.
+        // If they're using the default .neurcode/last-verify-output.json path
+        // but the file is missing, surface the structured panel.
+        if (!options.verifyOutputFile) {
+            const state = (0, runtime_state_1.detectRuntimeState)(projectRoot);
+            if (!state.hasNeurcodeDir) {
+                const code = (0, runtime_state_1.renderRuntimeStateGuidance)('no-neurcode-dir', state, {
+                    commandLabel: 'neurcode remediate-export',
+                });
+                process.exit(code);
+            }
+        }
         console.error(chalk.red('✗ No verify output found.'));
         console.error(chalk.dim(`  Expected: ${verifyPath}`));
-        console.error(chalk.dim('  Run: neurcode verify --policy-only --json'));
+        console.error(chalk.dim('  Run: neurcode verify --local-only --head --json --require-intent-runtime'));
         console.error(chalk.dim('  Or pass: neurcode remediate-export --verify-output-file <path-to-verify.json>'));
         process.exit(1);
     }
@@ -283,7 +298,7 @@ function buildPayload(finding, verifyOutput, projectRoot, replayChecksum, replay
     const payload = {
         exportId,
         exportedAt: new Date().toISOString(),
-        neurcodeVersion: '0.12.0',
+        neurcodeVersion: '0.13.0',
         schemaVersion: '2026-05-14',
         findingId,
         ruleId,

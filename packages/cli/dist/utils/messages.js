@@ -288,19 +288,28 @@ function printTable(rows) {
  */
 async function printWelcomeBanner() {
     const userInfo = await (0, user_context_1.getUserInfo)();
-    const userName = userInfo?.displayName || userInfo?.email || 'there';
+    // Subtle sophistication, not terminal theatrics. The banner identifies
+    // the runtime, names the operational lifecycle, and lists the four
+    // canonical next steps. No emojis, no boxes, no "AI-powered" framing —
+    // the target aesthetic is Claude Code / Linear / Warp / Terraform Cloud.
     console.log('');
-    console.log(chalkInstance.bold.cyan('═══════════════════════════════════════════════════════════'));
-    console.log(chalkInstance.bold.cyan('                                                           '));
-    console.log(chalkInstance.bold.white('              🚀  Welcome to Neurcode  🚀                 '));
-    console.log(chalkInstance.bold.cyan('                                                           '));
-    if (userInfo) {
-        console.log(chalkInstance.dim(`                Hello, ${userName}! 👋                          `));
+    console.log(`${chalkInstance.bold('neurcode')}${chalkInstance.dim('  ·  deterministic operational governance for AI-assisted engineering')}`);
+    if (userInfo?.displayName || userInfo?.email) {
+        const id = userInfo.displayName || userInfo.email;
+        console.log(chalkInstance.dim(`            signed in as ${id}`));
     }
-    console.log(chalkInstance.bold.cyan('                                                           '));
-    console.log(chalkInstance.bold.cyan('═══════════════════════════════════════════════════════════'));
     console.log('');
-    console.log(chalkInstance.dim('   AI-powered code governance and intelligent diff analysis     '));
+    console.log(chalkInstance.dim('  Intent contracts        Replay continuity        Runtime capability'));
+    console.log(chalkInstance.dim('  Scope guard             Bounded remediation      Import-edge governance'));
+    console.log(chalkInstance.dim('  Forbidden boundaries    Generated-code spillover Drift narrative + posture'));
+    console.log('');
+    console.log(`  ${chalkInstance.bold('Operational lifecycle')}`);
+    console.log(chalkInstance.dim('    start  ▸  verify  ▸  replay  ▸  remediate-export  ▸  re-verify'));
+    console.log('');
+    console.log(`  ${chalkInstance.bold('Next steps')}`);
+    console.log(chalkInstance.cyan('    neurcode start') + chalkInstance.dim(' "what you intend to change"'));
+    console.log(chalkInstance.cyan('    neurcode verify') + chalkInstance.dim(' --local-only --head'));
+    console.log(chalkInstance.cyan('    neurcode home') + chalkInstance.dim('                       (current runtime state)'));
     console.log('');
 }
 //# sourceMappingURL=messages.js.map

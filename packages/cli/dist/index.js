@@ -54,6 +54,7 @@ const feedback_1 = require("./commands/feedback");
 const guard_1 = require("./commands/guard");
 const bootstrap_1 = require("./commands/bootstrap");
 const quickstart_1 = require("./commands/quickstart");
+const home_1 = require("./commands/home");
 const bootstrap_policy_1 = require("./commands/bootstrap-policy");
 const messages_1 = require("./utils/messages");
 const config_2 = require("./config");
@@ -217,11 +218,21 @@ function configurePrimaryHelpView(root) {
     });
 }
 function printCoreWorkflowGuide() {
-    console.log(chalk.bold.cyan('\n🛡️  Neurcode Governance Workflow\n'));
-    console.log(chalk.bold.white('Canonical Workflow:'));
+    // Operational lifecycle guide. Same aesthetic as the welcome banner and
+    // neurcode home — subtle sophistication, no emoji ornaments, info dense.
+    // The lifecycle bar mirrors what the welcome banner shows so identity is
+    // coherent across surfaces. (See docs/ux/final-operational-experience-report.md.)
+    console.log('');
+    console.log(`${chalk.bold('neurcode')}${chalk.dim('  ·  operational lifecycle')}`);
+    console.log('');
+    console.log(chalk.dim('  start  ▸  verify  ▸  replay  ▸  remediate-export  ▸  re-verify'));
+    console.log('');
+    console.log(`  ${chalk.bold('Canonical commands')}`);
     CORE_WORKFLOW_STEPS.forEach((step) => console.log(chalk.dim(formatCoreWorkflowStep(step))));
     console.log('');
-    console.log(chalk.dim('Run `neurcode --help` to see enterprise, runtime-engineering, and compatibility commands.\n'));
+    console.log(chalk.dim('  See ') + chalk.cyan('neurcode home') + chalk.dim(' for current runtime state. ') +
+        chalk.dim('Run ') + chalk.cyan('neurcode --help') + chalk.dim(' for the full command surface.'));
+    console.log('');
 }
 function formatCommandList(commandNames) {
     return commandNames.length > 0
@@ -377,6 +388,7 @@ program
 (0, control_plane_1.controlPlaneCommand)(program);
 (0, workspace_1.workspaceCommand)(program);
 (0, replay_1.replayCommand)(program);
+(0, home_1.homeCommand)(program);
 // Top-level discoverability alias for `neurcode replay timeline`. Reviewers
 // asking "what changed and when?" should not need to know the subcommand
 // hierarchy. Same canonical artifact source, same deterministic output.

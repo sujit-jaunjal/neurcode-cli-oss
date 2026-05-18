@@ -190,7 +190,7 @@ async function loginCommand(options) {
                     const userName = userInfo?.displayName || userInfo?.email || 'there';
                     await (0, messages_1.printSuccessBanner)('Authentication Successful!', `Welcome to Neurcode, ${userName}!`);
                     (0, messages_1.printSuccess)('Your CLI is now authenticated', `API key saved securely to ~/.neurcoderc${savedOrgId ? ` (org: ${savedOrgId.substring(0, 8)}...)` : ''}\n   You're all set to use Neurcode commands!`);
-                    (0, messages_1.printInfo)('Getting started', 'Try running: neurcode init  (to set up your first project)');
+                    (0, messages_1.printInfo)('Next step', 'Declare your intent and begin a governed change:\n   neurcode start "what you intend to change"\n   neurcode home                       (view current runtime state)');
                     approved = true;
                 }
                 else {

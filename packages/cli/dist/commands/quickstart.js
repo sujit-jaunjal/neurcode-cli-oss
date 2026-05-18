@@ -160,19 +160,21 @@ async function quickstartCommand(options = {}) {
     console.log(chalk_1.default.dim('    • Deterministic — same code always produces same finding'));
     console.log(chalk_1.default.dim('    • Reproducible — identical on any machine, any time'));
     console.log(chalk_1.default.dim('    • No LLM involved — pure AST analysis\n'));
-    // 6. Next commands
+    // 6. Next commands — intent-first lifecycle order (matches welcome banner +
+    //    `neurcode home` so the recommended flow is coherent across surfaces).
     printBanner('Recommended Next Commands');
     console.log('');
-    console.log(chalk_1.default.bold.white('  1. Run a governance check right now (no network required):'));
-    console.log(chalk_1.default.cyan('       neurcode verify --local-only\n'));
-    console.log(chalk_1.default.bold.white('  2. Check system readiness:'));
+    console.log(chalk_1.default.bold.white('  1. Declare what you intend to change:'));
+    console.log(chalk_1.default.cyan('       neurcode start') + chalk_1.default.dim(' "what you intend to change"\n'));
+    console.log(chalk_1.default.bold.white('  2. Verify the diff against the declared intent (no network required):'));
+    console.log(chalk_1.default.cyan('       neurcode verify --local-only --head --require-intent-runtime\n'));
+    console.log(chalk_1.default.bold.white('  3. View current runtime state at a glance:'));
+    console.log(chalk_1.default.cyan('       neurcode home\n'));
+    console.log(chalk_1.default.bold.white('  4. Archive an audit-grade replay artefact for the run:'));
+    console.log(chalk_1.default.cyan('       neurcode replay --html /tmp/replay-report.html\n'));
+    console.log(chalk_1.default.bold.white('  5. Check runtime / system readiness:'));
     console.log(chalk_1.default.cyan('       neurcode doctor\n'));
-    console.log(chalk_1.default.bold.white('  3. Generate enterprise-specific policies:'));
-    console.log(chalk_1.default.cyan('       neurcode bootstrap-policy\n'));
-    console.log(chalk_1.default.bold.white('  4. Set a plan for full governance:'));
-    console.log(chalk_1.default.cyan('       neurcode plan "describe your change intent"\n'));
-    console.log(chalk_1.default.bold.white('  5. Connect to a remote project (requires API key):'));
-    console.log(chalk_1.default.cyan('       neurcode login && neurcode init\n'));
-    console.log(chalk_1.default.bold.green('  ✅ Quickstart complete. Run `neurcode verify --local-only` to get your first finding.\n'));
+    console.log(chalk_1.default.bold.green('  Quickstart complete. The lifecycle is:'));
+    console.log(chalk_1.default.dim('  start  ▸  verify  ▸  replay  ▸  remediate-export  ▸  re-verify\n'));
 }
 //# sourceMappingURL=quickstart.js.map

@@ -4,6 +4,7 @@ exports.governanceCommand = governanceCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
 const project_root_1 = require("../utils/project-root");
+const runtime_state_1 = require("../utils/runtime-state");
 const governance_decisions_1 = require("../utils/governance-decisions");
 let chalk;
 try {
@@ -131,6 +132,17 @@ function renderHygiene(summary) {
     console.log('');
 }
 function handleDecisionWrite(projectRoot, state, options, label) {
+    // Operational lifecycle guard (hardening phase §2.2): governance
+    // decisions write to .neurcode/governance/. If there's no .neurcode/
+    // dir at all, surface the structured guidance panel instead of letting
+    // the underlying writer produce a generic "ENOENT" or similar.
+    const lifecycleState = (0, runtime_state_1.detectRuntimeState)(projectRoot);
+    if (!lifecycleState.hasNeurcodeDir && !options.json) {
+        const code = (0, runtime_state_1.renderRuntimeStateGuidance)('no-neurcode-dir', lifecycleState, {
+            commandLabel: `neurcode governance ${state.replace('-', '-')}`,
+        });
+        process.exit(code);
+    }
     try {
         const result = createDecision(projectRoot, state, options);
         if (options.json) {

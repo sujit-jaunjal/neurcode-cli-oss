@@ -65,6 +65,7 @@ const fs_1 = require("fs");
 const state_1 = require("../utils/state");
 const ROILogger_1 = require("../utils/ROILogger");
 const ignore_1 = require("../utils/ignore");
+const runtime_state_1 = require("../utils/runtime-state");
 const project_root_1 = require("../utils/project-root");
 const brain_context_1 = require("../utils/brain-context");
 const scope_telemetry_1 = require("../utils/scope-telemetry");
@@ -2316,6 +2317,17 @@ async function verifyCommand(options) {
         // Determine which diff to capture.
         let diffText;
         let diffContextLabel = '';
+        // Operational lifecycle guardrail: when the diff context requires a
+        // HEAD reference but the repo has no initial commit yet, surface
+        // structured guidance instead of leaking raw git stderr. (See
+        // docs/ux/lifecycle-state-audit.md §"no-head-commit".)
+        if (options.head || options.staged || !options.base) {
+            const lifecycleState = (0, runtime_state_1.detectRuntimeState)(projectRoot);
+            if (lifecycleState.isGitRepo && !lifecycleState.hasHeadCommit) {
+                const exitCode = (0, runtime_state_1.renderRuntimeStateGuidance)('no-head-commit', lifecycleState, { commandLabel: 'neurcode verify' });
+                process.exit(exitCode);
+            }
+        }
         if (options.staged) {
             diffText = (0, child_process_1.execSync)('git diff --cached', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
             diffContextLabel = 'staged changes';
