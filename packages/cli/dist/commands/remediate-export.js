@@ -298,7 +298,7 @@ function buildPayload(finding, verifyOutput, projectRoot, replayChecksum, replay
     const payload = {
         exportId,
         exportedAt: new Date().toISOString(),
-        neurcodeVersion: '0.13.0',
+        neurcodeVersion: '0.14.0',
         schemaVersion: '2026-05-14',
         findingId,
         ruleId,
