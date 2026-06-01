@@ -8,6 +8,9 @@ export interface CliState {
     projectId?: string;
     orgId?: string;
     orgName?: string;
+    workspaceType?: 'personal' | 'organization';
+    workspaceRole?: string;
+    linkedAt?: string;
     sessionId?: string;
     lastPlanId?: string;
     activePlanId?: string;
@@ -51,9 +54,27 @@ export declare function getOrgId(): string | null;
  */
 export declare function setOrgId(orgId: string, orgName?: string): void;
 /**
+ * Persist the full governance ownership context for this repository.
+ */
+export declare function setWorkspaceContext(input: {
+    orgId: string;
+    orgName?: string;
+    workspaceType?: 'personal' | 'organization';
+    workspaceRole?: string;
+    projectId?: string;
+}): void;
+/**
  * Get organization name from state
  */
 export declare function getOrgName(): string | null;
+/**
+ * Get workspace ownership type from state.
+ */
+export declare function getWorkspaceType(): 'personal' | 'organization' | null;
+/**
+ * Get workspace role captured during repo initialization.
+ */
+export declare function getWorkspaceRole(): string | null;
 /**
  * Get last plan ID from state
  */

@@ -43,6 +43,13 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.buildLocalGovernanceStatus = buildLocalGovernanceStatus;
+exports.localGovernanceStatusCommand = localGovernanceStatusCommand;
+exports.replanGovernanceSessionCommand = replanGovernanceSessionCommand;
+exports.decideGovernanceReplanCommand = decideGovernanceReplanCommand;
+exports.approveGovernanceSessionCommand = approveGovernanceSessionCommand;
+exports.listRuntimeSessionsCommand = listRuntimeSessionsCommand;
+exports.showRuntimeSessionCommand = showRuntimeSessionCommand;
 exports.listSessionsCommand = listSessionsCommand;
 exports.endSessionCommand = endSessionCommand;
 exports.sessionStatusCommand = sessionStatusCommand;
@@ -53,9 +60,16 @@ exports.compareLocalSessionsCommand = compareLocalSessionsCommand;
 const config_1 = require("../config");
 const api_client_1 = require("../api-client");
 const state_1 = require("../utils/state");
+const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const messages_1 = require("../utils/messages");
 const project_root_1 = require("../utils/project-root");
 const session_continuity_1 = require("../utils/session-continuity");
+const runtime_evidence_1 = require("../utils/runtime-evidence");
+const v0_governance_1 = require("../utils/v0-governance");
+const runtime_connection_1 = require("../utils/runtime-connection");
+const runtime_live_1 = require("../utils/runtime-live");
+const node_fs_1 = require("node:fs");
+const node_path_1 = require("node:path");
 const readline = __importStar(require("readline"));
 // Import chalk with fallback
 let chalk;
@@ -89,11 +103,460 @@ function promptUser(question) {
         });
     });
 }
+function truncate(value, max = 96) {
+    return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+}
+function compactList(values, max = 6) {
+    if (values.length === 0)
+        return 'none';
+    const shown = values.slice(0, max).join(', ');
+    return values.length > max ? `${shown} +${values.length - max} more` : shown;
+}
+function eventLabel(event) {
+    if (event.type === 'check_ok')
+        return 'OK';
+    if (event.type === 'check_warn')
+        return 'WARN';
+    if (event.type === 'check_block')
+        return 'BLOCK';
+    if (event.type === 'approval_decision')
+        return 'APPROVE';
+    if (event.type === 'session_start')
+        return 'START';
+    if (event.type === 'plan_captured')
+        return 'PLAN';
+    if (event.type === 'plan_amended')
+        return 'REPLAN';
+    if (event.type === 'session_finish')
+        return 'FINISH';
+    return event.type.toUpperCase();
+}
+function approvalContextFrom(event) {
+    const detail = event?.detail;
+    const raw = detail && typeof detail === 'object'
+        ? detail['approvalContext']
+        : null;
+    if (!raw || typeof raw !== 'object')
+        return null;
+    const context = raw;
+    const owners = Array.isArray(context['owners'])
+        ? context['owners'].filter((owner) => typeof owner === 'string')
+        : [];
+    return {
+        blockedPath: typeof context['blockedPath'] === 'string' ? context['blockedPath'] : event?.filePath,
+        owners,
+        suggestedApprovalPath: typeof context['suggestedApprovalPath'] === 'string'
+            ? context['suggestedApprovalPath']
+            : event?.filePath,
+    };
+}
+function loadLocalGovernanceSession(repoRoot, sessionId) {
+    return sessionId ? (0, governance_runtime_1.loadSession)(repoRoot, sessionId) : (0, governance_runtime_1.loadActiveSession)(repoRoot);
+}
+function buildLocalGovernanceStatus(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const session = loadLocalGovernanceSession(repoRoot, options.sessionId);
+    const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+    if (!session) {
+        return {
+            ok: false,
+            repoRoot,
+            active: false,
+            message: options.sessionId
+                ? `Local governance session ${options.sessionId} was not found.`
+                : 'No active in-flow governance session found.',
+            connection,
+        };
+    }
+    const recentEvents = session.events.slice(-10);
+    const latestBlock = [...session.events].reverse().find((event) => event.type === 'check_block');
+    const latestApprovalContext = approvalContextFrom(latestBlock);
+    const suggestedApprovalPath = latestApprovalContext?.suggestedApprovalPath ||
+        latestBlock?.filePath ||
+        null;
+    return {
+        ok: true,
+        repoRoot,
+        active: session.status === 'active',
+        sessionId: session.sessionId,
+        status: session.status,
+        goal: session.contract.goal,
+        profileHash: session.profileHash,
+        scopeMode: session.contract.scopeMode,
+        planCoherenceMode: session.contract.planCoherenceMode ?? 'warn',
+        agentPlan: session.contract.agentPlan ?? null,
+        agentPlanRevision: typeof session.contract.agentPlanRevision === 'number'
+            ? session.contract.agentPlanRevision
+            : session.contract.agentPlan
+                ? 1
+                : null,
+        pendingPlanAmendments: (session.contract.planAmendmentProposals ?? [])
+            .filter((proposal) => proposal.status === 'pending'),
+        allowedGlobs: session.contract.allowedGlobs,
+        sensitiveGlobs: session.contract.sensitiveGlobs,
+        approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
+        approvedPaths: session.contract.approvedPaths,
+        recentEvents,
+        latestBlock: latestBlock
+            ? {
+                filePath: latestBlock.filePath,
+                message: latestBlock.message,
+                owners: latestApprovalContext?.owners ?? [],
+                suggestedApprovalPath,
+                approveCommand: suggestedApprovalPath
+                    ? `neurcode session approve --path ${suggestedApprovalPath}`
+                    : null,
+            }
+            : null,
+        recordPath: `.neurcode/sessions/${session.sessionId}.json`,
+        connection,
+    };
+}
+function localGovernanceStatusCommand(options = {}) {
+    const status = buildLocalGovernanceStatus(options);
+    if (options.json) {
+        console.log(JSON.stringify(status, null, 2));
+        if (!status.ok)
+            process.exitCode = 1;
+        return;
+    }
+    console.log('');
+    console.log(chalk.bold('Neurcode in-flow session'));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Repo: ${chalk.white(status.repoRoot)}`);
+    if (!status.ok) {
+        console.log(chalk.yellow(status.message));
+        if (status.connection) {
+            const sync = status.connection.autoSync;
+            console.log(chalk.dim(`Cloud: connected to ${status.connection.repo.name} · auto-sync ${sync.enabled ? 'on' : 'off'} · ${sync.lastStatus || 'never'}`));
+        }
+        console.log(chalk.dim('Next: run `neurcode activate claude`, then prompt Claude Code in this repo.'));
+        console.log('');
+        process.exitCode = 1;
+        return;
+    }
+    const activeStatus = status;
+    console.log(`Session: ${chalk.white(activeStatus.sessionId)} ${activeStatus.active ? chalk.green('active') : chalk.dim(activeStatus.status)}`);
+    console.log(`Goal:    ${chalk.white(truncate(activeStatus.goal))}`);
+    console.log(`Scope:   ${chalk.white(activeStatus.scopeMode)}`);
+    console.log(`Plan:    ${chalk.white(activeStatus.planCoherenceMode)}${activeStatus.agentPlanRevision ? chalk.dim(` · rev ${activeStatus.agentPlanRevision}`) : ''}`);
+    if (activeStatus.agentPlan?.summary) {
+        console.log(`Agent:   ${chalk.white(truncate(activeStatus.agentPlan.summary))}`);
+    }
+    if (activeStatus.pendingPlanAmendments.length > 0) {
+        const proposal = activeStatus.pendingPlanAmendments[0];
+        console.log(`Re-plan: ${chalk.yellow(`${proposal.proposalId} pending human decision · ${proposal.risk.level} risk`)}`);
+    }
+    console.log(`Allowed: ${chalk.dim(compactList(activeStatus.allowedGlobs))}`);
+    console.log(`Gates:   ${chalk.dim(compactList(activeStatus.approvalRequiredGlobs))}`);
+    console.log(`Approved:${chalk.dim(' ' + compactList(activeStatus.approvedPaths))}`);
+    console.log('');
+    console.log(chalk.bold('Recent events'));
+    if (activeStatus.recentEvents.length === 0) {
+        console.log(chalk.dim('  none'));
+    }
+    else {
+        for (const event of activeStatus.recentEvents) {
+            const target = event.filePath || event.decision || '';
+            console.log(chalk.dim(`  ${eventLabel(event).padEnd(7)} ${target}`));
+        }
+    }
+    console.log('');
+    if (activeStatus.latestBlock?.suggestedApprovalPath) {
+        console.log(chalk.bold('Latest block'));
+        console.log(`  Path:  ${chalk.white(activeStatus.latestBlock.filePath || activeStatus.latestBlock.suggestedApprovalPath)}`);
+        if (activeStatus.latestBlock.owners.length > 0) {
+            console.log(`  Owner: ${chalk.white(activeStatus.latestBlock.owners.join(', '))}`);
+        }
+        console.log(`  CLI:   ${chalk.cyan(activeStatus.latestBlock.approveCommand)}`);
+        console.log(chalk.dim(`  MCP:   neurcode_session_approve({ path: "${activeStatus.latestBlock.suggestedApprovalPath}" })`));
+        console.log('');
+    }
+    console.log(chalk.dim(`Record: ${activeStatus.recordPath}`));
+    if (activeStatus.connection) {
+        const sync = activeStatus.connection.autoSync;
+        console.log(chalk.dim(`Cloud:  connected to ${activeStatus.connection.repo.name} · auto-sync ${sync.enabled ? 'on' : 'off'} · ${sync.lastStatus || 'never'}`));
+    }
+    console.log('');
+}
+async function replanGovernanceSessionCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    let planText = options.plan;
+    if (!planText && options.planFile) {
+        const planPath = (0, node_path_1.isAbsolute)(options.planFile)
+            ? options.planFile
+            : (0, node_path_1.resolve)(repoRoot, options.planFile);
+        planText = (0, node_fs_1.readFileSync)(planPath, 'utf8');
+    }
+    try {
+        const result = (0, governance_runtime_1.amendAgentPlan)(repoRoot, {
+            sessionId: options.sessionId,
+            planText,
+            summary: options.summary,
+            addSteps: options.addStep,
+            removeSteps: options.removeStep,
+            addExpectedFiles: options.addFile,
+            removeExpectedFiles: options.removeFile,
+            addExpectedGlobs: options.addGlob,
+            removeExpectedGlobs: options.removeGlob,
+            addConstraints: options.addConstraint,
+            removeConstraints: options.removeConstraint,
+            addRisks: options.addRisk,
+            removeRisks: options.removeRisk,
+            reason: options.reason,
+            source: 'manual',
+            proposedBy: options.proposedBy || 'human',
+            decidedBy: options.decidedBy,
+        });
+        const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
+        if (session)
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: true, repoRoot, ...result }, null, 2));
+            return;
+        }
+        console.log('');
+        if (result.status === 'pending') {
+            console.log(chalk.yellow(`Plan amendment pending human decision: ${result.proposal?.proposalId || result.eventId}`));
+            console.log(chalk.dim(`Risk:     ${result.risk.level}`));
+            console.log(chalk.dim(`Reasons:  ${compactList(result.risk.reasons, 6)}`));
+            console.log(chalk.dim(`Accept:   neurcode session replan-decide --proposal-id ${result.proposal?.proposalId || result.eventId} --decision accept --reason "<why>"`));
+            console.log('');
+            return;
+        }
+        console.log(chalk.green(`Plan updated: revision ${result.previousRevision} -> ${result.revision}`));
+        console.log(chalk.dim(`Session:  ${result.sessionId}`));
+        console.log(chalk.dim(`Action:   ${result.action}`));
+        console.log(chalk.dim(`Reason:   ${result.reason}`));
+        const activePlan = result.activePlan;
+        if (activePlan?.summary) {
+            console.log(`Plan:     ${chalk.white(truncate(activePlan.summary))}`);
+        }
+        if (activePlan?.expectedFiles.length) {
+            console.log(chalk.dim(`Files:    ${compactList(activePlan.expectedFiles, 12)}`));
+        }
+        console.log('');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: false, repoRoot, error: message }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)('Re-plan Failed', message, [
+                'Use --plan "<new plan>" for a full replacement, or --add-step / --add-file for a patch.',
+            ]);
+        }
+        process.exitCode = 1;
+    }
+}
+async function decideGovernanceReplanCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    if (!options.proposalId || !options.decision) {
+        (0, messages_1.printError)('Missing Re-plan Decision', undefined, [
+            'Usage: neurcode session replan-decide --proposal-id <id> --decision <accept|reject> --reason "<why>"',
+        ]);
+        process.exitCode = 2;
+        return;
+    }
+    try {
+        const result = (0, governance_runtime_1.decideAgentPlanAmendment)(repoRoot, {
+            sessionId: options.sessionId,
+            proposalId: options.proposalId,
+            decision: options.decision,
+            reason: options.reason,
+            decidedBy: options.decidedBy,
+            source: 'manual',
+        });
+        const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
+        if (session)
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: true, repoRoot, ...result }, null, 2));
+            return;
+        }
+        console.log('');
+        console.log(result.decision === 'accept'
+            ? chalk.green(`Plan amendment accepted: ${result.proposalId}`)
+            : chalk.yellow(`Plan amendment rejected: ${result.proposalId}`));
+        console.log(chalk.dim(`Session:  ${result.sessionId}`));
+        console.log(chalk.dim(`Status:   ${result.status}`));
+        if (result.revision)
+            console.log(chalk.dim(`Revision: ${result.previousRevision} -> ${result.revision}`));
+        console.log('');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: false, repoRoot, error: message }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)('Re-plan Decision Failed', message);
+        }
+        process.exitCode = 1;
+    }
+}
+async function approveGovernanceSessionCommand(options = {}) {
+    const path = options.path;
+    if (!path) {
+        (0, messages_1.printError)('Missing Approval Path', undefined, ['Usage: neurcode session approve --path <file-or-glob>']);
+        process.exitCode = 2;
+        return;
+    }
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    try {
+        const result = (0, governance_runtime_1.approveSession)(repoRoot, path, options.reason, options.sessionId);
+        const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
+        if (session)
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: true, repoRoot, ...result }, null, 2));
+            return;
+        }
+        console.log('');
+        console.log(chalk.green(`Approved: ${result.approvedPath}`));
+        console.log(chalk.dim(`Session:  ${result.sessionId}`));
+        console.log(chalk.dim(`Approved paths: ${compactList(result.approvedPaths, 12)}`));
+        console.log('');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: false, repoRoot, error: message }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)('Approval Failed', message);
+        }
+        process.exitCode = 1;
+    }
+}
+function listRuntimeSessionsCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const records = (0, runtime_evidence_1.listRuntimeSessions)(repoRoot);
+    if (options.json) {
+        console.log(JSON.stringify({
+            ok: true,
+            repoRoot,
+            count: records.length,
+            sessions: records.map((record) => ({
+                sessionId: record.session.sessionId,
+                status: record.session.status,
+                goal: record.session.contract.goal,
+                scopeMode: record.session.contract.scopeMode,
+                blockCount: record.blockCount,
+                warnCount: record.warnCount,
+                okCount: record.okCount,
+                approvalCount: record.approvalCount,
+                approvedPaths: record.session.contract.approvedPaths,
+                replayHash: record.session.replayHash,
+                recordPath: record.path,
+            })),
+        }, null, 2));
+        return;
+    }
+    console.log('');
+    console.log(chalk.bold('Neurcode in-flow sessions'));
+    console.log(chalk.dim('-'.repeat(96)));
+    console.log(`Repo: ${chalk.white(repoRoot)}`);
+    console.log('');
+    if (records.length === 0) {
+        console.log(chalk.dim('No local governance sessions found.'));
+        console.log(chalk.dim('Next: run `neurcode activate claude`, then prompt Claude Code in this repo.'));
+        console.log('');
+        return;
+    }
+    const rows = [['Session', 'Status', 'Scope', 'Blocks', 'Warns', 'Approvals', 'Goal']];
+    for (const record of records) {
+        rows.push([
+            record.session.sessionId,
+            record.session.status,
+            record.session.contract.scopeMode,
+            String(record.blockCount),
+            String(record.warnCount),
+            String(record.approvalCount),
+            truncate(record.session.contract.goal, 44),
+        ]);
+    }
+    (0, messages_1.printTable)(rows);
+    console.log(chalk.dim('Show details: neurcode session show <session-id>'));
+    console.log('');
+}
+function showRuntimeSessionCommand(sessionId, options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const session = (0, governance_runtime_1.loadSession)(repoRoot, sessionId);
+    if (!session) {
+        if (options.json) {
+            console.log(JSON.stringify({ ok: false, repoRoot, error: `Session not found: ${sessionId}` }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)('Session Not Found', `No local governance session found for ${sessionId}`);
+        }
+        process.exitCode = 1;
+        return;
+    }
+    const records = (0, runtime_evidence_1.listRuntimeSessions)(repoRoot);
+    const record = records.find((candidate) => candidate.session.sessionId === sessionId);
+    const blockCount = record?.blockCount ?? session.events.filter((event) => event.type === 'check_block').length;
+    const warnCount = record?.warnCount ?? session.events.filter((event) => event.type === 'check_warn').length;
+    const okCount = record?.okCount ?? session.events.filter((event) => event.type === 'check_ok').length;
+    const approvalCount = record?.approvalCount ?? session.events.filter((event) => event.type === 'approval_decision').length;
+    const payload = {
+        ok: true,
+        repoRoot,
+        sessionId: session.sessionId,
+        status: session.status,
+        goal: session.contract.goal,
+        scopeMode: session.contract.scopeMode,
+        agentPlan: session.contract.agentPlan ?? null,
+        agentPlanRevision: session.contract.agentPlanRevision ?? (session.contract.agentPlan ? 1 : null),
+        agentPlanRevisions: session.contract.agentPlanRevisions ?? [],
+        allowedGlobs: session.contract.allowedGlobs,
+        approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
+        approvedPaths: session.contract.approvedPaths,
+        blockCount,
+        warnCount,
+        okCount,
+        approvalCount,
+        replayHash: session.replayHash,
+        recordPath: record?.path ?? `.neurcode/sessions/${session.sessionId}.json`,
+        events: session.events,
+    };
+    if (options.json) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+    }
+    console.log('');
+    console.log(chalk.bold(`Neurcode session ${session.sessionId}`));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Status:   ${chalk.white(session.status)}`);
+    console.log(`Goal:     ${chalk.white(session.contract.goal)}`);
+    console.log(`Scope:    ${chalk.white(session.contract.scopeMode)}`);
+    console.log(`Plan:     ${chalk.white(session.contract.planCoherenceMode ?? 'warn')}${session.contract.agentPlanRevision ? chalk.dim(` · rev ${session.contract.agentPlanRevision}`) : ''}`);
+    if (session.contract.agentPlan?.summary) {
+        console.log(`Agent:    ${chalk.white(truncate(session.contract.agentPlan.summary))}`);
+    }
+    console.log(`Allowed:  ${chalk.dim(compactList(session.contract.allowedGlobs))}`);
+    console.log(`Gates:    ${chalk.dim(compactList(session.contract.approvalRequiredGlobs))}`);
+    console.log(`Approved: ${chalk.dim(compactList(session.contract.approvedPaths))}`);
+    console.log(`Events:   ok=${okCount} warn=${warnCount} block=${blockCount} approvals=${approvalCount}`);
+    console.log(`Replay:   ${chalk.dim(session.replayHash ?? 'n/a')}`);
+    console.log('');
+    console.log(chalk.bold('Timeline'));
+    for (const event of session.events) {
+        const target = event.filePath || event.decision || event.message || '';
+        console.log(chalk.dim(`  ${event.ts}  ${eventLabel(event).padEnd(7)} ${target}`));
+    }
+    console.log('');
+}
 /**
  * List all sessions
  */
 async function listSessionsCommand(options) {
     try {
+        if (options.local) {
+            listRuntimeSessionsCommand(options);
+            return;
+        }
         const config = (0, config_1.loadConfig)();
         if (!config.apiKey) {
             config.apiKey = (0, config_1.requireApiKey)();
@@ -328,6 +791,12 @@ async function endSessionCommand(options) {
  */
 async function sessionStatusCommand(options) {
     try {
+        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+        const localSession = loadLocalGovernanceSession(repoRoot, options.sessionId);
+        if (localSession || options.local || (options.json && !options.projectId)) {
+            localGovernanceStatusCommand(options);
+            return;
+        }
         const config = (0, config_1.loadConfig)();
         if (!config.apiKey) {
             config.apiKey = (0, config_1.requireApiKey)();

@@ -30,8 +30,10 @@ const cli_json_1 = require("../utils/cli-json");
 const chalk = (0, cli_json_1.loadChalk)();
 // ── Trust boundary statement — fixed, never changes ──────────────────────────
 const TRUST_BOUNDARY_STATEMENT = 'Neurcode deterministically detects and governs. ' +
-    'Your AI coding assistant (Cursor, Claude, Codex, GitHub Copilot) performs remediation. ' +
+    'Your AI coding assistant (Claude, Codex, Cursor, Gemini, GitHub Copilot) performs remediation. ' +
     'Neurcode never autonomously modifies production code.';
+const REMEDIATION_HANDOFF_SCHEMA = 'neurcode.remediation-handoff.v1';
+const PROVIDERS = ['claude', 'codex', 'cursor', 'gemini'];
 // ── Remediation category map — deterministic, ruleId-keyed ───────────────────
 const REMEDIATION_CATEGORY = {
     PY003: 'exception-handling',
@@ -179,13 +181,17 @@ async function remediateExportCommand(options) {
         console.log(chalk.dim(`No finding specified. Exporting finding at index 0. Use --finding-index N or --all.\n`));
         selected = [findings[0]];
     }
-    const format = options.format ?? 'json';
+    const format = normalizeOutputFormat(options.format);
+    const provider = normalizeProvider(options.provider);
+    if ((format === 'prompt' || options.open) && !provider) {
+        console.error(chalk.red('✗ A provider is required for provider-specific handoff output.'));
+        console.error(chalk.dim(`  Use: --provider ${PROVIDERS.join('|')}`));
+        process.exit(1);
+    }
     const replayChecksum = resolveReplayChecksum(verifyOutput);
     const replayMode = resolveReplayMode(verifyOutput);
     const payloads = selected.map((finding) => buildPayload(finding, verifyOutput, projectRoot, replayChecksum, replayMode, format));
-    const output = payloads.length === 1
-        ? JSON.stringify(format === 'mcp' ? payloads[0].mcpEnvelope : payloads[0], null, 2)
-        : JSON.stringify(format === 'mcp' ? payloads.map(p => p.mcpEnvelope) : payloads, null, 2);
+    const output = renderRemediationOutput(payloads, format, provider);
     // Write to file or stdout
     if (options.out) {
         const outPath = (0, path_1.resolve)(projectRoot, options.out);
@@ -205,8 +211,16 @@ async function remediateExportCommand(options) {
             console.error(chalk.yellow('\n⚠  --copy failed (pbcopy not available on this system).'));
         }
     }
+    if (options.open) {
+        if (payloads.length !== 1) {
+            console.error(chalk.yellow('\n⚠  --open supports one finding at a time. Re-run without --all.'));
+        }
+        else if (provider) {
+            openProviderHandoff(payloads[0], provider);
+        }
+    }
     // Print trust boundary reminder
-    if (!options.json) {
+    if (!options.json && format === 'json') {
         console.error(chalk.dim('\n─────────────────────────────────────────────────────────'));
         console.error(chalk.cyan('  Trust Boundary'));
         console.error(chalk.dim('  Neurcode detects. Your AI assistant remediates.'));
@@ -338,7 +352,9 @@ function buildPayload(finding, verifyOutput, projectRoot, replayChecksum, replay
         graphImpact,
         relevantNarratives,
         suggestedPromptHint,
+        agentHandoff: undefined,
     };
+    payload.agentHandoff = buildAgentHandoff(payload, projectRoot);
     if (format === 'mcp') {
         payload.mcpEnvelope = {
             type: 'neurcode/remediation-request',
@@ -387,6 +403,341 @@ function asStringArray(value, limit = 12) {
     return value
         .filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
         .slice(0, limit);
+}
+function normalizeProvider(value) {
+    if (typeof value !== 'string' || value.trim().length === 0)
+        return undefined;
+    const normalized = value.trim().toLowerCase();
+    return PROVIDERS.includes(normalized)
+        ? normalized
+        : undefined;
+}
+function normalizeOutputFormat(value) {
+    if (typeof value !== 'string')
+        return 'json';
+    const normalized = value.trim().toLowerCase();
+    return ['json', 'mcp', 'prompt', 'markdown'].includes(normalized)
+        ? normalized
+        : 'json';
+}
+function shellQuote(value) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+function uniqueNonEmpty(values, limit = 20) {
+    return [...new Set(values.map((value) => value?.trim() || '').filter(Boolean))].slice(0, limit);
+}
+function buildAgentHandoff(payload, projectRoot) {
+    const context = payload.engineeringContext;
+    const drift = payload.driftIntelligence;
+    const allowedFiles = uniqueNonEmpty([
+        payload.filePath,
+        ...(context?.approvedScope.files || []),
+        ...(context?.contextFiles || []),
+    ], 24);
+    const forbiddenBoundaries = uniqueNonEmpty([
+        ...((context?.forbiddenBoundaries || []).map((entry) => `${entry.policy}:${entry.type}:${entry.path}${entry.reason ? ` — ${entry.reason}` : ''}`)),
+        ...payload.scopeUnexpectedFiles.map((file) => `out-of-scope:${file}`),
+        ...(drift?.unexpectedFiles || []).map((file) => `unexpected-file:${file}`),
+        ...(payload.ownershipBoundaryCrossed || []).map((entry) => `ownership-boundary:${entry}`),
+    ], 24);
+    const currentFailure = [
+        `${payload.severity} ${payload.ruleId} in ${payload.filePath}${payload.line ? `:${payload.line}` : ''}`,
+        payload.operationalExplanation || payload.suggestedPromptHint,
+    ].filter(Boolean).join(' — ');
+    const handoffBase = {
+        schemaVersion: REMEDIATION_HANDOFF_SCHEMA,
+        purpose: 'bounded-operational-remediation',
+        runtimeIdentity: {
+            name: 'Neurcode',
+            role: 'Deterministic operational governance runtime for AI-assisted engineering.',
+            notRole: [
+                'autonomous coding agent',
+                'code generator',
+                'scanner-only tool',
+                'probabilistic reviewer',
+            ],
+            trustBoundary: payload.trustBoundaryStatement,
+        },
+        lifecycle: {
+            currentStage: 'verify-failed-remediation-handoff',
+            direction: 'deterministic verify failure -> bounded external AI remediation -> deterministic re-verify',
+            closureCommand: 'neurcode verify --evidence',
+            replayContinuity: payload.replayChecksum
+                ? `Preserve replay continuity from checksum ${payload.replayChecksum}.`
+                : 'Re-run verify after remediation so replay continuity can be reconstructed.',
+        },
+        continuity: {
+            exportId: payload.exportId,
+            findingId: payload.findingId,
+            findingGraphHash: payload.findingGraphHash,
+            replayChecksum: payload.replayChecksum,
+            replayMode: payload.replayMode,
+            provenanceRunId: payload.provenanceRunId,
+            planId: payload.planId,
+        },
+        objective: {
+            intentSummary: context?.intentSummary || payload.intentGovernance?.riskSummary || 'No authored intent summary was present in the verify payload.',
+            governanceObjective: 'Resolve the blocking finding while preserving the declared intent, approved scope, dependency boundary, generated-code policy, and replay expectations.',
+            currentFailure,
+            remediationCategory: payload.remediationCategory,
+        },
+        scope: {
+            targetFile: payload.filePath,
+            targetLine: payload.line,
+            allowedFiles,
+            approvedModules: context?.approvedScope.modules || [],
+            approvedServices: context?.approvedScope.services || [],
+            forbiddenBoundaries,
+            generatedCodePolicy: 'Do not edit generated-code surfaces directly. Regenerate from source or stop and report if the target is generated.',
+        },
+        behaviorContract: {
+            do: [
+                'Minimally resolve the blocking governance finding.',
+                'Inspect the cited code and nearby context before editing.',
+                'Keep changes inside the allowed file, module, service, and intent boundary.',
+                'Preserve architectural intent, ownership boundaries, and existing style.',
+                'Run or recommend the deterministic verification loop after edits.',
+            ],
+            doNot: [
+                'Do not broaden implementation scope.',
+                'Do not perform unrelated refactors, formatting sweeps, dependency upgrades, or architecture changes.',
+                'Do not touch generated-code surfaces directly.',
+                'Do not widen dependency, import, infrastructure, CI, or rollout boundaries.',
+                'Do not treat Neurcode findings as suggestions to debate away.',
+            ],
+            constraints: [
+                'No autonomous governance decisions.',
+                'No policy exception creation.',
+                'No suppression unless explicitly requested by a human through governed workflow.',
+                'Stop and explain if the requested remediation cannot be completed inside the boundary.',
+            ],
+            minimalityExpectations: [
+                'Prefer the smallest code change that clears the finding.',
+                'Avoid new abstractions unless required to satisfy the rule safely.',
+                'Preserve public APIs unless the finding explicitly concerns the public API.',
+                'Keep tests focused on the changed behavior when tests are needed.',
+            ],
+        },
+        successCriteria: [
+            'The cited finding is resolved in the target file.',
+            'No new blocking or advisory Neurcode findings are introduced.',
+            'Approved scope, forbidden boundaries, generated-code policy, and import-edge governance remain intact.',
+            'The engineer can run `neurcode verify --evidence` and get a PASS or a narrower, explainable remaining finding.',
+        ],
+        verificationLoop: {
+            required: true,
+            command: 'neurcode verify --evidence',
+            expectation: 'Re-run deterministic verify after the external AI edit. Do not claim closure before verify passes.',
+        },
+        outputExpectations: [
+            'State the files changed and why each change was necessary.',
+            'Call out any boundary uncertainty instead of guessing.',
+            'Do not claim Neurcode approval; only Neurcode verify can close the loop.',
+        ],
+    };
+    const handoff = handoffBase;
+    handoff.providerHandoffs = {
+        claude: buildProviderHandoff('claude', handoffBase, payload, projectRoot),
+        codex: buildProviderHandoff('codex', handoffBase, payload, projectRoot),
+        cursor: buildProviderHandoff('cursor', handoffBase, payload, projectRoot),
+        gemini: buildProviderHandoff('gemini', handoffBase, payload, projectRoot),
+    };
+    return handoff;
+}
+function buildProviderHandoff(provider, handoff, payload, projectRoot) {
+    const prompt = buildProviderPrompt(provider, handoff, payload);
+    const compactPrompt = buildProviderPrompt(provider, handoff, payload, { compact: true });
+    const encodedPrompt = encodeURIComponent(compactPrompt);
+    const cwd = encodeURIComponent(projectRoot);
+    const label = provider === 'claude'
+        ? 'Claude Code'
+        : provider === 'codex'
+            ? 'Codex'
+            : provider === 'cursor'
+                ? 'Cursor'
+                : 'Gemini CLI';
+    const command = provider === 'codex'
+        ? `codex --cd ${shellQuote(projectRoot)} ${shellQuote(prompt)}`
+        : provider === 'cursor'
+            ? `cursor-agent ${shellQuote(prompt)}`
+            : provider === 'gemini'
+                ? `gemini -p ${shellQuote(prompt)}`
+                : null;
+    const claudeLink = provider === 'claude' && compactPrompt.length <= 5000
+        ? `claude-cli://open?cwd=${cwd}&q=${encodedPrompt}`
+        : null;
+    return {
+        provider,
+        label,
+        optimizedFor: providerOptimizations(provider),
+        clipboardTitle: `Remediate in ${label}`,
+        prompt,
+        launch: {
+            mode: provider === 'claude' ? 'deep-link' : command ? 'cli-command' : 'clipboard',
+            available: provider === 'claude' ? Boolean(claudeLink) : Boolean(command),
+            deepLink: claudeLink,
+            command,
+            limitation: provider === 'claude'
+                ? claudeLink
+                    ? null
+                    : 'Claude Code deep links accept prompts up to 5,000 characters; use the clipboard prompt for this larger handoff.'
+                : `${label} does not expose a documented universal prompt-prefill deep link in the audited docs; use the CLI command or clipboard prompt.`,
+        },
+    };
+}
+function providerOptimizations(provider) {
+    switch (provider) {
+        case 'claude':
+            return ['Claude Code deep-link prefill', 'explicit contract tags', 'long-context boundary retention'];
+        case 'codex':
+            return ['local workspace execution', 'reviewable patch workflow', 'approval-aware command execution'];
+        case 'cursor':
+            return ['IDE agent/composer workflow', 'file-local context anchoring', 'rule-aware editing'];
+        case 'gemini':
+            return ['CLI prompt mode', 'checklist-style boundaries', 'explicit anti-broadening constraints'];
+    }
+}
+function buildProviderPrompt(provider, handoff, payload, options = {}) {
+    const providerDirective = {
+        claude: 'Claude Code: read this as an operational contract before editing. Keep a short plan, then implement only the bounded fix.',
+        codex: 'Codex: operate as a local coding agent under strict governance constraints. Inspect first, edit narrowly, then summarize verification.',
+        cursor: 'Cursor: use Agent/Composer with this file as the anchor. Do not fan out across the codebase unless the allowed scope below requires it.',
+        gemini: 'Gemini CLI: follow the checklist exactly. Avoid broad rewrites; stop if the fix requires scope expansion.',
+    }[provider];
+    const allowed = handoff.scope.allowedFiles.slice(0, options.compact ? 8 : 18);
+    const forbidden = handoff.scope.forbiddenBoundaries.slice(0, options.compact ? 6 : 14);
+    const lines = [
+        '# Neurcode Remediation Handoff',
+        '',
+        providerDirective,
+        '',
+        '## Runtime Identity',
+        `${handoff.runtimeIdentity.name} is a deterministic operational governance runtime for AI-assisted engineering.`,
+        `It is not: ${handoff.runtimeIdentity.notRole.join(', ')}.`,
+        handoff.runtimeIdentity.trustBoundary,
+        '',
+        '## Governance Objective',
+        handoff.objective.governanceObjective,
+        '',
+        '## Current Deterministic Failure',
+        `Finding: ${handoff.objective.currentFailure}`,
+        `Category: ${handoff.objective.remediationCategory}`,
+        `Target: ${handoff.scope.targetFile}${handoff.scope.targetLine ? `:${handoff.scope.targetLine}` : ''}`,
+        payload.codeSpan ? `Code span: ${payload.codeSpan}` : '',
+        '',
+        '## Intent And Scope',
+        `Intent summary: ${handoff.objective.intentSummary}`,
+        `Allowed files: ${allowed.length ? allowed.join(', ') : handoff.scope.targetFile}`,
+        handoff.scope.approvedModules.length ? `Approved modules: ${handoff.scope.approvedModules.join(', ')}` : '',
+        handoff.scope.approvedServices.length ? `Approved services: ${handoff.scope.approvedServices.join(', ')}` : '',
+        forbidden.length ? `Forbidden boundaries: ${forbidden.join(' | ')}` : 'Forbidden boundaries: do not expand dependencies, imports, generated-code, infra, CI, rollout, or ownership scope.',
+        handoff.scope.generatedCodePolicy,
+        '',
+        '## Required Behavior',
+        ...handoff.behaviorContract.do.map((entry) => `DO: ${entry}`),
+        ...handoff.behaviorContract.doNot.map((entry) => `DO NOT: ${entry}`),
+        '',
+        '## Minimality Constraints',
+        ...handoff.behaviorContract.minimalityExpectations.map((entry) => `- ${entry}`),
+        '',
+        '## Success Criteria',
+        ...handoff.successCriteria.map((entry) => `- ${entry}`),
+        '',
+        '## Verification Loop',
+        `After remediation, run: ${handoff.verificationLoop.command}`,
+        handoff.verificationLoop.expectation,
+        '',
+        '## Continuity',
+        `Export ID: ${handoff.continuity.exportId}`,
+        `Finding graph hash: ${handoff.continuity.findingGraphHash}`,
+        handoff.continuity.replayChecksum ? `Replay checksum: ${handoff.continuity.replayChecksum}` : 'Replay checksum: unavailable in source verify payload',
+    ].filter((line) => line !== '');
+    if (!options.compact && payload.surroundingContext.trim().length > 0) {
+        lines.push('', '## Local Code Context', '```', payload.surroundingContext, '```');
+    }
+    if (!options.compact && payload.relevantNarratives.length > 0) {
+        lines.push('', '## Relevant Governance Narrative');
+        payload.relevantNarratives.slice(0, 3).forEach((entry, index) => {
+            lines.push(`${index + 1}. ${entry.summary}`);
+            lines.push(`Root cause: ${entry.rootCause}`);
+            lines.push(`Boundary: ${entry.remediationBoundary}`);
+        });
+    }
+    lines.push('', '## Output Expectations', ...handoff.outputExpectations.map((entry) => `- ${entry}`));
+    return lines.join('\n');
+}
+function renderRemediationOutput(payloads, format, provider) {
+    if (format === 'prompt' && provider) {
+        return payloads.map((payload) => payload.agentHandoff.providerHandoffs[provider].prompt).join('\n\n---\n\n');
+    }
+    if (format === 'markdown') {
+        return payloads.map((payload) => renderMarkdownHandoff(payload, provider)).join('\n\n---\n\n');
+    }
+    if (format === 'mcp') {
+        return payloads.length === 1
+            ? JSON.stringify(payloads[0].mcpEnvelope, null, 2)
+            : JSON.stringify(payloads.map((payload) => payload.mcpEnvelope), null, 2);
+    }
+    return payloads.length === 1
+        ? JSON.stringify(payloads[0], null, 2)
+        : JSON.stringify(payloads, null, 2);
+}
+function renderMarkdownHandoff(payload, provider) {
+    const selected = provider ? [payload.agentHandoff.providerHandoffs[provider]] : PROVIDERS.map((entry) => payload.agentHandoff.providerHandoffs[entry]);
+    const lines = [
+        '# Neurcode Remediation Handoff',
+        '',
+        `Export: \`${payload.exportId}\``,
+        `Finding: \`${payload.ruleId}\` in \`${payload.filePath}${payload.line ? `:${payload.line}` : ''}\``,
+        `Replay: \`${payload.replayChecksum || 'unavailable'}\``,
+        '',
+        payload.agentHandoff.objective.governanceObjective,
+        '',
+    ];
+    selected.forEach((handoff) => {
+        lines.push(`## ${handoff.clipboardTitle}`);
+        if (handoff.launch.deepLink)
+            lines.push(`[Open ${handoff.label}](${handoff.launch.deepLink})`);
+        if (handoff.launch.command) {
+            lines.push('```bash');
+            lines.push(handoff.launch.command);
+            lines.push('```');
+        }
+        if (handoff.launch.limitation)
+            lines.push(`Note: ${handoff.launch.limitation}`);
+        lines.push('');
+        lines.push('```text');
+        lines.push(handoff.prompt);
+        lines.push('```');
+        lines.push('');
+    });
+    return lines.join('\n');
+}
+function openProviderHandoff(payload, provider) {
+    const handoff = payload.agentHandoff.providerHandoffs[provider];
+    if (!handoff.launch.deepLink) {
+        console.error(chalk.yellow(`\n⚠  ${handoff.label} does not have an available documented deep-link for this payload.`));
+        if (handoff.launch.command) {
+            console.error(chalk.dim('  Use this command instead:'));
+            console.error(chalk.cyan(`  ${handoff.launch.command}`));
+        }
+        return;
+    }
+    try {
+        if (process.platform === 'darwin') {
+            (0, child_process_1.execFileSync)('open', [handoff.launch.deepLink], { stdio: 'ignore' });
+        }
+        else if (process.platform === 'win32') {
+            (0, child_process_1.execFileSync)('cmd', ['/c', 'start', '', handoff.launch.deepLink], { stdio: 'ignore' });
+        }
+        else {
+            (0, child_process_1.execFileSync)('xdg-open', [handoff.launch.deepLink], { stdio: 'ignore' });
+        }
+        console.error(chalk.green(`\n✅ Opened ${handoff.label} handoff.`));
+    }
+    catch {
+        console.error(chalk.yellow(`\n⚠  Could not open ${handoff.label}. Copy the deep link or prompt from the export instead.`));
+    }
 }
 function extractGovernanceDecisionLineage(value) {
     const record = asRecord(value);

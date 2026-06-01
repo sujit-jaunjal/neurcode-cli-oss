@@ -2,8 +2,8 @@
 /**
  * Quickstart Command
  *
- * Guided onboarding flow. Gets a new engineer to first deterministic finding
- * within 2 minutes. Zero interactive prompts. Zero network calls.
+ * Local-only governance sandbox. For the connected enterprise onboarding
+ * lifecycle, use: neurcode login -> neurcode init -> neurcode start.
  *
  * What it does:
  * 1. Resolves project root (git repo required)
@@ -72,9 +72,9 @@ const STARTER_CONFIG_TEMPLATE = (projectRoot) => JSON.stringify({
     _generatedBy: 'neurcode quickstart',
 }, null, 2);
 function printBanner(text) {
-    console.log(chalk_1.default.bold.cyan(`\n${'═'.repeat(60)}`));
-    console.log(chalk_1.default.bold.white(`  ${text}`));
-    console.log(chalk_1.default.cyan('═'.repeat(60)));
+    console.log('');
+    console.log(chalk_1.default.bold.white(text));
+    console.log(chalk_1.default.dim('-'.repeat(60)));
 }
 function printStep(n, title, desc) {
     console.log(chalk_1.default.bold.white(`\n  Step ${n}: ${title}`));
@@ -87,8 +87,11 @@ async function quickstartCommand(options = {}) {
     const created = [];
     const skipped = [];
     if (!options.json) {
-        printBanner('Neurcode Quickstart — First Governance Finding in < 2 Minutes');
-        console.log(chalk_1.default.dim('\n  Setting up deterministic governance for this repository.\n'));
+        printBanner('Neurcode Quickstart - Local Governance Sandbox');
+        console.log(chalk_1.default.dim('\n  This creates local-only governance starter files. For connected enterprise onboarding, run:'));
+        console.log(chalk_1.default.cyan('    neurcode login'));
+        console.log(chalk_1.default.cyan('    neurcode init'));
+        console.log(chalk_1.default.cyan('    neurcode start') + chalk_1.default.dim(' "what you intend to change"\n'));
     }
     // 1. Initialize .neurcode/
     if (!(0, fs_1.existsSync)(neurcodeDir)) {
@@ -132,12 +135,12 @@ async function quickstartCommand(options = {}) {
     if (created.length > 0) {
         console.log(chalk_1.default.green('  Created:'));
         for (const f of created)
-            console.log(chalk_1.default.green(`    ✅ ${f}`));
+            console.log(chalk_1.default.green(`    ${f}`));
     }
     if (skipped.length > 0) {
         console.log(chalk_1.default.dim('  Skipped (already exists):'));
         for (const f of skipped)
-            console.log(chalk_1.default.dim(`    ⏭️  ${f}`));
+            console.log(chalk_1.default.dim(`    ${f}`));
     }
     // 4. Explain the verify flow
     printBanner('How Neurcode Verify Works');
@@ -145,36 +148,34 @@ async function quickstartCommand(options = {}) {
     printStep(2, 'Write code', 'Use your AI tools (Cursor, Claude Code, Codex) to generate or write code.');
     printStep(3, 'Run verify', 'Run `neurcode verify --evidence` to check your code against intent, policies, and structural rules.');
     printStep(4, 'Review findings', 'BLOCKING findings must be resolved. ADVISORY findings are informational.\n' +
-        '  Structural rules (SR001–SR010) are deterministic — same code = same result, always.');
+        '  Structural rules (SR001-SR010) are deterministic: same code = same result, always.');
     printStep(5, 'Iterate', 'Export remediation context if needed, apply external edits, then re-run verify. When passing, the PR is governance-cleared.');
     // 5. Explain local-only mode
     printBanner('Local-Only Mode (No Network Required)');
     console.log(chalk_1.default.dim('\n  `neurcode verify --local-only` runs deterministic structural analysis'));
     console.log(chalk_1.default.dim('  without network access. It uses AST-backed rules to detect:'));
-    console.log(chalk_1.default.dim('\n    SR001 — Swallowed async rejections'));
-    console.log(chalk_1.default.dim('    SR002 — Missing error propagation'));
-    console.log(chalk_1.default.dim('    SR003 — Timer/resource leaks'));
-    console.log(chalk_1.default.dim('    SR004 — Unvalidated external inputs'));
-    console.log(chalk_1.default.dim('    SR005–SR010 — Additional structural integrity rules\n'));
+    console.log(chalk_1.default.dim('\n    SR001 - Swallowed async rejections'));
+    console.log(chalk_1.default.dim('    SR002 - Missing error propagation'));
+    console.log(chalk_1.default.dim('    SR003 - Timer/resource leaks'));
+    console.log(chalk_1.default.dim('    SR004 - Unvalidated external inputs'));
+    console.log(chalk_1.default.dim('    SR005-SR010 - Additional structural integrity rules\n'));
     console.log(chalk_1.default.dim('  These findings are:'));
-    console.log(chalk_1.default.dim('    • Deterministic — same code always produces same finding'));
-    console.log(chalk_1.default.dim('    • Reproducible — identical on any machine, any time'));
-    console.log(chalk_1.default.dim('    • No LLM involved — pure AST analysis\n'));
-    // 6. Next commands — intent-first lifecycle order (matches welcome banner +
+    console.log(chalk_1.default.dim('    - Deterministic: same code always produces same finding'));
+    console.log(chalk_1.default.dim('    - Reproducible: identical on any machine, any time'));
+    console.log(chalk_1.default.dim('    - No LLM involved: pure AST analysis\n'));
+    // 6. Next commands - intent-first lifecycle order (matches welcome banner +
     //    `neurcode home` so the recommended flow is coherent across surfaces).
     printBanner('Recommended Next Commands');
     console.log('');
-    console.log(chalk_1.default.bold.white('  1. Declare what you intend to change:'));
-    console.log(chalk_1.default.cyan('       neurcode start') + chalk_1.default.dim(' "what you intend to change"\n'));
-    console.log(chalk_1.default.bold.white('  2. Verify the diff against the declared intent (no network required):'));
-    console.log(chalk_1.default.cyan('       neurcode verify --local-only --head --require-intent-runtime\n'));
-    console.log(chalk_1.default.bold.white('  3. View current runtime state at a glance:'));
-    console.log(chalk_1.default.cyan('       neurcode home\n'));
-    console.log(chalk_1.default.bold.white('  4. Archive an audit-grade replay artefact for the run:'));
+    console.log(chalk_1.default.bold.white('  Connected enterprise lifecycle:'));
+    console.log(chalk_1.default.cyan('       neurcode login'));
+    console.log(chalk_1.default.cyan('       neurcode init'));
+    console.log(chalk_1.default.cyan('       neurcode whoami\n'));
+    console.log(chalk_1.default.bold.white('  Local governance lifecycle:'));
+    console.log(chalk_1.default.cyan('       neurcode start') + chalk_1.default.dim(' "what you intend to change"'));
+    console.log(chalk_1.default.cyan('       neurcode verify --local-only --head --require-intent-runtime'));
+    console.log(chalk_1.default.cyan('       neurcode home'));
     console.log(chalk_1.default.cyan('       neurcode replay --html /tmp/replay-report.html\n'));
-    console.log(chalk_1.default.bold.white('  5. Check runtime / system readiness:'));
-    console.log(chalk_1.default.cyan('       neurcode doctor\n'));
-    console.log(chalk_1.default.bold.green('  Quickstart complete. The lifecycle is:'));
-    console.log(chalk_1.default.dim('  start  ▸  verify  ▸  replay  ▸  remediate-export  ▸  re-verify\n'));
+    console.log(chalk_1.default.bold.green('  Quickstart complete. Connected onboarding starts with login, then init.\n'));
 }
 //# sourceMappingURL=quickstart.js.map

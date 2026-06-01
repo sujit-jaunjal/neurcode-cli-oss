@@ -320,6 +320,46 @@ class ApiClient {
             })
         });
     }
+    async uploadRuntimeEvidence(body) {
+        const url = `${this.apiUrl}/api/v1/runtime/evidence`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+    }
+    async updateRuntimeLiveSessionStatus(body) {
+        const url = `${this.apiUrl}/api/v1/runtime/live-sessions/status`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+    }
+    async getRuntimeLiveApprovals(sessionId, repoKey) {
+        const query = repoKey ? `?repoKey=${encodeURIComponent(repoKey)}` : '';
+        const url = `${this.apiUrl}/api/v1/runtime/live-sessions/${encodeURIComponent(sessionId)}/approvals${query}`;
+        return this.makeRequest(url, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+    }
+    async acknowledgeRuntimeLiveApproval(sessionId, approvalId, body) {
+        const url = `${this.apiUrl}/api/v1/runtime/live-sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approvalId)}/applied`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+    }
     async getFileVersions(filePath, projectId, limit = 50) {
         const url = `${this.apiUrl}/api/v1/revert/versions`;
         const params = new URLSearchParams({ filePath });

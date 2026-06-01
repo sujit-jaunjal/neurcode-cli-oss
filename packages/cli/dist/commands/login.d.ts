@@ -2,7 +2,7 @@
  * Login Command
  *
  * Implements device flow authentication for CLI.
- * User runs `neurcode login` → Opens browser → Approves → CLI saves API key globally
+ * User runs `neurcode login` -> browser approval -> CLI saves a runtime credential
  */
 export declare function loginCommand(options?: {
     orgId?: string;

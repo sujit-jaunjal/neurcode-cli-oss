@@ -15,7 +15,10 @@ exports.getProjectId = getProjectId;
 exports.setProjectId = setProjectId;
 exports.getOrgId = getOrgId;
 exports.setOrgId = setOrgId;
+exports.setWorkspaceContext = setWorkspaceContext;
 exports.getOrgName = getOrgName;
+exports.getWorkspaceType = getWorkspaceType;
+exports.getWorkspaceRole = getWorkspaceRole;
 exports.getLastPlanId = getLastPlanId;
 exports.setLastPlanId = setLastPlanId;
 exports.getActivePlanId = getActivePlanId;
@@ -124,11 +127,38 @@ function setOrgId(orgId, orgName) {
     saveState({ orgId, ...(orgName ? { orgName } : {}) });
 }
 /**
+ * Persist the full governance ownership context for this repository.
+ */
+function setWorkspaceContext(input) {
+    saveState({
+        orgId: input.orgId,
+        ...(input.orgName ? { orgName: input.orgName } : {}),
+        ...(input.workspaceType ? { workspaceType: input.workspaceType } : {}),
+        ...(input.workspaceRole ? { workspaceRole: input.workspaceRole } : {}),
+        ...(input.projectId ? { projectId: input.projectId } : {}),
+        linkedAt: new Date().toISOString(),
+    });
+}
+/**
  * Get organization name from state
  */
 function getOrgName() {
     const state = loadState();
     return state.orgName || null;
+}
+/**
+ * Get workspace ownership type from state.
+ */
+function getWorkspaceType() {
+    const state = loadState();
+    return state.workspaceType || null;
+}
+/**
+ * Get workspace role captured during repo initialization.
+ */
+function getWorkspaceRole() {
+    const state = loadState();
+    return state.workspaceRole || null;
 }
 /**
  * Get last plan ID from state

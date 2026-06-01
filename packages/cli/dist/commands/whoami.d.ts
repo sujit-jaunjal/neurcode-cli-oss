@@ -1,9 +1,12 @@
 /**
- * Whoami Command - Show Current Identity & Project Scope
+ * Whoami Command - Show Current Runtime Identity
  *
- * Displays:
- * 1. Logged-in user info (email, name)
- * 2. Current project scope (if inside a linked folder)
+ * Distinguishes the core lifecycle identities:
+ * 1. Authenticated user
+ * 2. Active workspace
+ * 3. Repo ownership context
+ * 4. Runtime/session state
+ * 5. Governance ownership boundary
  */
 export declare function whoamiCommand(): Promise<void>;
 //# sourceMappingURL=whoami.d.ts.map

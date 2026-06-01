@@ -29,7 +29,7 @@ export declare function printInfo(message: string, details?: string): void;
 /**
  * Print a section header with premium styling
  */
-export declare function printSection(title: string, emoji?: string): void;
+export declare function printSection(title: string, marker?: string): void;
 /**
  * Print a step indicator
  */

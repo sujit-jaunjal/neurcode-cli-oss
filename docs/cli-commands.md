@@ -1,11 +1,25 @@
 # Neurcode CLI Commands
 
-This reference follows one canonical workflow.
+This reference follows one canonical operational lifecycle:
+
+`install -> login -> init -> start -> verify -> replay -> remediate-export -> re-verify`
+
+The lifecycle separates five identities that must not blur together:
+
+- authenticated user
+- active workspace
+- repo ownership context
+- runtime/session state
+- governance ownership boundary
 
 ## Core Workflow
 
 ```bash
+npm install -g @neurcode-ai/cli@latest
+neurcode login
 neurcode init
+neurcode whoami
+neurcode start "Add JWT authentication with role checks"
 neurcode verify --ci --policy-only --json    # policy check, exits non-zero on blocking
 neurcode remediation-export --finding-index 0 --output remediation-export.json
 # fix in your AI assistant using the suggestedPromptHint from the export
@@ -14,7 +28,7 @@ neurcode verify --ci --policy-only --json    # confirm resolved
 
 Primary loop:
 
-`verify → remediation-export → fix externally (via AI assistant) → verify`
+`login -> init -> start -> verify -> remediation-export -> fix externally -> verify`
 
 Neurcode detects and governs. Your AI coding assistant (Cursor, Claude, Copilot) performs remediation. Neurcode does not autonomously modify production code.
 
@@ -199,13 +213,35 @@ neurcode policy list
 
 ### `neurcode login` / `neurcode logout`
 
-Authenticate with Neurcode Cloud.
+Connect or disconnect this machine/runtime. Login opens browser approval and stores the underlying credential in the local keyring. API keys are implementation detail for CI/manual environments, not the normal CLI workflow.
 
 ```bash
 neurcode login
+neurcode login --org <workspace-id>
 neurcode logout
 neurcode whoami
 ```
+
+Use `neurcode whoami` after login/init to inspect:
+
+- authenticated user
+- active workspace
+- repo ownership context
+- runtime/session state
+- governance ownership boundary
+
+### `neurcode init`
+
+Bind the current repository to a personal or organization workspace. This creates the repo ownership context in `.neurcode/config.json` and determines the governance boundary used by later commands.
+
+```bash
+neurcode init
+neurcode init --org <workspace-id>
+neurcode init --org <workspace-id> --create "checkout-service"
+neurcode init --org <workspace-id> --project-id <project-id>
+```
+
+The interactive flow asks which workspace owns this repository, then whether to link an existing project or create a new project ownership record.
 
 ## Advanced Commands
 
@@ -215,7 +251,7 @@ Supported but not required for the core workflow:
 - `ask`, `audit`, `bootstrap`, `brain`
 - `check`, `compat`, `config`, `contract`
 - `doctor`, `feedback`, `guard`
-- `init`, `map`
+- `map`
 - `plan`, `plan-slo`, `prompt`
 - `refactor`, `remediate`, `repo`, `revert`
 - `security`, `session`, `ship`, `ship-runs`, `ship-resume`, `ship-attestation-verify`

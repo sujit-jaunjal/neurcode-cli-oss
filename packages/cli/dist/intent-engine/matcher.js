@@ -11,6 +11,7 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.matchIntentToCode = matchIntentToCode;
+const requirements_1 = require("./requirements");
 const COMPONENT_SIGNALS = {
     'input-validation': {
         strong: [
@@ -347,16 +348,6 @@ const MISSING_CHECKS = [
         severity: 'high', rule: 'intent:missing-webhook-verification',
     },
 ];
-// ── Domain component lists (mirrors requirements.ts without circular import) ──
-const DOMAIN_COMPONENTS = {
-    auth: ['input-validation', 'token-generation', 'token-expiry', 'role-check', 'middleware-protection', 'password-hashing'],
-    api: ['input-validation', 'error-handling', 'service-layer-separation', 'auth-middleware', 'response-schema'],
-    payment: ['input-validation', 'idempotency', 'webhook-verification', 'error-handling', 'secure-data-handling'],
-    database: ['transaction-handling', 'migration-safety', 'connection-pooling', 'input-sanitization'],
-    security: ['input-sanitization', 'output-encoding', 'secret-management', 'cors-policy', 'https-enforcement'],
-    notification: ['recipient-validation', 'retry-logic', 'template-validation', 'rate-limiting'],
-    file: ['file-type-validation', 'size-limit-enforcement', 'filename-sanitization', 'access-control'],
-};
 // Components whose detection should be limited to api-layer file content
 const API_SCOPED_COMPONENTS = new Set([
     'error-handling', 'service-layer-separation', 'auth-middleware', 'response-schema',
@@ -379,7 +370,7 @@ function detectComponents(domains, index, effectiveApiFiles) {
     const componentQuality = {};
     const allFiles = [...index.values()];
     for (const domain of domains) {
-        const keys = DOMAIN_COMPONENTS[domain] ?? [];
+        const keys = requirements_1.DOMAIN_REQUIREMENTS[domain] ?? [];
         for (const key of keys) {
             const signals = COMPONENT_SIGNALS[key];
             if (!signals)
@@ -501,7 +492,7 @@ function matchIntentToCode(intent, index) {
     // Build legacy foundComponents (domain → string[]) for backward compat
     const foundComponents = {};
     for (const domain of intent.domains) {
-        foundComponents[domain] = (DOMAIN_COMPONENTS[domain] ?? []).filter((k) => k in componentMap);
+        foundComponents[domain] = (requirements_1.DOMAIN_REQUIREMENTS[domain] ?? []).filter((k) => k in componentMap);
     }
     // Downgrade quality: components with only weak signals → add to issues only
     // if quality is weak AND the component is present (don't double-flag as missing)

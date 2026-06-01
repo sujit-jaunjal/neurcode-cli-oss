@@ -104,4 +104,3 @@ neurcode contract import --provider codex --auto-detect --no-confirm
 ## Related repositories
 
 - OSS CLI runtime: [sujit-jaunjal/neurcode-cli-oss](https://github.com/sujit-jaunjal/neurcode-cli-oss)
-- OSS GitHub Action package: [sujit-jaunjal/neurcode-actions](https://github.com/sujit-jaunjal/neurcode-actions)

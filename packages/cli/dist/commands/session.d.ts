@@ -8,6 +8,8 @@
  * - neurcode session end     - End the current or specified session
  * - neurcode session status  - Show status of current session
  */
+import { type AgentPlan, type AgentPlanAmendmentProposal, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
+import { type RuntimeConnection } from '../utils/runtime-connection';
 interface SessionCommandOptions {
     sessionId?: string;
     projectId?: string;
@@ -15,7 +17,71 @@ interface SessionCommandOptions {
     left?: string;
     right?: string;
     json?: boolean;
+    local?: boolean;
+    dir?: string;
+    path?: string;
+    reason?: string;
+    plan?: string;
+    planFile?: string;
+    summary?: string;
+    addStep?: string[];
+    removeStep?: string[];
+    addFile?: string[];
+    removeFile?: string[];
+    addGlob?: string[];
+    removeGlob?: string[];
+    addConstraint?: string[];
+    removeConstraint?: string[];
+    addRisk?: string[];
+    removeRisk?: string[];
+    proposedBy?: 'agent' | 'human';
+    proposalId?: string;
+    decision?: 'accept' | 'reject';
+    decidedBy?: string;
 }
+interface MissingLocalGovernanceStatus {
+    ok: false;
+    repoRoot: string;
+    active: false;
+    message: string;
+    connection: RuntimeConnection | null;
+}
+interface PresentLocalGovernanceStatus {
+    ok: true;
+    repoRoot: string;
+    active: boolean;
+    sessionId: string;
+    status: GovernanceSession['status'];
+    goal: string;
+    profileHash: string;
+    scopeMode: GovernanceSession['contract']['scopeMode'];
+    planCoherenceMode: NonNullable<GovernanceSession['contract']['planCoherenceMode']>;
+    agentPlan: AgentPlan | null;
+    agentPlanRevision: number | null;
+    pendingPlanAmendments: AgentPlanAmendmentProposal[];
+    allowedGlobs: string[];
+    sensitiveGlobs: string[];
+    approvalRequiredGlobs: string[];
+    approvedPaths: string[];
+    recentEvents: SessionEvent[];
+    latestBlock: {
+        filePath?: string;
+        message?: string;
+        owners: string[];
+        suggestedApprovalPath: string | null;
+        approveCommand: string | null;
+    } | null;
+    recordPath: string;
+    connection: RuntimeConnection | null;
+}
+type LocalGovernanceStatus = MissingLocalGovernanceStatus | PresentLocalGovernanceStatus;
+export declare function buildLocalGovernanceStatus(options?: SessionCommandOptions): LocalGovernanceStatus;
+export declare function localGovernanceStatusCommand(options?: SessionCommandOptions): void;
+export declare function replanGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
+export declare function decideGovernanceReplanCommand(options?: SessionCommandOptions): Promise<void>;
+export declare function approveGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
+export declare function listRuntimeSessionsCommand(options?: SessionCommandOptions): void;
+export declare function showRuntimeSessionCommand(sessionId: string, options?: SessionCommandOptions): void;
 /**
  * List all sessions
  */

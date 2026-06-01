@@ -3,7 +3,7 @@
  * Login Command
  *
  * Implements device flow authentication for CLI.
- * User runs `neurcode login` → Opens browser → Approves → CLI saves API key globally
+ * User runs `neurcode login` -> browser approval -> CLI saves a runtime credential
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -66,29 +66,42 @@ async function loginCommand(options) {
         const existingApiKey = desiredOrgId ? (0, config_1.getApiKey)(desiredOrgId) : (0, config_1.getApiKey)();
         if (existingApiKey) {
             try {
-                // Validate the existing API key by fetching user info
+                // Validate the existing runtime credential by fetching user info
                 config.apiKey = existingApiKey;
                 const client = new api_client_1.ApiClient(config);
                 const user = await client.getCurrentUser();
                 const userInfo = await (0, user_context_1.getUserInfo)();
-                await (0, messages_1.printSuccessBanner)('Already Authenticated', `Welcome back, ${userInfo?.displayName || user.email}!`);
-                (0, messages_1.printSuccess)(`You're logged in as ${userInfo?.displayName || user.email}`, `Account: ${user.email}\n   API Key: ${existingApiKey.substring(0, 20)}...\n   To log out: neurcode logout`);
+                await (0, messages_1.printSuccessBanner)('Runtime Already Connected', `Welcome back, ${userInfo?.displayName || user.email}.`);
+                const existingProjectId = (0, state_1.getProjectId)();
+                (0, messages_1.printSuccess)('This machine already has an active Neurcode runtime connection', [
+                    `Authenticated user: ${user.email}`,
+                    desiredOrgId
+                        ? `Workspace: ${desiredOrgName || desiredOrgId}`
+                        : 'Workspace: default keyring workspace',
+                    existingProjectId
+                        ? `Repo ownership: initialized (${existingProjectId})`
+                        : 'Repo ownership: not initialized in this directory',
+                    'Disconnect: neurcode logout',
+                ].join('\n   '));
+                if (!existingProjectId) {
+                    (0, messages_1.printInfo)('Next step', 'Bind this repository to a governance workspace:\n   neurcode init');
+                }
                 return;
             }
             catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 const looksLikeAuth = /authentication failed|unauthorized|forbidden|401|403/i.test(msg);
-                // API key is invalid/expired (or we couldn't validate); proceed with login
+                // Runtime credential is invalid/expired (or we couldn't validate); proceed with login
                 (0, user_context_1.clearUserCache)(); // Clear stale cache
                 (0, messages_1.printWarning)(looksLikeAuth ? 'Existing session expired' : 'Could not validate existing session', looksLikeAuth
-                    ? 'Your previous API key is no longer valid. Let\'s set up a fresh authentication.'
+                    ? 'Your previous runtime credential is no longer valid. Let\'s set up a fresh connection.'
                     : 'Proceeding with login to refresh authentication.');
             }
         }
-        await (0, messages_1.printSuccessBanner)('Neurcode CLI Authentication');
-        (0, messages_1.printInfo)('We\'ll open your browser to securely authenticate your account.');
+        await (0, messages_1.printSuccessBanner)('Connect Neurcode Runtime');
+        (0, messages_1.printInfo)('Browser approval', 'We will open the browser to connect this machine to a Neurcode workspace. The credential is stored in the local keyring and is not part of the normal workflow.');
         if (desiredOrgId) {
-            (0, messages_1.printInfo)('Organization Scope', `This login will mint an API key for: ${desiredOrgName || desiredOrgId}`);
+            (0, messages_1.printInfo)('Workspace scope', `This runtime connection will be scoped to: ${desiredOrgName || desiredOrgId}`);
         }
         // Step 1: Initialize device flow
         const initUrl = `${apiUrl}/cli/auth/init`;
@@ -116,8 +129,8 @@ async function loginCommand(options) {
         const initData = await initResponse.json();
         const { deviceCode, userCode, verificationUrl } = initData;
         const openInBrowser = async () => {
-            (0, messages_1.printInfo)('Opening your browser for authentication...');
-            (0, messages_1.printWaiting)('Waiting for your approval', false);
+            (0, messages_1.printInfo)('Opening browser for workspace approval...');
+            (0, messages_1.printWaiting)('Waiting for runtime connection approval', false);
             const platform = process.platform;
             const preferred = process.env.NEURCODE_LOGIN_BROWSER;
             try {
@@ -150,7 +163,7 @@ async function loginCommand(options) {
                 });
             });
         };
-        const fallbackMessage = `Please open this URL in your browser:\n   ${verificationUrl}\n\n   Then enter this code: ${userCode}${process.platform === 'darwin' ? '\n\n   Tip: Force Safari with: NEURCODE_LOGIN_BROWSER=Safari neurcode login' : ''}`;
+        const fallbackMessage = `Please open this URL in your browser:\n   ${verificationUrl}\n\n   Approval code: ${userCode}${process.platform === 'darwin' ? '\n\n   Tip: Force Safari with: NEURCODE_LOGIN_BROWSER=Safari neurcode login' : ''}`;
         try {
             await openInBrowser();
         }
@@ -183,24 +196,33 @@ async function loginCommand(options) {
             if (pollData.status === 'approved') {
                 if (pollData.apiKey) {
                     const savedOrgId = pollData.organizationId || desiredOrgId || undefined;
-                    // Save API key to global config
+                    // Save runtime credential to global config
                     (0, config_1.saveGlobalAuth)(pollData.apiKey, apiUrl, savedOrgId);
                     // Get user info for personalized message
                     const userInfo = await (0, user_context_1.getUserInfo)();
                     const userName = userInfo?.displayName || userInfo?.email || 'there';
-                    await (0, messages_1.printSuccessBanner)('Authentication Successful!', `Welcome to Neurcode, ${userName}!`);
-                    (0, messages_1.printSuccess)('Your CLI is now authenticated', `API key saved securely to ~/.neurcoderc${savedOrgId ? ` (org: ${savedOrgId.substring(0, 8)}...)` : ''}\n   You're all set to use Neurcode commands!`);
-                    (0, messages_1.printInfo)('Next step', 'Declare your intent and begin a governed change:\n   neurcode start "what you intend to change"\n   neurcode home                       (view current runtime state)');
+                    await (0, messages_1.printSuccessBanner)('Runtime Connected', `Welcome to Neurcode, ${userName}.`);
+                    const existingProjectId = (0, state_1.getProjectId)();
+                    (0, messages_1.printSuccess)('This machine can now operate against Neurcode governance', [
+                        `Credential: stored in ~/.neurcoderc keyring${savedOrgId ? ` for workspace ${savedOrgId.substring(0, 8)}...` : ''}`,
+                        existingProjectId
+                            ? `Repo ownership: initialized (${existingProjectId})`
+                            : 'Repo ownership: not initialized in this directory',
+                        'Token handling: automatic; manual API keys are only needed for CI or advanced environments.',
+                    ].join('\n   '));
+                    (0, messages_1.printInfo)('Next step', existingProjectId
+                        ? 'Confirm state and continue:\n   neurcode whoami\n   neurcode start "what you intend to change"'
+                        : 'Bind this repository to a personal or organization workspace:\n   neurcode init');
                     approved = true;
                 }
                 else {
-                    (0, messages_1.printWarning)('Authentication approved but API key unavailable', 'Please check your API keys or try logging in again');
+                    (0, messages_1.printWarning)('Browser approved, but the terminal did not receive the connection credential', 'Run neurcode login again. If the browser says the request was already approved, start a fresh login request.');
                     approved = true;
                 }
             }
             else if (pollData.status === 'denied') {
                 (0, messages_1.printError)('Authentication Denied', undefined, [
-                    'The authentication request was denied in your browser',
+                    'The runtime connection request was denied in your browser',
                     'If this was unintentional, please try: neurcode login',
                     'Contact support if you continue experiencing issues'
                 ]);
@@ -208,9 +230,9 @@ async function loginCommand(options) {
             }
             else if (pollData.status === 'expired') {
                 (0, messages_1.printError)('Authentication Request Expired', undefined, [
-                    'The authentication request has timed out',
+                    'The runtime connection request has timed out',
                     'Please try again: neurcode login',
-                    'Make sure to complete authentication within 5 minutes'
+                    'Complete browser approval within 5 minutes'
                 ]);
                 process.exit(1);
             }
@@ -222,9 +244,9 @@ async function loginCommand(options) {
         }
         if (!approved) {
             (0, messages_1.printError)('Authentication Timed Out', undefined, [
-                'The authentication process took too long',
+                'The runtime connection process took too long',
                 'Please try again: neurcode login',
-                'Make sure to complete the browser authentication promptly',
+                'Complete browser approval promptly',
                 'Check your internet connection if issues persist'
             ]);
             process.exit(1);

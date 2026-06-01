@@ -56,7 +56,7 @@ catch {
  */
 async function printGreeting(message) {
     const firstName = await (0, user_context_1.getUserFirstName)();
-    console.log(chalkInstance.cyan(`\n👋 Hello ${firstName}!\n`));
+    console.log(chalkInstance.cyan(`\nHello ${firstName}\n`));
     console.log(chalkInstance.dim(message));
     console.log('');
 }
@@ -64,7 +64,7 @@ async function printGreeting(message) {
  * Print a success message with premium formatting
  */
 function printSuccess(message, details) {
-    console.log(chalkInstance.green(`\n✨ ${message}\n`));
+    console.log(chalkInstance.green(`\n${message}\n`));
     if (details) {
         console.log(chalkInstance.dim(`   ${details}`));
         console.log('');
@@ -74,16 +74,16 @@ function printSuccess(message, details) {
  * Print a warning message with helpful context
  */
 function printWarning(message, suggestion) {
-    console.log(chalkInstance.yellow(`\n⚠️  ${message}\n`));
+    console.log(chalkInstance.yellow(`\n${message}\n`));
     if (suggestion) {
-        console.log(chalkInstance.dim(`   💡 ${suggestion}\n`));
+        console.log(chalkInstance.dim(`   ${suggestion}\n`));
     }
 }
 /**
  * Print an error message with actionable next steps
  */
 function printError(message, error, nextSteps) {
-    console.log(chalkInstance.red(`\n❌ ${message}\n`));
+    console.log(chalkInstance.red(`\n${message}\n`));
     if (error) {
         const errorMessage = error instanceof Error ? error.message : error;
         console.log(chalkInstance.dim(`   Error: ${errorMessage}`));
@@ -101,7 +101,7 @@ function printError(message, error, nextSteps) {
  * Print an info message
  */
 function printInfo(message, details) {
-    console.log(chalkInstance.cyan(`\nℹ️  ${message}\n`));
+    console.log(chalkInstance.cyan(`\n${message}\n`));
     if (details) {
         console.log(chalkInstance.dim(`   ${details}`));
         console.log('');
@@ -110,8 +110,8 @@ function printInfo(message, details) {
 /**
  * Print a section header with premium styling
  */
-function printSection(title, emoji = '▸') {
-    console.log(chalkInstance.bold.white(`\n${emoji} ${title}\n`));
+function printSection(title, marker = '>') {
+    console.log(chalkInstance.bold.white(`\n${marker} ${title}\n`));
     console.log(chalkInstance.dim('─────────────────────────────────────────────────────────'));
 }
 /**
@@ -194,14 +194,12 @@ function printProjectError(error, projectId) {
  * Print a beautiful success banner
  */
 async function printSuccessBanner(title, subtitle) {
-    const firstName = await (0, user_context_1.getUserFirstName)();
     console.log('');
-    console.log(chalkInstance.green('═══════════════════════════════════════════════════════════'));
-    console.log(chalkInstance.bold.green(`   ✨ ${title}`));
+    console.log(chalkInstance.bold.green(title));
     if (subtitle) {
-        console.log(chalkInstance.dim(`   ${subtitle}`));
+        console.log(chalkInstance.dim(subtitle));
     }
-    console.log(chalkInstance.green('═══════════════════════════════════════════════════════════'));
+    console.log(chalkInstance.dim('-'.repeat(Math.max(48, title.length))));
     console.log('');
 }
 /**
@@ -290,7 +288,7 @@ async function printWelcomeBanner() {
     const userInfo = await (0, user_context_1.getUserInfo)();
     // Subtle sophistication, not terminal theatrics. The banner identifies
     // the runtime, names the operational lifecycle, and lists the four
-    // canonical next steps. No emojis, no boxes, no "AI-powered" framing —
+    // canonical next steps. No emojis, no boxes, no "AI-powered" framing -
     // the target aesthetic is Claude Code / Linear / Warp / Terraform Cloud.
     console.log('');
     console.log(`${chalkInstance.bold('neurcode')}${chalkInstance.dim('  ·  deterministic operational governance for AI-assisted engineering')}`);
@@ -299,17 +297,21 @@ async function printWelcomeBanner() {
         console.log(chalkInstance.dim(`            signed in as ${id}`));
     }
     console.log('');
-    console.log(chalkInstance.dim('  Intent contracts        Replay continuity        Runtime capability'));
-    console.log(chalkInstance.dim('  Scope guard             Bounded remediation      Import-edge governance'));
-    console.log(chalkInstance.dim('  Forbidden boundaries    Generated-code spillover Drift narrative + posture'));
+    console.log(chalkInstance.dim('  User identity           Active workspace         Repo ownership'));
+    console.log(chalkInstance.dim('  Runtime session         Governance boundary      Replay continuity'));
+    console.log(chalkInstance.dim('  Intent contracts        Scope guard              Evidence lifecycle'));
     console.log('');
-    console.log(`  ${chalkInstance.bold('Operational lifecycle')}`);
-    console.log(chalkInstance.dim('    start  ▸  verify  ▸  replay  ▸  remediate-export  ▸  re-verify'));
+    console.log(`  ${chalkInstance.bold('Operational onboarding')}`);
+    console.log(chalkInstance.dim('    install  ->  login  ->  init  ->  start governance lifecycle'));
+    console.log('');
+    console.log(`  ${chalkInstance.bold('Governance lifecycle')}`);
+    console.log(chalkInstance.dim('    start  ->  verify  ->  replay  ->  remediate-export  ->  re-verify'));
     console.log('');
     console.log(`  ${chalkInstance.bold('Next steps')}`);
+    console.log(chalkInstance.cyan('    neurcode login') + chalkInstance.dim('                     (connect this machine/runtime)'));
+    console.log(chalkInstance.cyan('    neurcode init') + chalkInstance.dim('                      (select workspace ownership for this repo)'));
+    console.log(chalkInstance.cyan('    neurcode whoami') + chalkInstance.dim('                    (inspect identity + boundary)'));
     console.log(chalkInstance.cyan('    neurcode start') + chalkInstance.dim(' "what you intend to change"'));
-    console.log(chalkInstance.cyan('    neurcode verify') + chalkInstance.dim(' --local-only --head'));
-    console.log(chalkInstance.cyan('    neurcode home') + chalkInstance.dim('                       (current runtime state)'));
     console.log('');
 }
 //# sourceMappingURL=messages.js.map

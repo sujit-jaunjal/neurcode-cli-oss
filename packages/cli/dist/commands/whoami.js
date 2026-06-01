@@ -1,18 +1,19 @@
 "use strict";
 /**
- * Whoami Command - Show Current Identity & Project Scope
+ * Whoami Command - Show Current Runtime Identity
  *
- * Displays:
- * 1. Logged-in user info (email, name)
- * 2. Current project scope (if inside a linked folder)
+ * Distinguishes the core lifecycle identities:
+ * 1. Authenticated user
+ * 2. Active workspace
+ * 3. Repo ownership context
+ * 4. Runtime/session state
+ * 5. Governance ownership boundary
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.whoamiCommand = whoamiCommand;
 const config_1 = require("../config");
 const state_1 = require("../utils/state");
 const user_context_1 = require("../utils/user-context");
-const messages_1 = require("../utils/messages");
-// Import chalk with fallback
 let chalk;
 try {
     chalk = require('chalk');
@@ -27,44 +28,68 @@ catch {
         white: (str) => str,
     };
 }
+function row(label, value, labelWidth = 24) {
+    console.log(`${chalk.dim(label.padEnd(labelWidth))} ${value}`);
+}
+function workspaceTypeLabel(value) {
+    if (value === 'personal')
+        return 'Personal workspace';
+    if (value === 'organization')
+        return 'Organization workspace';
+    return 'Workspace';
+}
 async function whoamiCommand() {
-    // ─── Authentication Status ────────────────────────────────
-    const apiKey = (0, config_1.getApiKey)();
-    if (!apiKey) {
-        (0, messages_1.printWarning)('Not Logged In', 'Run "neurcode login" to authenticate.');
+    const state = (0, state_1.loadState)();
+    const apiKey = (0, config_1.getApiKey)(state.orgId);
+    const fallbackApiKey = apiKey || (0, config_1.getApiKey)();
+    console.log('');
+    console.log(chalk.bold.white('Neurcode runtime identity'));
+    console.log(chalk.dim('Shows user auth, active workspace, repo ownership, session state, and governance boundary.'));
+    console.log('');
+    if (!fallbackApiKey) {
+        row('Runtime connection', chalk.yellow('not connected'));
+        console.log('');
+        console.log(chalk.dim('Connect this machine first:'));
+        console.log(chalk.cyan('  neurcode login'));
+        console.log('');
         process.exit(1);
     }
-    (0, messages_1.printSection)('Identity', '👤');
-    // Try to get detailed user info
     const userInfo = await (0, user_context_1.getUserInfo)();
-    if (userInfo) {
-        console.log(chalk.white('   Logged in as:'), chalk.bold.cyan(userInfo.email || 'unknown'));
-        if (userInfo.displayName) {
-            console.log(chalk.white('   Name:       '), chalk.dim(userInfo.displayName));
-        }
+    row('Authenticated user', userInfo?.email ? chalk.cyan(userInfo.email) : chalk.green('connected'));
+    if (userInfo?.displayName) {
+        row('Display name', chalk.dim(userInfo.displayName));
     }
-    else {
-        console.log(chalk.white('   Status:'), chalk.green('Authenticated'));
-        console.log(chalk.dim('   (Run "neurcode doctor" for full diagnostics)'));
-    }
-    // ─── Project Scope ────────────────────────────────────────
-    const orgId = (0, state_1.getOrgId)();
-    const orgName = (0, state_1.getOrgName)();
-    const projectId = (0, state_1.getProjectId)();
+    row('Runtime connection', chalk.green(apiKey ? 'active for repo workspace' : 'active from default keyring'));
     console.log('');
-    (0, messages_1.printSection)('Project Scope', '📁');
-    if (orgId && projectId) {
-        console.log(chalk.white('   Organization:'), chalk.bold.cyan(orgName || orgId));
-        console.log(chalk.white('   Org ID:      '), chalk.dim(orgId));
-        console.log(chalk.white('   Project ID:  '), chalk.dim(projectId));
-        console.log(chalk.dim('\n   All commands in this directory target this scope.'));
+    const hasWorkspace = Boolean(state.orgId);
+    const hasRepoOwnership = Boolean(state.orgId && state.projectId);
+    const workspaceName = state.orgName || state.orgId || 'not selected';
+    row('Active workspace', hasWorkspace ? chalk.cyan(workspaceName) : chalk.yellow('not selected'));
+    if (hasWorkspace) {
+        row('Workspace type', workspaceTypeLabel(state.workspaceType));
+        row('Workspace role', state.workspaceRole || 'unknown');
+        row('Workspace ID', chalk.dim(state.orgId || 'unknown'));
     }
-    else if (projectId) {
-        console.log(chalk.white('   Project ID:  '), chalk.dim(projectId));
-        (0, messages_1.printWarning)('No Organization Linked', 'Run "neurcode init" to link this directory to an organization.');
+    console.log('');
+    row('Repo ownership', hasRepoOwnership ? chalk.green('initialized') : chalk.yellow('not initialized'));
+    if (state.projectId) {
+        row('Project ID', chalk.dim(state.projectId));
+    }
+    if (state.linkedAt) {
+        row('Linked at', chalk.dim(state.linkedAt));
+    }
+    console.log('');
+    row('Active session', state.activeSessionId || state.sessionId || chalk.dim('none'));
+    row('Active plan', state.activePlanId || state.lastPlanId || chalk.dim('none'));
+    console.log('');
+    if (hasRepoOwnership) {
+        row('Governance boundary', chalk.green(`${workspaceName} owns this repository context`), 24);
+        console.log(chalk.dim('Commands in this directory resolve policy, evidence, and runtime state through that boundary.'));
     }
     else {
-        (0, messages_1.printWarning)('Not in a Linked Project', 'Run "neurcode init" to link this directory to an organization and project.');
+        row('Governance boundary', chalk.yellow('not established'), 24);
+        console.log(chalk.dim('Bind this repository before starting the governed lifecycle:'));
+        console.log(chalk.cyan('  neurcode init'));
     }
     console.log('');
 }

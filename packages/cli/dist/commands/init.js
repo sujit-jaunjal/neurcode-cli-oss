@@ -113,6 +113,9 @@ function resetLocalState() {
         projectId: undefined,
         orgId: undefined,
         orgName: undefined,
+        workspaceType: undefined,
+        workspaceRole: undefined,
+        linkedAt: undefined,
         sessionId: undefined,
         activePlanId: undefined,
         lastPlanId: undefined,
@@ -121,20 +124,20 @@ function resetLocalState() {
     });
 }
 /**
- * Print a boxed summary (simple ASCII box, no external dep needed)
+ * Print a concise operational summary.
  */
-function printBox(title, lines) {
-    const maxLen = Math.max(title.length, ...lines.map(l => l.length)) + 4;
-    const border = '═'.repeat(maxLen);
+function printOperationalSummary(title, lines) {
     console.log('');
-    console.log(chalk.green(`╔${border}╗`));
-    console.log(chalk.green(`║  ${chalk.bold.white(title.padEnd(maxLen - 2))}║`));
-    console.log(chalk.green(`╠${border}╣`));
-    lines.forEach(line => {
-        console.log(chalk.green(`║  ${chalk.dim(line.padEnd(maxLen - 2))}║`));
-    });
-    console.log(chalk.green(`╚${border}╝`));
+    console.log(chalk.bold.white(title));
+    console.log(chalk.dim('-'.repeat(Math.max(48, title.length))));
+    lines.forEach((line) => console.log(chalk.dim(`  ${line}`)));
     console.log('');
+}
+function workspaceKind(org) {
+    return org.isPersonal ? 'personal' : 'organization';
+}
+function workspaceLabel(org) {
+    return `${org.name} (${org.isPersonal ? 'Personal workspace' : 'Organization workspace'} · ${org.role})`;
 }
 async function initCommand(options) {
     try {
@@ -186,15 +189,15 @@ async function initCommand(options) {
                 resetLocalState();
             }
             else {
-                const action = await selectOption('What would you like to do?', [
-                    { label: '✅ Keep current link', value: 'keep' },
-                    { label: '🔄 Re-link to a different organization/project', value: 'relink' },
-                    { label: '❌ Exit', value: 'exit' },
+                const action = await selectOption('Repository ownership is already configured. What should happen next?', [
+                    { label: 'Keep current governance ownership', value: 'keep' },
+                    { label: 'Re-link to a different workspace/project', value: 'relink' },
+                    { label: 'Exit without changes', value: 'exit' },
                 ]);
                 if (action === 'keep') {
-                    printBox('Current Project Scope', [
-                        `Organization: ${existingOrgName}`,
-                        `Org ID:       ${existingOrgId}`,
+                    printOperationalSummary('Current repo ownership', [
+                        `Workspace:  ${existingOrgName}`,
+                        `Workspace ID: ${existingOrgId}`,
                         `Project ID:   ${existingProjectId}`,
                     ]);
                     return;
@@ -208,8 +211,8 @@ async function initCommand(options) {
             }
         }
         // ─── Step 2: Fetch Organizations ────────────────────────────
-        (0, messages_1.printSection)('Organization Discovery', '🏢');
-        (0, messages_1.printInfo)('Fetching', 'Retrieving your organizations...');
+        (0, messages_1.printSection)('Workspace Discovery');
+        (0, messages_1.printInfo)('Fetching', 'Retrieving workspaces available to your authenticated user...');
         let organizations;
         try {
             organizations = await client.getUserOrganizations();
@@ -224,9 +227,9 @@ async function initCommand(options) {
             return; // TypeScript flow analysis
         }
         if (organizations.length === 0) {
-            (0, messages_1.printError)('No Organizations Found', undefined, [
-                'Create an organization at https://app.neurcode.com',
-                'Or contact your admin to be added to one',
+            (0, messages_1.printError)('No Workspaces Found', undefined, [
+                'Create a workspace in the Neurcode dashboard',
+                'Or ask an administrator to add you to the organization workspace',
             ]);
             process.exit(1);
         }
@@ -243,12 +246,11 @@ async function initCommand(options) {
                 process.exit(1);
             }
             selectedOrg = matchedOrg;
-            (0, messages_1.printSuccess)('Organization Selected', `${selectedOrg.name} (from --org)`);
+            (0, messages_1.printSuccess)('Workspace Selected', `${workspaceLabel(selectedOrg)} (from --org)`);
         }
         else if (organizations.length === 1) {
             selectedOrg = organizations[0];
-            const label = selectedOrg.isPersonal ? 'Personal' : 'Team';
-            (0, messages_1.printSuccess)('Organization Found', `Auto-selected: ${selectedOrg.name} (${label})`);
+            (0, messages_1.printSuccess)('Workspace Selected', `Auto-selected: ${workspaceLabel(selectedOrg)}`);
         }
         else {
             if (nonInteractiveMode) {
@@ -259,22 +261,22 @@ async function initCommand(options) {
                 process.exit(1);
             }
             const orgOptions = organizations.map(org => ({
-                label: `${org.isPersonal ? '👤' : '🏢'} ${org.name} (${org.isPersonal ? 'Personal' : 'Team'}) ${chalk.dim(`— ${org.role}`)}`,
+                label: workspaceLabel(org),
                 value: org,
             }));
-            selectedOrg = await selectOption('🌐 Where should we deploy this project?', orgOptions);
+            selectedOrg = await selectOption('Select the governance workspace that owns this repository', orgOptions);
         }
-        // Ensure we use an API key scoped to the selected org before any project operations.
+        // Ensure we use a credential scoped to the selected workspace before any project operations.
         // This avoids linking a folder to org B while creating/fetching projects in org A.
         let selectedOrgApiKey = process.env.NEURCODE_API_KEY || (0, config_1.getApiKey)(selectedOrg.id) || undefined;
         if (!selectedOrgApiKey && process.stdout.isTTY && !process.env.CI) {
-            (0, messages_1.printInfo)('Organization Authentication Required', `You selected "${selectedOrg.name}". Authenticating this org now...`);
+            (0, messages_1.printInfo)('Workspace Connection Required', `You selected "${selectedOrg.name}". Connecting this runtime to that workspace now...`);
             const { loginCommand } = await Promise.resolve().then(() => __importStar(require('./login')));
             await loginCommand({ orgId: selectedOrg.id });
             selectedOrgApiKey = process.env.NEURCODE_API_KEY || (0, config_1.getApiKey)(selectedOrg.id) || undefined;
         }
         if (!selectedOrgApiKey) {
-            (0, messages_1.printError)('Missing org-scoped API key', undefined, [
+            (0, messages_1.printError)('Missing workspace runtime connection', undefined, [
                 `Run: neurcode login --org ${selectedOrg.id}`,
                 'Then rerun: neurcode init',
             ]);
@@ -286,7 +288,7 @@ async function initCommand(options) {
             orgId: selectedOrg.id,
         });
         // ─── Step 4: Project Setup ──────────────────────────────────
-        (0, messages_1.printSection)('Project Setup', '📁');
+        (0, messages_1.printSection)('Repo Ownership');
         let project = null;
         let projectAction = null;
         if (requestedProjectId) {
@@ -296,9 +298,9 @@ async function initCommand(options) {
             projectAction = 'new';
         }
         else {
-            projectAction = await selectOption('Link to existing project or create new?', [
-                { label: '📂 Link to existing project', value: 'existing' },
-                { label: '✨ Create new project', value: 'new' },
+            projectAction = await selectOption('Attach this repository to an ownership record', [
+                { label: 'Link to an existing project in this workspace', value: 'existing' },
+                { label: 'Create a new project ownership record', value: 'new' },
             ]);
         }
         if (projectAction === 'existing' && requestedProjectId) {
@@ -370,20 +372,32 @@ async function initCommand(options) {
             }
         }
         // ─── Step 5: Save Local Config ──────────────────────────────
-        (0, state_1.setProjectId)(project.id);
-        (0, state_1.setOrgId)(selectedOrg.id, selectedOrg.name);
+        (0, state_1.setWorkspaceContext)({
+            orgId: selectedOrg.id,
+            orgName: selectedOrg.name,
+            workspaceType: workspaceKind(selectedOrg),
+            workspaceRole: selectedOrg.role,
+            projectId: project.id,
+        });
         // ─── Step 6: Success Summary ────────────────────────────────
-        printBox(`✨ Linked to ${selectedOrg.name} / ${project.name}`, [
-            `Organization: ${selectedOrg.name} (${selectedOrg.isPersonal ? 'Personal' : 'Team'})`,
-            `Org ID:       ${selectedOrg.id}`,
+        printOperationalSummary('Governance ownership activated', [
+            `Workspace:    ${selectedOrg.name}`,
+            `Type:         ${selectedOrg.isPersonal ? 'Personal workspace' : 'Organization workspace'}`,
+            `Role:         ${selectedOrg.role}`,
+            `Workspace ID: ${selectedOrg.id}`,
             `Project:      ${project.name}`,
             `Project ID:   ${project.id}`,
-            `Config:       .neurcode/config.json`,
+            `State file:   .neurcode/config.json`,
             '',
-            `All CLI commands in this directory will now`,
-            `target this organization automatically.`,
+            `Commands in this directory now resolve this repo`,
+            `to the selected workspace governance boundary.`,
         ]);
-        (0, messages_1.printInfo)('Next Steps', 'Run: neurcode plan "<your intent>"');
+        (0, messages_1.printInfo)('Next steps', [
+            'Confirm runtime state: neurcode whoami',
+            'Declare change intent: neurcode start "<what you intend to change>"',
+            'Run governed verification: neurcode verify --evidence',
+            'Inspect continuity: neurcode home',
+        ].join('\n   '));
     }
     catch (error) {
         if (error instanceof Error) {

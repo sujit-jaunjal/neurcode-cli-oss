@@ -1,8 +1,8 @@
 /**
  * Quickstart Command
  *
- * Guided onboarding flow. Gets a new engineer to first deterministic finding
- * within 2 minutes. Zero interactive prompts. Zero network calls.
+ * Local-only governance sandbox. For the connected enterprise onboarding
+ * lifecycle, use: neurcode login -> neurcode init -> neurcode start.
  *
  * What it does:
  * 1. Resolves project root (git repo required)

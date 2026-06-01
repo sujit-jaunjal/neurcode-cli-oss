@@ -66,6 +66,12 @@ const control_plane_1 = require("./commands/control-plane");
 const workspace_1 = require("./commands/workspace");
 const replay_1 = require("./commands/replay");
 const governance_1 = require("./commands/governance");
+const profile_1 = require("./commands/profile");
+const session_hook_1 = require("./commands/session-hook");
+const activate_1 = require("./commands/activate");
+const runtime_doctor_1 = require("./commands/runtime-doctor");
+const runtime_report_1 = require("./commands/runtime-report");
+const runtime_sync_1 = require("./commands/runtime-sync");
 const execution_bus_1 = require("./utils/execution-bus");
 const execution_actions_1 = require("./utils/execution-actions");
 // Read version from package.json
@@ -80,6 +86,30 @@ catch (error) {
 }
 const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
+    {
+        command: 'neurcode activate claude --connect <token>',
+        description: 'Install Claude Code governance hooks, pair the repo, and enable runtime evidence auto-sync',
+    },
+    {
+        command: 'neurcode status',
+        description: 'Inspect the active in-flow governance session and latest boundary block',
+    },
+    {
+        command: 'neurcode report --runtime',
+        description: 'Summarize blocked edits, approvals, owners, and replay records across sessions',
+    },
+    {
+        command: 'neurcode sync --runtime',
+        description: 'Manual fallback upload for finished in-flow session records',
+    },
+    {
+        command: 'neurcode login',
+        description: 'Connect this machine/runtime to Neurcode with browser approval',
+    },
+    {
+        command: 'neurcode init',
+        description: 'Bind this repository to a personal or organization workspace',
+    },
     {
         command: 'neurcode start "<intent>"',
         description: 'Declare governance context and bounded implementation scope',
@@ -102,6 +132,11 @@ const CORE_WORKFLOW_STEPS = [
     },
 ];
 const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
+    'activate',
+    'status',
+    'sessions',
+    'report',
+    'sync',
     'start',
     'quickstart',
     'verify',
@@ -200,12 +235,12 @@ function buildAdvancedLegacyHints(root) {
     return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['start', 'quickstart', 'verify', 'remediate-export', 'replay'];
+    const primaryOrder = ['activate', 'status', 'sessions', 'report', 'sync', 'login', 'init', 'start', 'quickstart', 'verify', 'remediate-export', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
                 const commandName = subcommand.name();
-                return commandName === 'help' || CANONICAL_OPERATOR_COMMAND_NAMES.has(commandName);
+                return commandName === 'help' || commandName === 'login' || commandName === 'init' || CANONICAL_OPERATOR_COMMAND_NAMES.has(commandName);
             });
             return filtered.sort((left, right) => {
                 const leftIndex = primaryOrder.indexOf(left.name());
@@ -219,19 +254,19 @@ function configurePrimaryHelpView(root) {
 }
 function printCoreWorkflowGuide() {
     // Operational lifecycle guide. Same aesthetic as the welcome banner and
-    // neurcode home — subtle sophistication, no emoji ornaments, info dense.
+    // neurcode home - subtle sophistication, no emoji ornaments, info dense.
     // The lifecycle bar mirrors what the welcome banner shows so identity is
     // coherent across surfaces. (See docs/ux/final-operational-experience-report.md.)
     console.log('');
     console.log(`${chalk.bold('neurcode')}${chalk.dim('  ·  operational lifecycle')}`);
     console.log('');
-    console.log(chalk.dim('  start  ▸  verify  ▸  replay  ▸  remediate-export  ▸  re-verify'));
+    console.log(chalk.dim('  install  ->  login  ->  init  ->  start  ->  verify  ->  replay  ->  re-verify'));
     console.log('');
     console.log(`  ${chalk.bold('Canonical commands')}`);
     CORE_WORKFLOW_STEPS.forEach((step) => console.log(chalk.dim(formatCoreWorkflowStep(step))));
     console.log('');
     console.log(chalk.dim('  See ') + chalk.cyan('neurcode home') + chalk.dim(' for current runtime state. ') +
-        chalk.dim('Run ') + chalk.cyan('neurcode --help') + chalk.dim(' for the full command surface.'));
+        chalk.dim('Run ') + chalk.cyan('neurcode whoami') + chalk.dim(' to inspect user/workspace/repo identity.'));
     console.log('');
 }
 function formatCommandList(commandNames) {
@@ -385,6 +420,36 @@ program
 (0, brain_1.brainCommand)(program);
 (0, policy_1.policyCommand)(program);
 (0, governance_1.governanceCommand)(program);
+// V0: in-flow governance
+(0, profile_1.profileCommand)(program);
+(0, session_hook_1.sessionHookCommand)(program);
+(0, activate_1.activateCommand)(program);
+(0, runtime_report_1.reportCommand)(program);
+(0, runtime_sync_1.syncCommand)(program);
+program
+    .command('status')
+    .description('Show the active in-flow governance session for this repository')
+    .option('--session-id <id>', 'Local governance session ID (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.localGovernanceStatusCommand)({
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+program
+    .command('sessions')
+    .description('List local in-flow governance sessions for this repository')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.listRuntimeSessionsCommand)({
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
 (0, control_plane_1.controlPlaneCommand)(program);
 (0, workspace_1.workspaceCommand)(program);
 (0, replay_1.replayCommand)(program);
@@ -461,16 +526,16 @@ program
 });
 program
     .command('login')
-    .description('Authenticate CLI with Neurcode (opens browser for approval)')
-    .option('--org <id>', 'Authenticate for a specific organization (internal UUID)')
+    .description('Connect this machine/runtime to a Neurcode workspace')
+    .option('--org <id>', 'Connect to a specific workspace/organization (internal UUID)')
     .action((options) => {
     (0, login_1.loginCommand)({ orgId: options.org });
 });
 program
     .command('logout')
-    .description('Log out from Neurcode CLI (removes API key)')
-    .option('--all', 'Remove all saved API keys (all organizations)')
-    .option('--org <id>', 'Remove saved API key for a specific organization (internal UUID)')
+    .description('Disconnect Neurcode runtime credentials from this machine')
+    .option('--all', 'Remove all saved runtime credentials (all workspaces)')
+    .option('--org <id>', 'Remove saved runtime credential for a specific workspace/organization')
     .action((options) => {
     (0, logout_1.logoutCommand)({
         all: options.all || false,
@@ -479,8 +544,8 @@ program
 });
 program
     .command('init')
-    .description('Initialize project configuration (select a project)')
-    .option('--org <id>', 'Preselect organization by internal UUID')
+    .description('Bind this repository to a workspace governance boundary')
+    .option('--org <id>', 'Preselect workspace/organization by internal UUID')
     .option('--project-id <id>', 'Link an existing project by internal UUID (non-interactive)')
     .option('--create <name>', 'Create and link a new project (non-interactive)')
     .action((options) => {
@@ -493,8 +558,17 @@ program
 program
     .command('doctor')
     .description('Enterprise readiness diagnostics (config, artifacts, API compatibility, CORS)')
+    .option('--runtime', 'Run local in-flow runtime diagnostics for Claude Code governance')
+    .option('--dir <path>', 'Repository root for --runtime diagnostics')
     .option('--json', 'Output machine-readable diagnostics JSON')
     .action((options) => {
+    if (options.runtime === true) {
+        (0, runtime_doctor_1.runtimeDoctorCommand)({
+            json: options.json === true,
+            dir: options.dir,
+        });
+        return;
+    }
     (0, doctor_1.doctorCommand)({
         json: options.json,
         cliVersion: version,
@@ -502,7 +576,7 @@ program
 });
 program
     .command('quickstart')
-    .description('Guided onboarding — first deterministic finding in under 2 minutes (no network required)')
+    .description('Local-only governance sandbox for first deterministic finding')
     .option('--force', 'Overwrite existing starter files')
     .option('--json', 'Output machine-readable JSON')
     .action(async (options) => {
@@ -566,7 +640,7 @@ program
 });
 program
     .command('whoami')
-    .description('Show current identity and project scope')
+    .description('Show user, workspace, repo ownership, session, and governance boundary')
     .action(() => {
     (0, whoami_1.whoamiCommand)();
 });
@@ -844,10 +918,28 @@ sessionCmd
     .description('List all sessions for the current project')
     .option('--project-id <id>', 'Project ID')
     .option('--all', 'Show all sessions (including completed)')
+    .option('--local', 'List local in-flow governance sessions from .neurcode/sessions')
+    .option('--dir <path>', 'Repository root for --local')
+    .option('--json', 'Output machine-readable JSON for --local')
     .action((options) => {
     (0, session_1.listSessionsCommand)({
         projectId: options.projectId,
         all: options.all || false,
+        local: options.local === true,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('show')
+    .description('Show one local in-flow governance session record')
+    .argument('<session-id>', 'Local governance session ID')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((sessionId, options) => {
+    (0, session_1.showRuntimeSessionCommand)(sessionId, {
+        dir: options.dir,
+        json: options.json === true,
     });
 });
 sessionCmd
@@ -866,10 +958,105 @@ sessionCmd
     .description('Show status of the current session or a specific session')
     .option('--session-id <id>', 'Session ID to check (defaults to current session)')
     .option('--project-id <id>', 'Project ID')
+    .option('--local', 'Force local in-flow governance session status')
+    .option('--dir <path>', 'Repository root for local in-flow session status')
+    .option('--json', 'Output machine-readable JSON')
     .action((options) => {
     (0, session_1.sessionStatusCommand)({
         sessionId: options.sessionId,
         projectId: options.projectId,
+        local: options.local === true,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('approve')
+    .description('Approve a file path or glob for the active in-flow governance session')
+    .requiredOption('--path <path>', 'File path or glob to approve')
+    .option('--reason <text>', 'Human-readable approval reason')
+    .option('--session-id <id>', 'Session ID to approve against (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.approveGovernanceSessionCommand)({
+        path: options.path,
+        reason: options.reason,
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+function collectOption(value, previous = []) {
+    return [...previous, value];
+}
+sessionCmd
+    .command('replan')
+    .description('Amend or replace the active in-flow agent plan')
+    .option('--plan <text>', 'Full replacement plan text')
+    .option('--plan-file <path>', 'Read replacement plan text from a file')
+    .option('--summary <text>', 'Replace the active plan summary')
+    .option('--add-step <text>', 'Add a plan step', collectOption, [])
+    .option('--remove-step <text>', 'Remove a plan step by exact text', collectOption, [])
+    .option('--add-file <path>', 'Add an expected file to the active plan', collectOption, [])
+    .option('--remove-file <path>', 'Remove an expected file from the active plan', collectOption, [])
+    .option('--add-glob <glob>', 'Add an expected glob to the active plan', collectOption, [])
+    .option('--remove-glob <glob>', 'Remove an expected glob from the active plan', collectOption, [])
+    .option('--add-constraint <text>', 'Add a stated plan constraint', collectOption, [])
+    .option('--remove-constraint <text>', 'Remove a stated plan constraint by exact text', collectOption, [])
+    .option('--add-risk <text>', 'Add a stated plan risk/caveat', collectOption, [])
+    .option('--remove-risk <text>', 'Remove a stated plan risk/caveat by exact text', collectOption, [])
+    .option('--reason <text>', 'Why the plan changed')
+    .option('--proposed-by <actor>', 'Proposal actor: human | agent', 'human')
+    .option('--decided-by <identity>', 'Human identity when a human-authored re-plan is applied')
+    .option('--session-id <id>', 'Session ID to update (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.replanGovernanceSessionCommand)({
+        plan: options.plan,
+        planFile: options.planFile,
+        summary: options.summary,
+        addStep: options.addStep,
+        removeStep: options.removeStep,
+        addFile: options.addFile,
+        removeFile: options.removeFile,
+        addGlob: options.addGlob,
+        removeGlob: options.removeGlob,
+        addConstraint: options.addConstraint,
+        removeConstraint: options.removeConstraint,
+        addRisk: options.addRisk,
+        removeRisk: options.removeRisk,
+        reason: options.reason,
+        proposedBy: options.proposedBy === 'agent' ? 'agent' : 'human',
+        decidedBy: options.decidedBy,
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('replan-decide')
+    .description('Accept or reject a pending agent-authored plan amendment')
+    .requiredOption('--proposal-id <id>', 'Pending plan amendment proposal ID')
+    .requiredOption('--decision <decision>', 'Decision: accept | reject')
+    .option('--reason <text>', 'Human-readable decision reason')
+    .option('--decided-by <identity>', 'Human identity recording the decision')
+    .option('--session-id <id>', 'Session ID to update (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    if (options.decision !== 'accept' && options.decision !== 'reject') {
+        throw new Error('decision must be accept or reject');
+    }
+    await (0, session_1.decideGovernanceReplanCommand)({
+        proposalId: options.proposalId,
+        decision: options.decision,
+        reason: options.reason,
+        decidedBy: options.decidedBy,
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
     });
 });
 sessionCmd
@@ -982,9 +1169,11 @@ program
     .option('--finding-id <id>', 'Alias for --finding (backward compatible)')
     .option('--finding-index <n>', 'Export payload for finding at 0-based index')
     .option('--all', 'Export payloads for all findings from last verify')
-    .option('--format <fmt>', 'Output format: json | mcp (default: json)', 'json')
+    .option('--format <fmt>', 'Output format: json | mcp | prompt | markdown (default: json)', 'json')
+    .option('--provider <provider>', 'Provider handoff: claude | codex | cursor | gemini')
     .option('--out <path>', 'Write output to file instead of stdout')
     .option('--copy', 'Copy output to clipboard (macOS pbcopy)')
+    .option('--open', 'Open provider workflow when a documented local deep link is available')
     .option('--verify-output-file <path>', 'Path to verify JSON output (default: .neurcode/last-verify-output.json)')
     .option('--project-root <path>', 'Project root override')
     .option('--json', 'Output machine-readable JSON')
@@ -994,9 +1183,42 @@ program
         finding,
         findingIndex: options.findingIndex,
         all: options.all === true,
-        format: options.format === 'mcp' ? 'mcp' : 'json',
+        format: ['json', 'mcp', 'prompt', 'markdown'].includes(options.format) ? options.format : 'json',
+        provider: ['claude', 'codex', 'cursor', 'gemini'].includes(options.provider) ? options.provider : undefined,
         out: options.out,
         copy: options.copy === true,
+        open: options.open === true,
+        json: options.json === true,
+        verifyOutputFile: options.verifyOutputFile,
+        projectRoot: options.projectRoot,
+    });
+});
+program
+    .command('remediation-export')
+    .description('Alias for remediate-export.')
+    .option('--finding <id>', 'Export payload for a specific finding ID')
+    .option('--finding-id <id>', 'Alias for --finding (backward compatible)')
+    .option('--finding-index <n>', 'Export payload for finding at 0-based index')
+    .option('--all', 'Export payloads for all findings from last verify')
+    .option('--format <fmt>', 'Output format: json | mcp | prompt | markdown (default: json)', 'json')
+    .option('--provider <provider>', 'Provider handoff: claude | codex | cursor | gemini')
+    .option('--out <path>', 'Write output to file instead of stdout')
+    .option('--copy', 'Copy output to clipboard (macOS pbcopy)')
+    .option('--open', 'Open provider workflow when a documented local deep link is available')
+    .option('--verify-output-file <path>', 'Path to verify JSON output (default: .neurcode/last-verify-output.json)')
+    .option('--project-root <path>', 'Project root override')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    const finding = options.finding ?? options.findingId;
+    await (0, remediate_export_1.remediateExportCommand)({
+        finding,
+        findingIndex: options.findingIndex,
+        all: options.all === true,
+        format: ['json', 'mcp', 'prompt', 'markdown'].includes(options.format) ? options.format : 'json',
+        provider: ['claude', 'codex', 'cursor', 'gemini'].includes(options.provider) ? options.provider : undefined,
+        out: options.out,
+        copy: options.copy === true,
+        open: options.open === true,
         json: options.json === true,
         verifyOutputFile: options.verifyOutputFile,
         projectRoot: options.projectRoot,

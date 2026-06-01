@@ -6,6 +6,7 @@ const crypto_1 = require("crypto");
 const child_process_1 = require("child_process");
 const fs_1 = require("fs");
 const path_1 = require("path");
+const impact_analysis_1 = require("../governance/impact-analysis");
 const intelligence_runtime_common_1 = require("./intelligence-runtime-common");
 const governance_decisions_1 = require("./governance-decisions");
 function hashId(parts) {
@@ -1343,16 +1344,37 @@ function buildDriftIntelligence(changeSet, runtime) {
         .map((filePath) => matchServiceBoundary(serviceBoundaries, filePath) || matchServiceBoundary(serviceBoundaries, deriveModulePath(filePath)))
         .filter((value) => Boolean(value)));
     const { outgoing, incoming } = buildModuleAdjacency(runtime.repositoryGraph);
-    const impactedModulesSet = new Set(changedModules);
-    for (const moduleName of changedModules) {
-        for (const downstream of outgoing.get(moduleName) || []) {
-            impactedModulesSet.add(downstream);
+    // Accurate symbol-resolved impact (deterministic, package-scoped) replaces
+    // coarse module-adjacency inflation with real reference edges. Falls back to
+    // the legacy adjacency union when TS analysis cannot run (non-TS change set,
+    // program too large, time budget, or any error) so verify never regresses.
+    let impactedModules;
+    let accurateImpactApplied = false;
+    try {
+        const accurate = (0, impact_analysis_1.computeAccurateImpact)(projectRoot, evaluatedChangedFiles, deriveModulePath);
+        if (accurate.analyzed) {
+            impactedModules = (0, intelligence_runtime_common_1.dedupeSorted)([...changedModules, ...accurate.impactedModules]);
+            accurateImpactApplied = true;
         }
-        for (const upstream of incoming.get(moduleName) || []) {
-            impactedModulesSet.add(upstream);
+        else {
+            impactedModules = [];
         }
     }
-    const impactedModules = (0, intelligence_runtime_common_1.dedupeSorted)([...impactedModulesSet]);
+    catch {
+        impactedModules = [];
+    }
+    if (!accurateImpactApplied) {
+        const impactedModulesSet = new Set(changedModules);
+        for (const moduleName of changedModules) {
+            for (const downstream of outgoing.get(moduleName) || []) {
+                impactedModulesSet.add(downstream);
+            }
+            for (const upstream of incoming.get(moduleName) || []) {
+                impactedModulesSet.add(upstream);
+            }
+        }
+        impactedModules = (0, intelligence_runtime_common_1.dedupeSorted)([...impactedModulesSet]);
+    }
     const impactedServices = (0, intelligence_runtime_common_1.dedupeSorted)(impactedModules
         .map((moduleName) => matchServiceBoundary(serviceBoundaries, moduleName))
         .filter((value) => Boolean(value)));

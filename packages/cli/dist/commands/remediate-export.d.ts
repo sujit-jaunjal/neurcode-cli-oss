@@ -18,13 +18,18 @@
  *   neurcode remediate-export --finding <id> --copy
  *   neurcode remediate-export --verify-output-file ./verify.json --project-root ./repo
  */
+declare const PROVIDERS: readonly ["claude", "codex", "cursor", "gemini"];
+type RemediationProvider = typeof PROVIDERS[number];
+type RemediationOutputFormat = 'json' | 'mcp' | 'prompt' | 'markdown';
 interface RemediateExportOptions {
     finding?: string;
     findingIndex?: string;
     all?: boolean;
-    format?: 'json' | 'mcp';
+    format?: RemediationOutputFormat;
+    provider?: RemediationProvider;
     out?: string;
     copy?: boolean;
+    open?: boolean;
     json?: boolean;
     /** Absolute or cwd-relative path to verify JSON (matches CLI --verify-output-file). */
     verifyOutputFile?: string;

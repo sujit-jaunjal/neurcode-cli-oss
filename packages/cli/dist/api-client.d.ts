@@ -78,6 +78,71 @@ export interface CreateShipCardResponse {
     createdAt: string;
     message: string;
 }
+export interface RuntimeEvidenceUploadRequest {
+    repo: {
+        name: string;
+        rootHash?: string;
+        remoteHash?: string;
+        profileHash?: string;
+        topologyHash?: string;
+        profileFreshness?: Record<string, unknown>;
+        source?: string;
+    };
+    cliVersion?: string;
+    generatedAt: string;
+    sessions: Array<Record<string, unknown>>;
+}
+export interface RuntimeEvidenceUploadResponse {
+    ok: boolean;
+    batchId: string;
+    repo: {
+        id: string;
+        name: string;
+        repoKey: string;
+    };
+    uploaded: number;
+    skipped: number;
+    failed: number;
+    sessions: Array<{
+        sessionId: string;
+        replayHash: string;
+        status: 'uploaded' | 'skipped' | 'failed';
+        reason?: string;
+    }>;
+    privacy: {
+        sourceUploaded: boolean;
+        uploadedFields: string[];
+    };
+}
+export interface RuntimeLiveSessionStatusRequest {
+    repo: {
+        name: string;
+        rootHash?: string;
+        remoteHash?: string;
+        profileHash?: string;
+        topologyHash?: string;
+        profileFreshness?: Record<string, unknown>;
+        source?: string;
+    };
+    generatedAt: string;
+    session: Record<string, unknown>;
+}
+export interface RuntimeLiveApproval {
+    id: string | null;
+    repoId?: string;
+    repoName?: string;
+    repoKey?: string;
+    sessionId: string;
+    path: string;
+    reason?: string | null;
+    status: 'pending' | 'applied' | 'failed' | string;
+    expiresAt?: string | null;
+    appliedPath?: string | null;
+    requestedAt?: string;
+    appliedAt?: string | null;
+    failedAt?: string | null;
+    failureMessage?: string | null;
+}
 export interface OrgGovernanceSettingsResponse {
     settings: {
         contextPolicy: {
@@ -304,6 +369,22 @@ export declare class ApiClient {
     private makeRequest;
     analyzeDiff(diff: string, projectId?: string): Promise<AnalyzeDiffResponse>;
     analyzeBloat(diff: string, intent?: string, projectId?: string, sessionId?: string, fileContents?: Record<string, string>): Promise<AnalyzeBloatResponse>;
+    uploadRuntimeEvidence(body: RuntimeEvidenceUploadRequest): Promise<RuntimeEvidenceUploadResponse>;
+    updateRuntimeLiveSessionStatus(body: RuntimeLiveSessionStatusRequest): Promise<{
+        ok: boolean;
+        liveSession: Record<string, unknown>;
+    }>;
+    getRuntimeLiveApprovals(sessionId: string, repoKey?: string): Promise<{
+        approvals: RuntimeLiveApproval[];
+    }>;
+    acknowledgeRuntimeLiveApproval(sessionId: string, approvalId: string, body: {
+        status?: 'applied' | 'failed';
+        appliedPath?: string;
+        message?: string;
+    }): Promise<{
+        ok: boolean;
+        approval: RuntimeLiveApproval;
+    }>;
     getFileVersions(filePath: string, projectId?: string, limit?: number): Promise<Array<{
         id: string;
         organizationId: string;

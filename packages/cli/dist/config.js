@@ -14,6 +14,7 @@ const path_1 = require("path");
 const crypto_1 = require("crypto");
 const state_1 = require("./utils/state");
 const project_root_1 = require("./utils/project-root");
+const runtime_connection_1 = require("./utils/runtime-connection");
 /**
  * Default production API URL
  * Priority: NEURCODE_API_URL env var > Production URL
@@ -205,6 +206,24 @@ function loadConfig() {
             // Ignore parse errors, continue to legacy config
         }
     }
+    // Priority 2b: Runtime dashboard connection (.neurcode/connection.json).
+    // This is written by `neurcode activate claude --connect ...`; unlike global
+    // auth, it is repository-local and safe to use for explicit loopback/dev API URLs.
+    const runtimeConnection = (0, runtime_connection_1.loadRuntimeConnection)(projectRoot);
+    if (runtimeConnection) {
+        if (!config.apiUrl && runtimeConnection.apiUrl) {
+            config.apiUrl = runtimeConnection.apiUrl.trim().replace(/\/$/, '');
+        }
+        if (!config.orgId && runtimeConnection.organizationId) {
+            config.orgId = runtimeConnection.organizationId;
+        }
+        if (!stateOrgId && runtimeConnection.organizationId) {
+            stateOrgId = runtimeConnection.organizationId;
+        }
+        if (!config.projectId && runtimeConnection.projectId) {
+            config.projectId = runtimeConnection.projectId;
+        }
+    }
     // Priority 3: Legacy local config file (neurcode.config.json) - for backwards compatibility
     // IMPORTANT: apiKey here is treated as a fallback only; the global keyring is authoritative for auth.
     const localConfigPath = (0, path_1.join)(projectRoot, 'neurcode.config.json');
@@ -277,14 +296,14 @@ function requireApiKey(orgId) {
     const fallbackKey = !orgScopedKey ? getApiKey() : null;
     const apiKey = orgScopedKey || fallbackKey;
     if (!apiKey) {
-        console.error('\n❌ No API Key found.');
-        console.log('\n📝 To authenticate, run:');
+        console.error('\nNo Neurcode runtime connection found.');
+        console.log('\nTo connect this machine, run:');
         console.log('   neurcode login');
         if (desiredOrgId) {
-            console.log(`\n   This project is linked to org: ${desiredOrgId}`);
-            console.log('   Login while inside this directory to mint an org-scoped key.');
+            console.log(`\nThis repository is bound to workspace: ${desiredOrgId}`);
+            console.log('Run login from this directory to connect the matching workspace runtime.');
         }
-        console.log('\n💡 This will open your browser for authentication.\n');
+        console.log('\nThis opens browser approval and stores the credential in the local Neurcode keyring.\n');
         process.exit(1);
     }
     return apiKey;
