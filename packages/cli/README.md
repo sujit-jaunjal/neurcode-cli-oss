@@ -1,15 +1,15 @@
 # @neurcode-ai/cli
 
-Neurcode CLI is the local execution path for **deterministic operational governance in AI-assisted software delivery**.
+Neurcode CLI is the local runtime brain for **in-flow governance of AI-assisted software delivery**.
 
-It enforces declared **intent contracts** against the working tree: scope guard, forbidden-boundary enforcement, dependency-overreach detection, generated-code spillover detection, and drift narrative synthesis — all running offline, with a **replay-grade canonical checksum** that is byte-identical for the same diff + intent.
+It derives repository governance profiles, starts governed AI coding sessions, captures source-free intent and plan revisions, checks edit boundaries before writes when the agent host supports it, applies exact-path approvals, and emits replayable evidence.
 
-Verification is one phase of the lifecycle, not the product. The canonical loop is:
+Verification remains available, but it is one phase of the lifecycle, not the product. The canonical runtime loop is:
 
 ```
-intent  →  scoped execution  →  governance verification  →  drift detection
-                                                              ↓
-re-verification  ←  remediation export  ←  replay continuity  ←  posture synthesis
+repo profile  →  governed AI session  →  agent plan
+  →  pre-write boundary check  →  exact approval when needed
+  →  replayable source-free evidence
 ```
 
 For terminology, see [docs/governance-vocabulary.md](https://github.com/sujit-jaunjal/neurcode/blob/main/docs/governance-vocabulary.md).
@@ -21,9 +21,35 @@ npm install -g @neurcode-ai/cli@latest
 neurcode --version
 ```
 
-## Canonical Governance Loop
+## Primary Runtime Workflow
 
-The five commands every pilot should adopt before anything else.
+Start with the agent session launcher:
+
+```bash
+cd your-project
+neurcode run claude --goal "Add retry with backoff to the export task"
+```
+
+The launcher refreshes repo metadata, creates the governed session contract,
+prints the agent starter prompt, records a source-free launch event, and exposes
+the same state to the local daemon / Runtime Companion.
+
+Current adapter guarantees:
+
+| Agent | Current guarantee |
+|---|---|
+| Claude Code hooks | Automatic pre-write `hard_deny` for Edit/Write/MultiEdit |
+| Codex/Cursor/Gemini MCP | Cooperative `plan.capture` and `edit.before` events |
+| VS Code extension | `observe_only` companion and exact approval UI |
+
+For Claude Code, paste the generated starter prompt into Claude in the same
+repo. The UserPromptSubmit hook handshakes into the existing launcher-created
+session instead of creating a duplicate.
+
+## Secondary Verification Loop
+
+The older diff-verification loop remains available for compatibility and CI
+backstops:
 
 ```bash
 # 1. Declare governance intent + bounded scope.

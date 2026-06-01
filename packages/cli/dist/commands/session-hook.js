@@ -26,6 +26,7 @@ const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
+const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 // ── Helpers ───────────────────────────────────────────────────────────────────
 /** Read the full hook JSON from stdin, or return {} on any error. */
 function readHookInput() {
@@ -107,6 +108,35 @@ function maybeCaptureAgentPlan(repoRoot, session, hookInput) {
         return null;
     }
 }
+async function maybeReuseLaunchedClaudeSession(repoRoot, goal, hookInput, profileFreshness) {
+    const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    if (!activeSession || activeSession.status !== 'active')
+        return null;
+    const launcher = (0, agent_session_launcher_1.latestAgentLauncherState)(activeSession);
+    if (!launcher || launcher.agent.adapter !== 'claude-code-hooks')
+        return null;
+    const promptReferencesSession = goal.includes(activeSession.sessionId);
+    const awaitingPrompt = launcher.handshakeStatus === 'awaiting_agent_prompt';
+    if (!promptReferencesSession && !awaitingPrompt)
+        return null;
+    let session = (0, agent_session_launcher_1.recordLauncherHandshake)(repoRoot, activeSession, {
+        handshakeStatus: 'prompt_seen',
+        promptMatched: promptReferencesSession ? 'session_id' : 'active_launcher',
+        source: 'claude-code-hooks',
+        message: 'Claude Code prompt handshook into launcher-created session.',
+    });
+    const plannedAtStart = maybeCaptureAgentPlan(repoRoot, session, hookInput);
+    if (plannedAtStart) {
+        session = (0, agent_session_launcher_1.recordLauncherHandshake)(repoRoot, plannedAtStart, {
+            handshakeStatus: 'plan_captured',
+            promptMatched: promptReferencesSession ? 'session_id' : 'active_launcher',
+            source: 'claude-code-hooks',
+            message: 'Claude Code prompt captured an initial plan for the launcher-created session.',
+        });
+    }
+    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session, { profileFreshness });
+    return session;
+}
 // ── Hook handlers ─────────────────────────────────────────────────────────────
 /** UserPromptSubmit — create a new governance session from the prompt. */
 async function handleStart(cmdCwd) {
@@ -125,6 +155,13 @@ async function handleStart(cmdCwd) {
         const profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(profileResult, profileResult.refreshed ? 'auto_refreshed' : 'none');
         if (profileResult.refreshed && profileResult.status !== 'missing') {
             diagnostic(`profile refreshed before session start (${profileResult.reasons.join('; ')})`);
+        }
+        const reused = await maybeReuseLaunchedClaudeSession(repoRoot, goal.trim(), hookInput, profileFreshness);
+        if (reused) {
+            process.stdout.write(JSON.stringify({
+                message: `🤝 Neurcode session ${reused.sessionId} · launcher handshake complete`,
+            }) + '\n');
+            return;
         }
         const profile = profileResult.profile;
         let session = (0, governance_runtime_1.createSession)(repoRoot, profile, goal.trim());

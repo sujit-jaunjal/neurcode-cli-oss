@@ -55,6 +55,10 @@ exports.REPLAY_EVIDENCE_ROUTE_DESCRIPTIONS = [
 exports.OPERATIONAL_STATUS_ROUTE_DESCRIPTIONS = [
     { method: 'GET', path: '/health', summary: 'daemon health, route map, and runtime contracts' },
     { method: 'GET', path: '/ops/summary', summary: 'daemon operational health + reliability metrics' },
+    { method: 'GET', path: '/runtime-companion', summary: 'source-free local in-flow session snapshot' },
+    { method: 'POST', path: '/runtime-companion/launch', summary: 'start a governed AI session and agent handshake' },
+    { method: 'POST', path: '/runtime-companion/approve', summary: 'approve one exact runtime boundary path' },
+    { method: 'POST', path: '/runtime-companion/profile/refresh', summary: 'refresh local repo governance profile metadata' },
     { method: 'GET', path: '/control-plane', summary: 'governance control-plane state + snapshots' },
     { method: 'POST', path: '/control-plane/preview', summary: 'preview control-plane update' },
     { method: 'PUT', path: '/control-plane', summary: 'apply control-plane update' },
@@ -104,6 +108,10 @@ function classifyDaemonRoute(method, url) {
     if ((normalizedMethod === 'GET' || normalizedMethod === 'POST' || normalizedMethod === 'PUT')
         && (path === '/health'
             || path === '/ops/summary'
+            || path === '/runtime-companion'
+            || path === '/runtime-companion/launch'
+            || path === '/runtime-companion/approve'
+            || path === '/runtime-companion/profile/refresh'
             || path === '/control-plane'
             || path === '/control-plane/preview'
             || path === '/brain/cache-status'

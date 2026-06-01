@@ -70,6 +70,7 @@ const runtime_evidence_1 = require("../utils/runtime-evidence");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
+const runtime_outbox_1 = require("../utils/runtime-outbox");
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const readline = __importStar(require("readline"));
@@ -287,7 +288,10 @@ function localGovernanceStatusCommand(options = {}) {
     console.log(chalk.dim(`Record: ${activeStatus.recordPath}`));
     if (activeStatus.connection) {
         const sync = activeStatus.connection.autoSync;
+        const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(activeStatus.repoRoot);
         console.log(chalk.dim(`Cloud:  connected to ${activeStatus.connection.repo.name} · auto-sync ${sync.enabled ? 'on' : 'off'} · ${sync.lastStatus || 'never'}`));
+        console.log(chalk.dim(`Live:   ${transport.pendingEvents === 0 ? 'delivered' : `${transport.pendingEvents} queued`} ` +
+            `${transport.lastError ? `· retrying after ${transport.lastError}` : ''}`));
     }
     console.log('');
 }

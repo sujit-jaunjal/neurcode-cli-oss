@@ -56,6 +56,9 @@ const contracts_1 = require("@neurcode-ai/contracts");
 const telemetry_1 = require("@neurcode-ai/telemetry");
 const governance_provenance_1 = require("../utils/governance-provenance");
 const pilot_metrics_1 = require("../utils/pilot-metrics");
+const runtime_companion_1 = require("../utils/runtime-companion");
+const runtime_live_1 = require("../utils/runtime-live");
+const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 // ── Configuration ──────────────────────────────────────────────────────────────
 exports.DAEMON_PORT = Number.parseInt(process.env.NEURCODE_DAEMON_PORT || '4321', 10) || 4321;
 exports.DAEMON_HOST = process.env.NEURCODE_DAEMON_HOST || '127.0.0.1';
@@ -737,6 +740,71 @@ async function handleGetControlPlane(_req, res) {
         state,
         snapshots,
     });
+}
+async function handleGetRuntimeCompanion(_req, res) {
+    success(res, (0, runtime_companion_1.buildRuntimeCompanionSnapshot)(process.cwd()));
+}
+async function handleLaunchRuntimeCompanionSession(req, res) {
+    let body = {};
+    try {
+        body = JSON.parse(await readBody(req));
+    }
+    catch {
+        failure(res, 'Invalid JSON body', 400);
+        return;
+    }
+    const goal = asNonEmptyString(body.goal);
+    if (!goal) {
+        failure(res, 'goal is required', 400);
+        return;
+    }
+    const launch = await (0, agent_session_launcher_1.launchAgentSession)({
+        agent: asNonEmptyString(body.agent) || 'claude',
+        goal,
+        plan: asNonEmptyString(body.plan),
+        activate: body.activate !== false,
+        forceProfile: body.forceProfile === true,
+        actor: toActor(req),
+    });
+    success(res, {
+        ...launch,
+        snapshot: (0, runtime_companion_1.buildRuntimeCompanionSnapshot)(process.cwd(), { forceFreshness: true }),
+    });
+}
+async function handleApproveRuntimeCompanionPath(req, res) {
+    let body = {};
+    try {
+        body = JSON.parse(await readBody(req));
+    }
+    catch {
+        failure(res, 'Invalid JSON body', 400);
+        return;
+    }
+    const path = asNonEmptyString(body.path);
+    const reason = asNonEmptyString(body.reason);
+    if (!path) {
+        failure(res, 'path is required', 400);
+        return;
+    }
+    if (!reason) {
+        failure(res, 'reason is required', 400);
+        return;
+    }
+    const result = (0, runtime_companion_1.approveRuntimeCompanionPath)(process.cwd(), {
+        path,
+        reason,
+        sessionId: asNonEmptyString(body.sessionId),
+        approvedBy: toActor(req),
+        requestId: String(res.getHeader(REQUEST_ID_HEADER) ?? ''),
+    });
+    const session = (0, runtime_companion_1.runtimeCompanionSession)(process.cwd(), result.sessionId);
+    if (session) {
+        await (0, runtime_live_1.publishRuntimeLiveStatus)(process.cwd(), session);
+    }
+    success(res, result);
+}
+async function handleRefreshRuntimeCompanionProfile(_req, res) {
+    success(res, (0, runtime_companion_1.refreshRuntimeCompanionProfile)(process.cwd()));
 }
 async function handlePreviewControlPlaneUpdate(req, res) {
     let body = {};
@@ -2265,6 +2333,10 @@ function createDaemonServer() {
                         schemaVersion: 'neurcode.replay.state.v1',
                         path: '/replay/state',
                     },
+                    runtimeCompanion: {
+                        schemaVersion: 'neurcode.runtime-companion.v1',
+                        path: '/runtime-companion',
+                    },
                     routeGroups: {
                         canonicalGovernance: routes_1.CANONICAL_GOVERNANCE_ROUTE_DESCRIPTIONS,
                         compatibilityMutation: routes_1.COMPATIBILITY_MUTATION_ROUTE_DESCRIPTIONS,
@@ -2283,6 +2355,22 @@ function createDaemonServer() {
                     generatedAt: new Date().toISOString(),
                     operational: buildDaemonOperationalSummary(process.cwd()),
                 });
+                return;
+            }
+            if (method === 'GET' && (url === '/runtime-companion' || url.startsWith('/runtime-companion?'))) {
+                await handleGetRuntimeCompanion(req, res);
+                return;
+            }
+            if (method === 'POST' && (url === '/runtime-companion/launch' || url.startsWith('/runtime-companion/launch?'))) {
+                await handleLaunchRuntimeCompanionSession(req, res);
+                return;
+            }
+            if (method === 'POST' && (url === '/runtime-companion/approve' || url.startsWith('/runtime-companion/approve?'))) {
+                await handleApproveRuntimeCompanionPath(req, res);
+                return;
+            }
+            if (method === 'POST' && (url === '/runtime-companion/profile/refresh' || url.startsWith('/runtime-companion/profile/refresh?'))) {
+                await handleRefreshRuntimeCompanionProfile(req, res);
                 return;
             }
             if (method === 'GET' && url.startsWith('/executions')) {

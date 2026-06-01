@@ -68,7 +68,9 @@ const replay_1 = require("./commands/replay");
 const governance_1 = require("./commands/governance");
 const profile_1 = require("./commands/profile");
 const session_hook_1 = require("./commands/session-hook");
+const runtime_adapter_1 = require("./commands/runtime-adapter");
 const activate_1 = require("./commands/activate");
+const run_1 = require("./commands/run");
 const runtime_doctor_1 = require("./commands/runtime-doctor");
 const runtime_report_1 = require("./commands/runtime-report");
 const runtime_sync_1 = require("./commands/runtime-sync");
@@ -86,6 +88,10 @@ catch (error) {
 }
 const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
+    {
+        command: 'neurcode run claude --goal "<task>"',
+        description: 'Start a governed AI coding session and print the agent runtime handshake',
+    },
     {
         command: 'neurcode activate claude --connect <token>',
         description: 'Install Claude Code governance hooks, pair the repo, and enable runtime evidence auto-sync',
@@ -133,6 +139,7 @@ const CORE_WORKFLOW_STEPS = [
 ];
 const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
     'activate',
+    'run',
     'status',
     'sessions',
     'report',
@@ -423,7 +430,9 @@ program
 // V0: in-flow governance
 (0, profile_1.profileCommand)(program);
 (0, session_hook_1.sessionHookCommand)(program);
+(0, runtime_adapter_1.runtimeAdapterCommand)(program);
 (0, activate_1.activateCommand)(program);
+(0, run_1.runCommand)(program);
 (0, runtime_report_1.reportCommand)(program);
 (0, runtime_sync_1.syncCommand)(program);
 program

@@ -4,6 +4,7 @@ exports.runtimeDoctorCommand = runtimeDoctorCommand;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
+const runtime_outbox_1 = require("../utils/runtime-outbox");
 let chalk;
 try {
     chalk = require('chalk');
@@ -42,6 +43,7 @@ function runtimeDoctorCommand(options = {}) {
     const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
     const governanceConfig = (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot);
     const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+    const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
     const checks = [];
     checks.push({
         id: 'profile',
@@ -113,6 +115,25 @@ function runtimeDoctorCommand(options = {}) {
             ? `Connected to ${connection.repo.name}; auto-sync is ${connection.autoSync.enabled ? 'enabled' : 'disabled'} (${connection.autoSync.lastStatus || 'never synced'}).`
             : 'This repo is not paired with the Neurcode dashboard yet.',
         recommendation: connection ? undefined : 'From Runtime Evidence, copy the activation command or run `neurcode activate claude --connect <token>`.',
+    });
+    checks.push({
+        id: 'runtime_transport',
+        label: 'Live runtime transport',
+        status: !connection
+            ? 'skip'
+            : transport.lastError
+                ? 'warn'
+                : 'pass',
+        message: !connection
+            ? 'Runtime transport activates after this repo is paired with the dashboard.'
+            : transport.pendingEvents > 0
+                ? `${transport.pendingEvents} source-free event${transport.pendingEvents === 1 ? '' : 's'} queued locally (${transport.pendingSessionSnapshots} session snapshot${transport.pendingSessionSnapshots === 1 ? '' : 's'}, ${transport.pendingApprovalAcks} approval acknowledgement${transport.pendingApprovalAcks === 1 ? '' : 's'}).`
+                : transport.lastDeliveredAt
+                    ? `Outbox empty. Last cloud delivery: ${transport.lastDeliveredAt}.`
+                    : 'Outbox empty. No live runtime event has needed cloud delivery yet.',
+        recommendation: transport.lastError
+            ? `Cloud delivery will retry automatically. Last error: ${transport.lastError}`
+            : undefined,
     });
     const summary = {
         pass: checks.filter((c) => c.status === 'pass').length,

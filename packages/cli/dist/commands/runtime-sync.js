@@ -12,6 +12,8 @@ const config_1 = require("../config");
 const runtime_evidence_1 = require("../utils/runtime-evidence");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
+const runtime_live_1 = require("../utils/runtime-live");
+const runtime_outbox_1 = require("../utils/runtime-outbox");
 let chalk;
 try {
     chalk = require('chalk');
@@ -168,6 +170,7 @@ async function runtimeSyncCommand(options = {}) {
         }
         const payload = buildUploadPayload(repoRoot, validRecords);
         if (options.dryRun) {
+            const liveTransport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
             const result = {
                 ok: true,
                 dryRun: true,
@@ -186,6 +189,7 @@ async function runtimeSyncCommand(options = {}) {
                     uploadedFields: ['file paths', 'owners', 'verdicts', 'timestamps', 'contracts', 'replay hashes'],
                 },
                 payload,
+                liveTransport,
             };
             if (options.json) {
                 console.log(JSON.stringify(result, null, 2));
@@ -203,6 +207,11 @@ async function runtimeSyncCommand(options = {}) {
             }
             return;
         }
+        const liveTransport = await (0, runtime_live_1.flushRuntimeLiveOutbox)(repoRoot, {
+            maxEvents: 100,
+            timeoutMs: 1_500,
+            force: true,
+        });
         if (validRecords.length === 0) {
             (0, runtime_connection_1.updateRuntimeConnection)(repoRoot, (connection) => ({
                 ...connection,
@@ -217,10 +226,18 @@ async function runtimeSyncCommand(options = {}) {
                 },
             }));
             if (options.json) {
-                console.log(JSON.stringify({ ok: true, uploaded: 0, skipped: skipped.length, failed: 0, message: 'No finished runtime sessions to upload.' }, null, 2));
+                console.log(JSON.stringify({
+                    ok: true,
+                    uploaded: 0,
+                    skipped: skipped.length,
+                    failed: 0,
+                    liveTransport,
+                    message: 'No finished runtime sessions to upload.',
+                }, null, 2));
             }
             else {
                 console.log(chalk.yellow('No finished runtime sessions to upload.'));
+                console.log(chalk.dim(`Live transport: ${liveTransport.delivered} delivered, ${liveTransport.pending} queued.`));
                 if (skipped.length > 0) {
                     for (const item of skipped)
                         console.log(chalk.dim(`  skipped ${item.sessionId}: ${item.reason}`));
@@ -252,6 +269,7 @@ async function runtimeSyncCommand(options = {}) {
                 ...response,
                 endpoint: `${config.apiUrl?.replace(/\/$/, '')}/api/v1/runtime/evidence`,
                 localSkipped: skipped,
+                liveTransport,
             }, null, 2));
             return;
         }
@@ -263,6 +281,7 @@ async function runtimeSyncCommand(options = {}) {
         console.log(`Uploaded: ${chalk.green(String(response.uploaded))}`);
         console.log(`Skipped:  ${chalk.yellow(String(response.skipped + skipped.length))}`);
         console.log(`Failed:   ${response.failed > 0 ? chalk.red(String(response.failed)) : '0'}`);
+        console.log(`Live:     ${liveTransport.delivered} delivered · ${liveTransport.pending} queued`);
         console.log(chalk.dim('Privacy: no source code, diffs, or file contents were uploaded.'));
         console.log('');
     }
