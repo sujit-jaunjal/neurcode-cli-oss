@@ -127,15 +127,54 @@ function launcherAdapterMatches(eventAdapter, launchedAdapter) {
         return true;
     return eventAdapter === launchedAdapter || eventAdapter === 'generic-mcp';
 }
+function payloadKeys(payload) {
+    return Object.keys(payload)
+        .filter((key) => payload[key] !== undefined)
+        .sort();
+}
+function recordAgentRuntimeCall(event, session) {
+    const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)(event.adapter);
+    (0, governance_runtime_1.appendEvent)(event.cwd, session.sessionId, {
+        type: 'agent_runtime_call',
+        ts: new Date().toISOString(),
+        filePath: typeof event.payload.filePath === 'string'
+            ? event.payload.filePath
+            : typeof event.payload.path === 'string'
+                ? event.payload.path
+                : undefined,
+        detail: {
+            schemaVersion: 'neurcode.agent-runtime-call.v1',
+            adapter: event.adapter,
+            runtimeEventType: event.eventType,
+            eventId: event.eventId || null,
+            timestamp: event.timestamp || null,
+            enforcementLevel: capability.enforcementLevel,
+            automatic: capability.automatic,
+            toolName: typeof event.payload.toolName === 'string' ? event.payload.toolName : null,
+            payloadKeys: payloadKeys(event.payload),
+            privacy: {
+                metadataOnly: true,
+                sourceUploaded: false,
+                sourceIncluded: false,
+            },
+        },
+    });
+}
 async function submitAgentRuntimeEvent(event) {
     const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)(event.adapter);
     if (!capability.events.includes(event.eventType)) {
         throw new Error(`${event.adapter} does not support ${event.eventType}; supported events: ${capability.events.join(', ')}`);
     }
     const payload = event.payload;
+    const targetSession = event.eventType === 'session.start'
+        ? null
+        : loadTargetSession(event.cwd, payload.sessionId);
+    if (targetSession) {
+        recordAgentRuntimeCall(event, targetSession);
+    }
     switch (event.eventType) {
         case 'session.handshake': {
-            const session = loadTargetSession(event.cwd, payload.sessionId);
+            const session = targetSession;
             if (!session || session.status !== 'active') {
                 throw new Error(payload.sessionId
                     ? `No active governed session found for ${payload.sessionId}.`

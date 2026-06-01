@@ -205,6 +205,7 @@ function buildLocalGovernanceStatus(options = {}) {
         approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
         approvedPaths: session.contract.approvedPaths,
         recentEvents,
+        agentInvocation: (0, governance_runtime_1.buildAgentInvocationSummary)(session),
         latestBlock: latestBlock
             ? {
                 filePath: latestBlock.filePath,
@@ -248,8 +249,14 @@ function localGovernanceStatusCommand(options = {}) {
     console.log(`Goal:    ${chalk.white(truncate(activeStatus.goal))}`);
     console.log(`Scope:   ${chalk.white(activeStatus.scopeMode)}`);
     console.log(`Plan:    ${chalk.white(activeStatus.planCoherenceMode)}${activeStatus.agentPlanRevision ? chalk.dim(` · rev ${activeStatus.agentPlanRevision}`) : ''}`);
+    console.log(`Agent:   ${chalk.white(activeStatus.agentInvocation.status.replace(/_/g, ' '))}` +
+        chalk.dim(` · score ${activeStatus.agentInvocation.score}`) +
+        chalk.dim(` · checks ${activeStatus.agentInvocation.preWriteCheckCount}`));
     if (activeStatus.agentPlan?.summary) {
-        console.log(`Agent:   ${chalk.white(truncate(activeStatus.agentPlan.summary))}`);
+        console.log(`Plan:    ${chalk.white(truncate(activeStatus.agentPlan.summary))}`);
+    }
+    if (activeStatus.agentInvocation.gaps[0]) {
+        console.log(`Next:    ${chalk.yellow(activeStatus.agentInvocation.nextAction)}`);
     }
     if (activeStatus.pendingPlanAmendments.length > 0) {
         const proposal = activeStatus.pendingPlanAmendments[0];
