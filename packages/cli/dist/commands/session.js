@@ -71,6 +71,7 @@ const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
+const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const readline = __importStar(require("readline"));
@@ -206,6 +207,8 @@ function buildLocalGovernanceStatus(options = {}) {
         approvedPaths: session.contract.approvedPaths,
         recentEvents,
         agentInvocation: (0, governance_runtime_1.buildAgentInvocationSummary)(session),
+        agentGuard: (0, governance_runtime_1.buildAgentGuardPostureSummary)(session),
+        agentSupervisor: (0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, session.sessionId),
         latestBlock: latestBlock
             ? {
                 filePath: latestBlock.filePath,
@@ -252,6 +255,17 @@ function localGovernanceStatusCommand(options = {}) {
     console.log(`Agent:   ${chalk.white(activeStatus.agentInvocation.status.replace(/_/g, ' '))}` +
         chalk.dim(` · score ${activeStatus.agentInvocation.score}`) +
         chalk.dim(` · checks ${activeStatus.agentInvocation.preWriteCheckCount}`));
+    if (activeStatus.agentGuard.status !== 'not_started') {
+        console.log(`Guard:   ${chalk.white(activeStatus.agentGuard.status.replace(/_/g, ' '))}` +
+            chalk.dim(` · changed ${activeStatus.agentGuard.summary.changedFiles}`) +
+            chalk.dim(` · unverified ${activeStatus.agentGuard.summary.unverifiedWrites}`) +
+            chalk.dim(` · denied-changed ${activeStatus.agentGuard.summary.deniedButChanged}`));
+    }
+    if (activeStatus.agentSupervisor.effectiveStatus !== 'missing') {
+        console.log(`Watch:   ${chalk.white(activeStatus.agentSupervisor.effectiveStatus.replace(/_/g, ' '))}` +
+            chalk.dim(` · ${activeStatus.agentSupervisor.alive ? 'alive' : 'not running'}`) +
+            chalk.dim(` · checks ${activeStatus.agentSupervisor.state?.evaluationCount ?? 0}`));
+    }
     if (activeStatus.agentPlan?.summary) {
         console.log(`Plan:    ${chalk.white(truncate(activeStatus.agentPlan.summary))}`);
     }

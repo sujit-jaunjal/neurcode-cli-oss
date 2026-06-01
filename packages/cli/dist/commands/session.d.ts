@@ -8,8 +8,9 @@
  * - neurcode session end     - End the current or specified session
  * - neurcode session status  - Show status of current session
  */
-import { type AgentPlan, type AgentPlanAmendmentProposal, type AgentInvocationSummary, type ArchitectureObligation, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
+import { type AgentPlan, type AgentPlanAmendmentProposal, type AgentInvocationSummary, type AgentGuardPostureSummary, type ArchitectureObligation, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
 import { type RuntimeConnection } from '../utils/runtime-connection';
+import { type AgentGuardSupervisorInspection } from '../utils/agent-guard-supervisor';
 interface SessionCommandOptions {
     sessionId?: string;
     projectId?: string;
@@ -73,6 +74,8 @@ interface PresentLocalGovernanceStatus {
     approvedPaths: string[];
     recentEvents: SessionEvent[];
     agentInvocation: AgentInvocationSummary;
+    agentGuard: AgentGuardPostureSummary;
+    agentSupervisor: AgentGuardSupervisorInspection;
     latestBlock: {
         filePath?: string;
         message?: string;

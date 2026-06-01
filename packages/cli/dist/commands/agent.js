@@ -3,11 +3,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.agentCommand = agentCommand;
 const node_fs_1 = require("node:fs");
 const node_child_process_1 = require("node:child_process");
+const node_crypto_1 = require("node:crypto");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const v0_governance_1 = require("../utils/v0-governance");
 const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 const agent_guard_1 = require("../utils/agent-guard");
+const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
 const runtime_adapter_1 = require("./runtime-adapter");
 const session_1 = require("./session");
@@ -86,6 +88,9 @@ async function submitAgentEvent(input) {
 }
 function emitJson(value) {
     console.log(JSON.stringify(value, null, 2));
+}
+function emitJsonLine(value) {
+    console.log(JSON.stringify(value));
 }
 function emitError(error, json) {
     const message = error instanceof Error ? error.message : String(error);
@@ -446,12 +451,15 @@ function renderGuardStart(input) {
     console.log(`Agent:    ${input.launch.agent.normalized} -> ${input.launch.agent.adapter}`);
     console.log(`Guard:    ${chalk.white(input.guardPath)}`);
     console.log(`Baseline: ${input.baselineFileCount} files ${chalk.dim(input.baselineTreeHash.slice(0, 12))}`);
+    console.log(`Watch:    ${input.supervisor?.enabled
+        ? chalk.green(input.supervisor.started ? `running (pid ${input.supervisor.pid ?? 'pending'})` : input.supervisor.alreadyRunning ? `already running (pid ${input.supervisor.pid ?? 'unknown'})` : 'enabled')
+        : chalk.dim('disabled')}`);
     console.log('');
     console.log(chalk.bold('Next'));
     console.log(chalk.dim(`  neurcode agent handshake --adapter ${input.launch.agent.adapter} --session-id ${input.launch.session.sessionId}`));
     console.log(chalk.dim(`  neurcode agent plan --adapter ${input.launch.agent.adapter} --session-id ${input.launch.session.sessionId} --plan "<source-free plan>"`));
     console.log(chalk.dim(`  neurcode agent check <repo-relative-path> --adapter ${input.launch.agent.adapter} --session-id ${input.launch.session.sessionId}`));
-    console.log(chalk.dim(`  neurcode agent guard status --session-id ${input.launch.session.sessionId}`));
+    console.log(chalk.dim(`  neurcode agent guard supervise status --session-id ${input.launch.session.sessionId}`));
     console.log('');
     console.log(chalk.dim('Guard truth: this catches bypassed or denied writes by comparing repo changes to runtime events. It is not hard-deny unless the agent host supports pre-write hooks.'));
     console.log('');
@@ -473,6 +481,40 @@ function repoRelativeArtifactPath(repoRoot, artifactPath) {
     return normalized.startsWith(`${root}/`)
         ? normalized.slice(root.length + 1)
         : '<external-agent-guard-artifact>';
+}
+function guardEvaluationFingerprint(evaluation) {
+    return (0, node_crypto_1.createHash)('sha256')
+        .update(JSON.stringify({
+        pass: evaluation.pass,
+        status: evaluation.status,
+        summary: evaluation.summary,
+        changedFiles: evaluation.changedFiles.map((file) => ({
+            path: file.path,
+            changeType: file.changeType,
+            classification: file.classification,
+            evidence: file.evidence,
+        })),
+    }))
+        .digest('hex')
+        .slice(0, 24);
+}
+function guardEvaluationDetail(repoRoot, artifactPath, evaluation) {
+    return {
+        schemaVersion: 'neurcode.agent-guard-status.v1',
+        guardId: evaluation.guardId,
+        artifactPath: repoRelativeArtifactPath(repoRoot, artifactPath),
+        reportFingerprint: guardEvaluationFingerprint(evaluation),
+        pass: evaluation.pass,
+        status: evaluation.status,
+        summary: evaluation.summary,
+        changedFiles: evaluation.changedFiles.slice(0, 100).map((file) => ({
+            path: file.path,
+            changeType: file.changeType,
+            classification: file.classification,
+            evidence: file.evidence,
+        })),
+        privacy: evaluation.privacy,
+    };
 }
 function renderGuardEvaluation(evaluation, artifactPath) {
     console.log('');
@@ -506,6 +548,101 @@ async function publishGuardEvent(input) {
     if (updated) {
         await (0, runtime_live_1.publishRuntimeLiveStatus)(input.repoRoot, updated);
     }
+}
+async function publishGuardEvaluation(input) {
+    const session = (0, governance_runtime_1.loadSession)(input.repoRoot, input.evaluation.sessionId);
+    if (!session)
+        return;
+    const detail = guardEvaluationDetail(input.repoRoot, input.artifactPath, input.evaluation);
+    const latestStatus = [...session.events]
+        .reverse()
+        .find((event) => event.type === input.eventType);
+    if (latestStatus?.detail?.reportFingerprint === detail.reportFingerprint) {
+        await (0, runtime_live_1.publishRuntimeLiveStatus)(input.repoRoot, session);
+        return;
+    }
+    await publishGuardEvent({
+        repoRoot: input.repoRoot,
+        sessionId: input.evaluation.sessionId,
+        event: {
+            type: input.eventType,
+            ts: input.evaluation.generatedAt,
+            message: input.message,
+            detail,
+        },
+    });
+}
+function requireGuardContext(input) {
+    const repoRoot = repoRootFrom({ dir: input.dir });
+    const guardRead = (0, agent_guard_1.readAgentGuardArtifact)({
+        repoRoot,
+        sessionId: input.sessionId,
+        artifactPath: input.guardPath,
+    });
+    if (!guardRead.artifact) {
+        throw new Error(guardRead.error || `Agent guard not found (${guardRead.path}).`);
+    }
+    const artifact = guardRead.artifact;
+    const session = loadGuardSession(repoRoot, input.sessionId || artifact.sessionId);
+    if (!session) {
+        throw new Error(`Local governance session ${input.sessionId || artifact.sessionId} was not found.`);
+    }
+    return { repoRoot, guardRead, artifact, session };
+}
+async function evaluateAndPublishGuardStatus(input) {
+    const { repoRoot, guardRead, artifact, session } = requireGuardContext(input);
+    const evaluation = (0, agent_guard_1.evaluateAgentGuard)(repoRoot, artifact, session);
+    await publishGuardEvaluation({
+        repoRoot,
+        artifactPath: guardRead.path,
+        evaluation,
+        eventType: 'agent_guard_status',
+        message: evaluation.pass
+            ? 'Agent guard status: changed files have allowed pre-write evidence.'
+            : 'Agent guard status: attention required for unverified or denied writes.',
+    });
+    return { repoRoot, artifactPath: guardRead.path, evaluation };
+}
+async function recordSupervisorEvent(input) {
+    await publishGuardEvent({
+        repoRoot: input.repoRoot,
+        sessionId: input.sessionId,
+        event: {
+            type: input.type,
+            ts: new Date().toISOString(),
+            message: input.message,
+            detail: {
+                schemaVersion: 'neurcode.agent-guard-supervisor.v1',
+                ...input.detail,
+                privacy: {
+                    metadataOnly: true,
+                    sourceUploaded: false,
+                    sourceIncluded: false,
+                    watchesPathsOnly: true,
+                },
+            },
+        },
+    });
+}
+function renderSupervisorInspection(inspection) {
+    console.log('');
+    console.log(chalk.bold('Neurcode agent guard supervisor'));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`State:   ${chalk.white(inspection.statePath)}`);
+    console.log(`Status:  ${inspection.effectiveStatus}`);
+    console.log(`Alive:   ${inspection.alive ? chalk.green('yes') : chalk.dim('no')}`);
+    if (inspection.state) {
+        console.log(`Session: ${chalk.white(inspection.state.sessionId)}`);
+        console.log(`PID:     ${inspection.state.pid ?? 'none'}`);
+        console.log(`Checks:  ${inspection.state.evaluationCount}`);
+        console.log(`Changed: ${inspection.state.lastChangedFiles}`);
+        console.log(`Last:    ${inspection.state.lastEvaluatedAt || 'not evaluated yet'}`);
+        if (inspection.state.lastError)
+            console.log(`Error:   ${chalk.red(inspection.state.lastError)}`);
+    }
+    if (inspection.error)
+        console.log(`Error:   ${chalk.red(inspection.error)}`);
+    console.log('');
 }
 function agentCommand(program) {
     const cmd = program
@@ -814,6 +951,8 @@ function agentCommand(program) {
         .option('--plan <text>', 'Optional initial source-free plan')
         .option('--plan-file <path>', 'Read initial source-free plan from a file')
         .option('--guard-path <path>', 'Guard artifact path (default: .neurcode/agent-guard/<session>.json)')
+        .option('--no-supervise', 'Do not start the detached local guard supervisor')
+        .option('--debounce-ms <ms>', 'Supervisor file-change debounce in milliseconds', (value) => Number.parseInt(value, 10))
         .option('--no-activate', 'Do not install/refresh Claude Code hooks when launching Claude')
         .option('--force-profile', 'Force refresh the repo governance profile before launch')
         .option('--json', 'Output machine-readable JSON')
@@ -853,6 +992,36 @@ function agentCommand(program) {
                     },
                 },
             });
+            const cliEntry = process.argv[1];
+            const supervisor = options.supervise !== false && cliEntry
+                ? {
+                    enabled: true,
+                    ...(0, agent_guard_supervisor_1.startAgentGuardSupervisorDetached)({
+                        repoRoot: launch.repoRoot,
+                        sessionId: launch.session.sessionId,
+                        guardPath,
+                        cliEntry,
+                        debounceMs: options.debounceMs,
+                    }),
+                }
+                : { enabled: false };
+            if (supervisor.enabled) {
+                await recordSupervisorEvent({
+                    repoRoot: launch.repoRoot,
+                    sessionId: launch.session.sessionId,
+                    type: 'agent_guard_supervisor_started',
+                    message: supervisor.alreadyRunning
+                        ? 'Agent guard supervisor already running.'
+                        : 'Agent guard supervisor started.',
+                    detail: {
+                        guardId: artifact.guardId,
+                        pid: supervisor.pid ?? null,
+                        status: supervisor.state.status,
+                        debounceMs: supervisor.state.debounceMs,
+                        alreadyRunning: supervisor.alreadyRunning,
+                    },
+                });
+            }
             const payload = {
                 ok: true,
                 schemaVersion: artifact.schemaVersion,
@@ -866,6 +1035,7 @@ function agentCommand(program) {
                     baselineTreeHash: artifact.baseline.treeHash,
                     privacy: artifact.privacy,
                 },
+                supervisor,
             };
             if (options.json)
                 emitJson(payload);
@@ -875,6 +1045,7 @@ function agentCommand(program) {
                     guardPath,
                     baselineFileCount: artifact.baseline.fileCount,
                     baselineTreeHash: artifact.baseline.treeHash,
+                    supervisor,
                 });
         }
         catch (error) {
@@ -889,38 +1060,13 @@ function agentCommand(program) {
         .option('--guard-path <path>', 'Guard artifact path')
         .option('--fail-on-unverified', 'Exit non-zero when writes lack allowed pre-write evidence')
         .option('--json', 'Output machine-readable JSON')
-        .action((options) => {
+        .action(async (options) => {
         try {
-            const repoRoot = repoRootFrom({ dir: options.dir });
-            const guardRead = (0, agent_guard_1.readAgentGuardArtifact)({
-                repoRoot,
-                sessionId: options.sessionId,
-                artifactPath: options.guardPath,
-            });
-            if (!guardRead.artifact) {
-                const message = guardRead.error || `Agent guard not found (${guardRead.path}).`;
-                if (options.json)
-                    emitJson({ ok: false, path: guardRead.path, error: message });
-                else
-                    console.error(chalk.red(`Neurcode agent guard failed: ${message}`));
-                process.exitCode = 1;
-                return;
-            }
-            const session = loadGuardSession(repoRoot, options.sessionId || guardRead.artifact.sessionId);
-            if (!session) {
-                const message = `Local governance session ${options.sessionId || guardRead.artifact.sessionId} was not found.`;
-                if (options.json)
-                    emitJson({ ok: false, path: guardRead.path, error: message });
-                else
-                    console.error(chalk.red(`Neurcode agent guard failed: ${message}`));
-                process.exitCode = 1;
-                return;
-            }
-            const evaluation = (0, agent_guard_1.evaluateAgentGuard)(repoRoot, guardRead.artifact, session);
+            const { artifactPath, evaluation } = await evaluateAndPublishGuardStatus(options);
             if (options.json)
-                emitJson({ ...evaluation, artifactPath: guardRead.path });
+                emitJson({ ...evaluation, artifactPath });
             else
-                renderGuardEvaluation(evaluation, guardRead.path);
+                renderGuardEvaluation(evaluation, artifactPath);
             if (options.failOnUnverified && !evaluation.pass)
                 process.exitCode = 2;
         }
@@ -967,32 +1113,32 @@ function agentCommand(program) {
             const evaluation = (0, agent_guard_1.evaluateAgentGuard)(repoRoot, guardRead.artifact, session);
             const finishedArtifact = (0, agent_guard_1.markAgentGuardFinished)(guardRead.artifact, evaluation.generatedAt);
             const artifactPath = (0, agent_guard_1.writeAgentGuardArtifact)(repoRoot, finishedArtifact, guardRead.path);
-            await publishGuardEvent({
+            await publishGuardEvaluation({
                 repoRoot,
-                sessionId: session.sessionId,
-                event: {
-                    type: 'agent_guard_finished',
-                    ts: evaluation.generatedAt,
-                    message: evaluation.pass
-                        ? 'Agent guard finished: all changed files had allowed pre-write evidence.'
-                        : 'Agent guard finished: attention required for unverified or denied writes.',
-                    detail: {
-                        schemaVersion: finishedArtifact.schemaVersion,
-                        guardId: finishedArtifact.guardId,
-                        artifactPath: repoRelativeArtifactPath(repoRoot, artifactPath),
-                        pass: evaluation.pass,
-                        status: evaluation.status,
-                        summary: evaluation.summary,
-                        changedFiles: evaluation.changedFiles.map((file) => ({
-                            path: file.path,
-                            changeType: file.changeType,
-                            classification: file.classification,
-                            evidence: file.evidence,
-                        })),
-                        privacy: finishedArtifact.privacy,
-                    },
-                },
+                artifactPath,
+                evaluation,
+                eventType: 'agent_guard_finished',
+                message: evaluation.pass
+                    ? 'Agent guard finished: all changed files had allowed pre-write evidence.'
+                    : 'Agent guard finished: attention required for unverified or denied writes.',
             });
+            const supervisorStop = (0, agent_guard_supervisor_1.stopAgentGuardSupervisor)(repoRoot, session.sessionId);
+            if (supervisorStop.state) {
+                await recordSupervisorEvent({
+                    repoRoot,
+                    sessionId: session.sessionId,
+                    type: 'agent_guard_supervisor_stopped',
+                    message: supervisorStop.signaled
+                        ? 'Agent guard supervisor stop requested.'
+                        : 'Agent guard supervisor stopped.',
+                    detail: {
+                        guardId: finishedArtifact.guardId,
+                        pid: supervisorStop.state.pid,
+                        status: supervisorStop.effectiveStatus,
+                        signaled: supervisorStop.signaled,
+                    },
+                });
+            }
             const closedSession = options.finishSession === false
                 ? null
                 : (0, governance_runtime_1.finishSession)(repoRoot, session.sessionId);
@@ -1005,6 +1151,7 @@ function agentCommand(program) {
                     artifactPath,
                     guardActive: finishedArtifact.active,
                     sessionFinished: Boolean(closedSession),
+                    supervisor: supervisorStop,
                 });
             }
             else {
@@ -1019,6 +1166,164 @@ function agentCommand(program) {
         }
         catch (error) {
             emitError(error, options.json);
+        }
+    });
+    const supervise = guard
+        .command('supervise')
+        .description('Continuously evaluate and publish guard posture while files change');
+    supervise
+        .command('start')
+        .description('Start the detached local agent guard supervisor')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--session-id <id>', 'Session ID (default: active session or active guard pointer)')
+        .option('--guard-path <path>', 'Guard artifact path')
+        .option('--debounce-ms <ms>', 'File-change debounce in milliseconds', (value) => Number.parseInt(value, 10))
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        try {
+            const { repoRoot, guardRead, artifact, session } = requireGuardContext(options);
+            if (!process.argv[1])
+                throw new Error('Unable to resolve the active Neurcode CLI entrypoint.');
+            const supervisor = (0, agent_guard_supervisor_1.startAgentGuardSupervisorDetached)({
+                repoRoot,
+                sessionId: session.sessionId,
+                guardPath: guardRead.path,
+                cliEntry: process.argv[1],
+                debounceMs: options.debounceMs,
+            });
+            await recordSupervisorEvent({
+                repoRoot,
+                sessionId: session.sessionId,
+                type: 'agent_guard_supervisor_started',
+                message: supervisor.alreadyRunning
+                    ? 'Agent guard supervisor already running.'
+                    : 'Agent guard supervisor started.',
+                detail: {
+                    guardId: artifact.guardId,
+                    pid: supervisor.pid,
+                    status: supervisor.state.status,
+                    debounceMs: supervisor.state.debounceMs,
+                    alreadyRunning: supervisor.alreadyRunning,
+                },
+            });
+            if (options.json)
+                emitJson({ ok: true, ...supervisor });
+            else
+                renderSupervisorInspection((0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, session.sessionId));
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    supervise
+        .command('status')
+        .description('Show the detached supervisor process and heartbeat state')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--session-id <id>', 'Session ID (default: active session or active guard pointer)')
+        .option('--guard-path <path>', 'Guard artifact path')
+        .option('--json', 'Output machine-readable JSON')
+        .action((options) => {
+        try {
+            const { repoRoot, artifact } = requireGuardContext(options);
+            const inspection = (0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, options.sessionId || artifact.sessionId);
+            if (options.json)
+                emitJson({ ok: inspection.exists && inspection.state !== null, ...inspection });
+            else
+                renderSupervisorInspection(inspection);
+            if (!inspection.exists || !inspection.state)
+                process.exitCode = 1;
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    supervise
+        .command('stop')
+        .description('Stop the detached supervisor without finishing the governed session')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--session-id <id>', 'Session ID (default: active session or active guard pointer)')
+        .option('--guard-path <path>', 'Guard artifact path')
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        try {
+            const { repoRoot, artifact, session } = requireGuardContext(options);
+            const stopped = (0, agent_guard_supervisor_1.stopAgentGuardSupervisor)(repoRoot, session.sessionId);
+            if (stopped.state) {
+                await recordSupervisorEvent({
+                    repoRoot,
+                    sessionId: session.sessionId,
+                    type: 'agent_guard_supervisor_stopped',
+                    message: stopped.signaled
+                        ? 'Agent guard supervisor stop requested.'
+                        : 'Agent guard supervisor stopped.',
+                    detail: {
+                        guardId: artifact.guardId,
+                        pid: stopped.state.pid,
+                        status: stopped.effectiveStatus,
+                        signaled: stopped.signaled,
+                    },
+                });
+            }
+            if (options.json)
+                emitJson({ ok: stopped.state !== null, ...stopped });
+            else
+                renderSupervisorInspection((0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, session.sessionId));
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    supervise
+        .command('run')
+        .description('Run the guard supervisor in the foreground (internal/process-manager mode)')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--session-id <id>', 'Session ID (default: active session or active guard pointer)')
+        .option('--guard-path <path>', 'Guard artifact path')
+        .option('--debounce-ms <ms>', 'File-change debounce in milliseconds', (value) => Number.parseInt(value, 10))
+        .option('--heartbeat-ms <ms>', 'Supervisor heartbeat interval in milliseconds', (value) => Number.parseInt(value, 10))
+        .option('--exit-after-ms <ms>', 'Stop automatically after a duration (test/process-manager support)', (value) => Number.parseInt(value, 10))
+        .option('--no-initial-evaluation', 'Wait for the first file change before evaluating')
+        .option('--json-lines', 'Emit source-free JSON line updates')
+        .action(async (options) => {
+        try {
+            const { repoRoot, guardRead, session } = requireGuardContext(options);
+            const finalState = await (0, agent_guard_supervisor_1.runAgentGuardSupervisor)({
+                repoRoot,
+                sessionId: session.sessionId,
+                guardPath: guardRead.path,
+                debounceMs: options.debounceMs,
+                heartbeatMs: options.heartbeatMs,
+                exitAfterMs: options.exitAfterMs,
+                evaluateImmediately: options.initialEvaluation !== false,
+                onEvaluate: async () => {
+                    const { evaluation } = await evaluateAndPublishGuardStatus({
+                        dir: repoRoot,
+                        sessionId: session.sessionId,
+                        guardPath: guardRead.path,
+                    });
+                    if (options.jsonLines)
+                        emitJsonLine({ type: 'evaluation', evaluation });
+                    return {
+                        pass: evaluation.pass,
+                        changedFiles: evaluation.summary.changedFiles,
+                        evaluatedAt: evaluation.generatedAt,
+                    };
+                },
+                onState: options.jsonLines
+                    ? (state) => emitJsonLine({ type: 'supervisor_state', state })
+                    : undefined,
+            });
+            if (options.jsonLines)
+                emitJsonLine({ type: 'supervisor_stopped', state: finalState });
+        }
+        catch (error) {
+            if (options.jsonLines) {
+                emitJsonLine({ ok: false, error: error instanceof Error ? error.message : String(error) });
+                process.exitCode = 1;
+            }
+            else {
+                emitError(error);
+            }
         }
     });
 }
