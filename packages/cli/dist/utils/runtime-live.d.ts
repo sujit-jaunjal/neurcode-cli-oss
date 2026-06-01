@@ -26,6 +26,7 @@ export declare function flushRuntimeLiveOutbox(repoRoot: string, options?: {
 }): Promise<RuntimeLiveOutboxFlushResult>;
 export declare function applyPendingRuntimeLiveApprovals(repoRoot: string, sessionId: string): Promise<{
     applied: number;
+    revoked: number;
     failed: number;
 }>;
 //# sourceMappingURL=runtime-live.d.ts.map

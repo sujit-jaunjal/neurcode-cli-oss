@@ -181,10 +181,20 @@ function enqueue(repoRoot, sessionId, eventType, payload) {
         const approvalId = eventType === 'approval_ack' && typeof payload.approvalId === 'string'
             ? payload.approvalId
             : null;
+        const approvalStatus = eventType === 'approval_ack'
+            && typeof payload.body === 'object'
+            && payload.body !== null
+            && typeof payload.body.status === 'string'
+            ? payload.body.status
+            : null;
         if (approvalId) {
             const existing = outbox.events.find((event) => event.eventType === 'approval_ack'
                 && event.sessionId === sessionId
-                && event.payload.approvalId === approvalId);
+                && event.payload.approvalId === approvalId
+                && (approvalStatus === null
+                    || (typeof event.payload.body === 'object'
+                        && event.payload.body !== null
+                        && event.payload.body.status === approvalStatus)));
             if (existing)
                 return existing;
         }

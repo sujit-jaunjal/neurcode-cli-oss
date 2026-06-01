@@ -201,11 +201,16 @@ async function handleCheck(cmdCwd) {
         const hasPriorBlock = session.events.some((event) => event.type === 'check_block');
         if (hasPriorBlock) {
             const pending = await (0, runtime_live_1.applyPendingRuntimeLiveApprovals)(repoRoot, session.sessionId);
-            if (pending.applied > 0) {
+            if (pending.applied > 0 || pending.revoked > 0) {
                 const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
                 if (refreshed)
                     session = refreshed;
+            }
+            if (pending.applied > 0) {
                 diagnostic(`applied ${pending.applied} dashboard approval${pending.applied === 1 ? '' : 's'}`);
+            }
+            if (pending.revoked > 0) {
+                diagnostic(`revoked ${pending.revoked} dashboard approval${pending.revoked === 1 ? '' : 's'}`);
             }
         }
     }

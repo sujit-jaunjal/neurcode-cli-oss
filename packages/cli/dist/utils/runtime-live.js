@@ -190,9 +190,36 @@ async function applyPendingRuntimeLiveApprovals(repoRoot, sessionId) {
     await flushRuntimeLiveOutbox(repoRoot, { maxEvents: 20, timeoutMs: 750 });
     const approvals = await fetchPendingApprovals(repoRoot, sessionId);
     let applied = 0;
+    let revoked = 0;
     let failed = 0;
     for (const approval of approvals) {
-        if (approval.status !== 'pending' || !approval.path)
+        if (!approval.path)
+            continue;
+        if (approval.status === 'revoked') {
+            try {
+                (0, governance_runtime_1.revokeSessionApproval)(repoRoot, approval.path, {
+                    sessionId,
+                    requestId: approval.id,
+                    source: 'dashboard',
+                    revokedBy: approval.revokedBy || null,
+                    reason: approval.revocationReason || 'dashboard live approval revoked',
+                });
+                revoked += 1;
+                queueApprovalAcknowledgement(repoRoot, sessionId, approval, {
+                    status: 'revoked',
+                    appliedPath: approval.path,
+                });
+            }
+            catch (error) {
+                failed += 1;
+                queueApprovalAcknowledgement(repoRoot, sessionId, approval, {
+                    status: 'failed',
+                    message: error instanceof Error ? error.message : String(error),
+                });
+            }
+            continue;
+        }
+        if (approval.status !== 'pending')
             continue;
         try {
             const session = (0, governance_runtime_1.loadSession)(repoRoot, sessionId);
@@ -226,6 +253,6 @@ async function applyPendingRuntimeLiveApprovals(repoRoot, sessionId) {
         }
     }
     await flushRuntimeLiveOutbox(repoRoot, { maxEvents: 20, timeoutMs: 750 });
-    return { applied, failed };
+    return { applied, revoked, failed };
 }
 //# sourceMappingURL=runtime-live.js.map

@@ -135,13 +135,16 @@ export interface RuntimeLiveApproval {
     sessionId: string;
     path: string;
     reason?: string | null;
-    status: 'pending' | 'applied' | 'failed' | string;
+    status: 'pending' | 'applied' | 'failed' | 'denied' | 'revoked' | string;
     expiresAt?: string | null;
     appliedPath?: string | null;
     requestedAt?: string;
     appliedAt?: string | null;
     failedAt?: string | null;
     failureMessage?: string | null;
+    revokedBy?: string | null;
+    revokedAt?: string | null;
+    revocationReason?: string | null;
 }
 export interface OrgGovernanceSettingsResponse {
     settings: {
@@ -378,7 +381,7 @@ export declare class ApiClient {
         approvals: RuntimeLiveApproval[];
     }>;
     acknowledgeRuntimeLiveApproval(sessionId: string, approvalId: string, body: {
-        status?: 'applied' | 'failed';
+        status?: 'applied' | 'failed' | 'revoked';
         appliedPath?: string;
         message?: string;
     }): Promise<{
