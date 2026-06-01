@@ -2,9 +2,11 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.agentCommand = agentCommand;
 const node_fs_1 = require("node:fs");
+const node_child_process_1 = require("node:child_process");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const v0_governance_1 = require("../utils/v0-governance");
+const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 const runtime_adapter_1 = require("./runtime-adapter");
 const session_1 = require("./session");
 let chalk;
@@ -123,6 +125,313 @@ function renderDecision(result, target) {
         console.log(chalk.dim(`Path: ${target}`));
     console.log(chalk.dim(`Adapter: ${result.adapter} · ${result.enforcementLevel} · ${result.eventType}`));
 }
+function capabilityFor(adapter) {
+    return (0, governance_runtime_1.listAgentRuntimeAdapterCapabilities)().find((capability) => capability.adapter === adapter);
+}
+function firstRunCommands(input) {
+    const session = input.sessionIdPlaceholder || '<session-id>';
+    if (input.target === 'claude') {
+        return {
+            activate: 'neurcode activate claude',
+            start: `neurcode run claude --goal "${input.goal}"`,
+            status: 'neurcode status',
+            approve: 'neurcode session approve --path <exact-path> --reason "<reason>"',
+        };
+    }
+    return {
+        setup: `neurcode agent setup ${input.target} --write --write-instructions`,
+        start: `neurcode agent start ${input.target} --goal "${input.goal}"`,
+        handshake: `neurcode agent handshake --adapter ${input.adapter} --session-id ${session}`,
+        plan: `neurcode agent plan --adapter ${input.adapter} --session-id ${session} --plan "<source-free plan>"`,
+        check: `neurcode agent check <repo-relative-path> --adapter ${input.adapter} --session-id ${session}`,
+        approve: `neurcode agent approve <exact-path> --adapter ${input.adapter} --session-id ${session} --reason "<reason>"`,
+        finish: `neurcode agent finish --adapter ${input.adapter} --session-id ${session}`,
+    };
+}
+function buildSetupPayload(agentArg, options) {
+    const repoRoot = repoRootFrom({ dir: options.dir });
+    const target = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agentArg);
+    const snippet = (0, agent_adapter_setup_1.buildAgentSetupSnippet)({
+        target,
+        repoRoot,
+        global: options.global === true,
+    });
+    const instructionArtifact = (0, agent_adapter_setup_1.buildAgentInstructionArtifact)({ target, repoRoot });
+    const capability = capabilityFor(snippet.adapter);
+    const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: options.forceProfile === true });
+    const before = (0, agent_adapter_setup_1.inspectAgentSetup)({
+        target,
+        repoRoot,
+        global: options.global === true,
+    });
+    const instructionsBefore = (0, agent_adapter_setup_1.inspectAgentInstructions)({ target, repoRoot });
+    const write = options.write
+        ? (0, agent_adapter_setup_1.writeAgentSetup)({
+            target,
+            repoRoot,
+            global: options.global === true,
+        })
+        : {
+            status: 'not_requested',
+            configPath: snippet.configPath,
+            message: 'Run with --write to update known Codex/Cursor MCP config automatically.',
+        };
+    const instructionWrite = options.writeInstructions
+        ? (0, agent_adapter_setup_1.writeAgentInstructions)({ target, repoRoot })
+        : {
+            status: 'not_requested',
+            filePath: instructionArtifact.filePath,
+            message: 'Run with --write-instructions to add repo-native agent runtime instructions.',
+        };
+    const after = (0, agent_adapter_setup_1.inspectAgentSetup)({
+        target,
+        repoRoot,
+        global: options.global === true,
+    });
+    const instructionsAfter = (0, agent_adapter_setup_1.inspectAgentInstructions)({ target, repoRoot });
+    const goal = options.goal || 'modify src/tasks/export.py';
+    return {
+        schemaVersion: agent_adapter_setup_1.AGENT_ADAPTER_SETUP_SCHEMA_VERSION,
+        ok: true,
+        generatedAt: new Date().toISOString(),
+        repoRoot,
+        privacy: {
+            metadataOnly: true,
+            sourceUploaded: false,
+            sourceIncluded: false,
+        },
+        target,
+        adapter: snippet.adapter,
+        enforcement: {
+            level: capability?.enforcementLevel ?? 'cooperative',
+            automatic: capability?.automatic ?? false,
+            description: capability?.description ?? 'Portable MCP runtime adapter.',
+        },
+        profile: {
+            status: profile.status,
+            refreshed: profile.refreshed,
+            profileHash: profile.profile.profileHash,
+            topologyHash: profile.profile.topology.hash,
+            trackedFileCount: profile.profile.topology.trackedFileCount,
+            reasons: [...profile.reasons],
+        },
+        mcp: {
+            before,
+            after,
+            snippet,
+            write,
+        },
+        instructions: {
+            before: instructionsBefore,
+            after: instructionsAfter,
+            artifact: instructionArtifact,
+            write: instructionWrite,
+        },
+        firstRun: {
+            goal,
+            commands: firstRunCommands({ target, adapter: snippet.adapter, goal }),
+            expectedFlow: [
+                'start governed session',
+                'agent handshakes into session',
+                'agent captures source-free plan',
+                'agent calls check before each write',
+                'human approves exact path only when needed',
+                'session finishes with replayable evidence',
+            ],
+        },
+    };
+}
+function statusLabel(status) {
+    if (status === 'pass')
+        return chalk.green('PASS');
+    if (status === 'warn')
+        return chalk.yellow('WARN');
+    if (status === 'fail')
+        return chalk.red('FAIL');
+    return chalk.dim('SKIP');
+}
+function renderSetup(payload) {
+    console.log('');
+    console.log(chalk.bold(`Neurcode agent setup - ${payload.target}`));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Repo:     ${chalk.white(payload.repoRoot)}`);
+    console.log(`Adapter:  ${payload.adapter} ${chalk.dim(`(${payload.enforcement.level}${payload.enforcement.automatic ? ', automatic' : ', explicit'})`)}`);
+    console.log(`Profile:  ${payload.profile.refreshed ? chalk.green('refreshed') : chalk.green(payload.profile.status)} ${chalk.dim(payload.profile.profileHash)}`);
+    console.log(`MCP:      ${payload.mcp.after.configured === true ? chalk.green('configured') : payload.mcp.after.configured === false ? chalk.yellow('not configured') : chalk.dim('manual')}`);
+    console.log(`Rules:    ${payload.instructions.after.installed === true ? chalk.green('installed') : payload.instructions.after.installed === false ? chalk.yellow('missing') : chalk.dim('optional')}`);
+    if (payload.mcp.snippet.configPath) {
+        console.log(`Config:   ${chalk.white(payload.mcp.snippet.configPath)}`);
+    }
+    console.log(`Write:    ${payload.mcp.write.status} ${chalk.dim(payload.mcp.write.message)}`);
+    console.log(`Instr:    ${payload.instructions.write.status} ${chalk.dim(payload.instructions.write.message)}`);
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(chalk.bold('MCP config'));
+    console.log(chalk.dim(`# Destination: ${payload.mcp.snippet.destination}`));
+    console.log(chalk.dim(`# Action: ${payload.mcp.snippet.instruction}`));
+    console.log(payload.mcp.snippet.body.trimEnd());
+    console.log('');
+    console.log(chalk.bold('Agent instructions'));
+    console.log(chalk.dim(`# Destination: ${payload.instructions.artifact.destination}`));
+    console.log(chalk.dim(`# Action: ${payload.instructions.artifact.instruction}`));
+    console.log(payload.instructions.artifact.body.trimEnd());
+    console.log('');
+    console.log(chalk.bold('First governed session'));
+    for (const [name, command] of Object.entries(payload.firstRun.commands)) {
+        console.log(chalk.dim(`  ${name.padEnd(10)} ${command}`));
+    }
+    console.log('');
+}
+function npxCheck() {
+    const result = (0, node_child_process_1.spawnSync)('npx', ['--version'], { encoding: 'utf8' });
+    if (result.status === 0) {
+        return {
+            id: 'npx',
+            label: 'npx',
+            status: 'pass',
+            message: `npx ${String(result.stdout || '').trim()} is available for zero-install MCP startup.`,
+        };
+    }
+    return {
+        id: 'npx',
+        label: 'npx',
+        status: 'fail',
+        message: 'npx is not available, so agent MCP clients cannot start @neurcode-ai/mcp-server with the generated config.',
+        recommendation: 'Install Node.js >=18 or configure your MCP client to use a locally installed neurcode-mcp binary.',
+    };
+}
+function configCheck(inspection) {
+    if (inspection.configured === true) {
+        return {
+            id: 'mcp_config',
+            label: 'MCP config',
+            status: 'pass',
+            message: inspection.message,
+        };
+    }
+    if (inspection.configured === false) {
+        return {
+            id: 'mcp_config',
+            label: 'MCP config',
+            status: 'warn',
+            message: inspection.message,
+            recommendation: `Run neurcode agent setup ${inspection.target} --write, or paste the emitted snippet manually.`,
+        };
+    }
+    return {
+        id: 'mcp_config',
+        label: 'MCP config',
+        status: 'skip',
+        message: inspection.message,
+    };
+}
+function instructionCheck(inspection) {
+    if (inspection.installed === true) {
+        return {
+            id: 'agent_instructions',
+            label: 'Agent instructions',
+            status: 'pass',
+            message: inspection.message,
+        };
+    }
+    if (inspection.installed === false) {
+        return {
+            id: 'agent_instructions',
+            label: 'Agent instructions',
+            status: 'warn',
+            message: inspection.message,
+            recommendation: `Run neurcode agent setup ${inspection.target} --write-instructions, or paste the emitted instruction block manually.`,
+        };
+    }
+    return {
+        id: 'agent_instructions',
+        label: 'Agent instructions',
+        status: 'skip',
+        message: inspection.message,
+    };
+}
+function buildDoctorPayload(agentArg, options) {
+    const repoRoot = repoRootFrom({ dir: options.dir });
+    const target = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agentArg);
+    const inspection = (0, agent_adapter_setup_1.inspectAgentSetup)({
+        target,
+        repoRoot,
+        global: options.global === true,
+    });
+    const instructionInspection = (0, agent_adapter_setup_1.inspectAgentInstructions)({ target, repoRoot });
+    const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
+    const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const capability = capabilityFor(inspection.adapter);
+    const checks = [
+        {
+            id: 'adapter',
+            label: 'Adapter capability',
+            status: 'pass',
+            message: `${inspection.adapter} reports ${capability?.enforcementLevel ?? 'cooperative'} enforcement (${capability?.automatic ? 'automatic' : 'explicit agent calls'}).`,
+        },
+        configCheck(inspection),
+        instructionCheck(instructionInspection),
+        npxCheck(),
+        {
+            id: 'profile',
+            label: 'Governance profile',
+            status: staleness.status === 'fresh' ? 'pass' : 'warn',
+            message: staleness.status === 'fresh'
+                ? `Fresh profile at ${staleness.profilePath} (${staleness.currentProfile.topology.trackedFileCount} tracked files).`
+                : `${staleness.status}: ${staleness.reasons.join('; ') || 'profile needs refresh'}.`,
+            recommendation: staleness.status === 'fresh' ? undefined : `Run neurcode agent setup ${target} --force-profile.`,
+        },
+        {
+            id: 'active_session',
+            label: 'Active session',
+            status: activeSession?.status === 'active' ? 'pass' : 'skip',
+            message: activeSession?.status === 'active'
+                ? `Session ${activeSession.sessionId} is active (${activeSession.contract.scopeMode} scope).`
+                : 'No active governed session. Start one with neurcode agent start.',
+        },
+    ];
+    const summary = {
+        pass: checks.filter((item) => item.status === 'pass').length,
+        warn: checks.filter((item) => item.status === 'warn').length,
+        fail: checks.filter((item) => item.status === 'fail').length,
+        skip: checks.filter((item) => item.status === 'skip').length,
+    };
+    return {
+        schemaVersion: agent_adapter_setup_1.AGENT_ADAPTER_DOCTOR_SCHEMA_VERSION,
+        ok: summary.fail === 0,
+        generatedAt: new Date().toISOString(),
+        repoRoot,
+        target,
+        adapter: inspection.adapter,
+        checks,
+        summary,
+        next: summary.fail > 0
+            ? 'Resolve failed checks before relying on agent MCP calls.'
+            : inspection.configured === false
+                ? `Run neurcode agent setup ${target} --write or paste the MCP snippet.`
+                : instructionInspection.installed === false
+                    ? `Run neurcode agent setup ${target} --write-instructions or paste the agent instruction block.`
+                    : `Run neurcode agent start ${target} --goal "<task>".`,
+    };
+}
+function renderDoctor(payload) {
+    console.log('');
+    console.log(chalk.bold(`Neurcode agent doctor - ${payload.target}`));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Repo:    ${chalk.white(payload.repoRoot)}`);
+    console.log(`Adapter: ${payload.adapter}`);
+    console.log('');
+    for (const check of payload.checks) {
+        console.log(`${statusLabel(check.status)} ${chalk.bold(check.label)}`);
+        console.log(chalk.dim(`  ${check.message}`));
+        if (check.recommendation)
+            console.log(chalk.dim(`  Next: ${check.recommendation}`));
+        console.log('');
+    }
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Pass ${payload.summary.pass} | Warn ${payload.summary.warn} | Fail ${payload.summary.fail} | Skip ${payload.summary.skip}`);
+    console.log(chalk.dim(`Next: ${payload.next}`));
+    console.log('');
+}
 function agentCommand(program) {
     const cmd = program
         .command('agent')
@@ -140,6 +449,48 @@ function agentCommand(program) {
         for (const capability of capabilities) {
             console.log(`${capability.adapter.padEnd(18)} ${capability.enforcementLevel.padEnd(20)} ` +
                 `${capability.automatic ? 'automatic' : 'explicit'} · ${capability.description}`);
+        }
+    });
+    cmd
+        .command('setup [agent]')
+        .description('Prepare MCP config and first-run commands for Codex, Cursor, Claude, or generic MCP')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--goal <goal>', 'Example first governed task for generated commands')
+        .option('--write', 'Write known MCP config entries for Codex/Cursor')
+        .option('--write-instructions', 'Write repo-native agent instructions (AGENTS.md, Cursor rules, or NEURCODE_AGENT.md)')
+        .option('--global', 'For Cursor, write/check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
+        .option('--force-profile', 'Force refresh the repo governance profile')
+        .option('--json', 'Output machine-readable JSON')
+        .action((agent, options) => {
+        try {
+            const payload = buildSetupPayload(agent, options);
+            if (options.json)
+                emitJson(payload);
+            else
+                renderSetup(payload);
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    cmd
+        .command('doctor [agent]')
+        .description('Check whether an agent adapter is ready to call the Neurcode runtime')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--global', 'For Cursor, check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
+        .option('--json', 'Output machine-readable JSON')
+        .action((agent, options) => {
+        try {
+            const payload = buildDoctorPayload(agent, options);
+            if (options.json)
+                emitJson(payload);
+            else
+                renderDoctor(payload);
+            if (!payload.ok)
+                process.exitCode = 1;
+        }
+        catch (error) {
+            emitError(error, options.json);
         }
     });
     cmd
