@@ -101,13 +101,14 @@ function readFirstExisting(cwd, candidates) {
     }
     return { path: null, content: null };
 }
-const EMPTY_GOVERNANCE_CONFIG = Object.freeze({
+const EMPTY_GOVERNANCE_CONFIG = {
     approvalRequiredGlobs: [],
     sensitiveGlobs: [],
     safeSupportGlobs: [],
     ignoredGlobs: [],
     planCoherence: 'warn',
-});
+    architectureObligations: { mode: 'warn', ruleModes: {} },
+};
 function normalizeStringArray(value, field, errors) {
     if (value === undefined)
         return [];
@@ -166,6 +167,7 @@ function readRuntimeGovernanceConfig(repoRoot) {
         safeSupportGlobs: normalizeStringArray(parsed.safeSupportGlobs, 'safeSupportGlobs', errors),
         ignoredGlobs: normalizeStringArray(parsed.ignoredGlobs, 'ignoredGlobs', errors),
         planCoherence: normalizePlanCoherence(parsed.planCoherence, errors),
+        architectureObligations: (0, governance_runtime_1.normalizeArchitectureObligationPolicy)(parsed.architectureObligations),
     };
     return {
         path,

@@ -20,7 +20,12 @@ interface SessionCommandOptions {
     local?: boolean;
     dir?: string;
     path?: string;
+    obligationId?: string;
     reason?: string;
+    expiresAt?: string;
+    ttlMinutes?: number;
+    waivedBy?: string;
+    waiverSource?: 'local_cli' | 'dashboard' | 'mcp' | 'unknown';
     plan?: string;
     planFile?: string;
     summary?: string;
@@ -82,6 +87,7 @@ export declare function replanGovernanceSessionCommand(options?: SessionCommandO
 export declare function decideGovernanceReplanCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function approveGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function showGovernanceObligationsCommand(options?: SessionCommandOptions): void;
+export declare function waiveGovernanceObligationCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function listRuntimeSessionsCommand(options?: SessionCommandOptions): void;
 export declare function showRuntimeSessionCommand(sessionId: string, options?: SessionCommandOptions): void;
 /**

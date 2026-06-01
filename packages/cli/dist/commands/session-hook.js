@@ -183,6 +183,14 @@ async function handleCheck(cmdCwd) {
     catch {
         // Expiry cleanup is best-effort; checkFileBoundary still ignores expired grants.
     }
+    try {
+        const expired = (0, governance_runtime_1.expireArchitectureObligationWaivers)(repoRoot, session.sessionId);
+        if (expired)
+            session = expired;
+    }
+    catch {
+        // Waiver expiry cleanup is best-effort; obligation evaluation uses timestamps.
+    }
     // ── Agent plan capture ───────────────────────────────────────────────────
     // ExitPlanMode / TodoWrite PreToolUse payloads carry the agent's own plan but
     // no file path — capture it before the no-path early return below.
@@ -338,6 +346,16 @@ async function handleCheck(cmdCwd) {
             message: `⏸ Neurcode: ${filePath} is not justified by the agent's stated plan. ` +
                 `${planCoherencePolicy.reason} Re-plan or update the plan before editing this path. ` +
                 `Use neurcode_session_replan or \`neurcode session replan --add-file ${filePath}\`.`,
+        };
+    }
+    else if (result.verdict === 'ok' && architectureObligationFeedback.action === 'block') {
+        result = {
+            ...result,
+            verdict: 'block',
+            message: `⏸ Neurcode: ${filePath} is blocked by ${architectureObligationFeedback.blocking.length} ` +
+                `architecture obligation${architectureObligationFeedback.blocking.length === 1 ? '' : 's'}. ` +
+                `${architectureObligationFeedback.reasons[0]} Satisfy the obligation, re-plan, or ask the human to waive it with ` +
+                `neurcode_session_waive_obligation.`,
         };
     }
     else if (result.verdict === 'ok' && intentCoherence.verdict === 'drift') {

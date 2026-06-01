@@ -49,6 +49,7 @@ exports.replanGovernanceSessionCommand = replanGovernanceSessionCommand;
 exports.decideGovernanceReplanCommand = decideGovernanceReplanCommand;
 exports.approveGovernanceSessionCommand = approveGovernanceSessionCommand;
 exports.showGovernanceObligationsCommand = showGovernanceObligationsCommand;
+exports.waiveGovernanceObligationCommand = waiveGovernanceObligationCommand;
 exports.listRuntimeSessionsCommand = listRuntimeSessionsCommand;
 exports.showRuntimeSessionCommand = showRuntimeSessionCommand;
 exports.listSessionsCommand = listSessionsCommand;
@@ -128,6 +129,10 @@ function eventLabel(event) {
         return 'PLAN';
     if (event.type === 'plan_amended')
         return 'REPLAN';
+    if (event.type === 'obligation_waiver_decision')
+        return 'WAIVE';
+    if (event.type === 'obligation_state_changed')
+        return 'OBLIG';
     if (event.type === 'session_finish')
         return 'FINISH';
     return event.type.toUpperCase();
@@ -460,13 +465,17 @@ function showGovernanceObligationsCommand(options = {}) {
             sessionId: session.sessionId,
             summary,
             obligations,
+            waivers: session.contract.architectureObligationWaivers ?? [],
+            policy: session.contract.architectureObligationPolicy ?? { mode: 'warn', ruleModes: {} },
         }, null, 2));
         return;
     }
     console.log('');
     console.log(chalk.bold(`Architecture obligations · ${session.sessionId}`));
     console.log(chalk.dim('-'.repeat(72)));
-    console.log(`Summary: ${chalk.white(`${summary.satisfied}/${summary.total} satisfied`)}${summary.criticalPending ? chalk.yellow(` · ${summary.criticalPending} critical pending`) : ''}`);
+    const policy = session.contract.architectureObligationPolicy ?? { mode: 'warn', ruleModes: {} };
+    console.log(`Policy:  ${chalk.white(policy.mode)}${Object.keys(policy.ruleModes).length ? chalk.dim(` · ${Object.keys(policy.ruleModes).length} rule override(s)`) : ''}`);
+    console.log(`Summary: ${chalk.white(`${summary.satisfied}/${summary.total} satisfied`)}${summary.waived ? chalk.yellow(` · ${summary.waived} waived`) : ''}${summary.blockingPending ? chalk.red(` · ${summary.blockingPending} blocking pending`) : summary.criticalPending ? chalk.yellow(` · ${summary.criticalPending} critical pending`) : ''}`);
     console.log('');
     if (obligations.length === 0) {
         console.log(chalk.dim('No deterministic architecture obligations derived for this session.'));
@@ -474,13 +483,62 @@ function showGovernanceObligationsCommand(options = {}) {
     for (const obligation of obligations) {
         const status = obligation.status === 'satisfied'
             ? chalk.green('satisfied')
-            : chalk.yellow('pending');
-        console.log(`${status.padEnd(18)} ${chalk.white(obligation.title)}`);
+            : obligation.status === 'waived'
+                ? chalk.yellow('waived')
+                : chalk.yellow('pending');
+        console.log(`${status.padEnd(18)} ${chalk.white(obligation.title)} ${chalk.dim(`[${obligation.effectiveMode ?? 'warn'}]`)}`);
         console.log(chalk.dim(`  ${obligation.requiredEvidence[0]}`));
         if (obligation.observedEvidence[0])
             console.log(chalk.dim(`  evidence: ${obligation.observedEvidence[0].summary}`));
+        if (obligation.status === 'pending')
+            console.log(chalk.dim(`  waive: neurcode session waive-obligation --id ${obligation.id} --reason "<why>"`));
     }
     console.log('');
+}
+async function waiveGovernanceObligationCommand(options = {}) {
+    if (!options.obligationId) {
+        (0, messages_1.printError)('Missing Obligation ID', undefined, [
+            'Usage: neurcode session waive-obligation --id <obligation-id> --reason "<why>"',
+        ]);
+        process.exitCode = 2;
+        return;
+    }
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    try {
+        const result = (0, governance_runtime_1.waiveArchitectureObligation)(repoRoot, options.obligationId, {
+            reason: options.reason,
+            sessionId: options.sessionId,
+            expiresAt: options.expiresAt,
+            ttlMs: typeof options.ttlMinutes === 'number' && Number.isFinite(options.ttlMinutes)
+                ? Math.max(0, Math.floor(options.ttlMinutes * 60 * 1000))
+                : undefined,
+            waivedBy: options.waivedBy,
+            source: options.waiverSource || 'local_cli',
+        });
+        const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
+        if (session)
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: true, repoRoot, ...result }, null, 2));
+            return;
+        }
+        console.log('');
+        console.log(chalk.yellow(`Waived obligation: ${result.obligationId}`));
+        console.log(chalk.dim(`Session:  ${result.sessionId}`));
+        console.log(chalk.dim(`Expires:  ${result.expiresAt || 'never'}`));
+        console.log(chalk.dim(`Reason:   ${result.waiver.reason}`));
+        console.log('');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: false, repoRoot, error: message }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)('Obligation Waiver Failed', message);
+        }
+        process.exitCode = 1;
+    }
 }
 function listRuntimeSessionsCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());

@@ -1000,6 +1000,31 @@ sessionCmd
         json: options.json === true,
     });
 });
+sessionCmd
+    .command('waive-obligation')
+    .description('Waive one pending architecture obligation for the active in-flow session')
+    .requiredOption('--id <obligation-id>', 'Architecture obligation ID to waive')
+    .requiredOption('--reason <text>', 'Human-readable waiver reason')
+    .option('--session-id <id>', 'Session ID to update (default: active session)')
+    .option('--expires-at <iso>', 'Absolute waiver expiry timestamp')
+    .option('--ttl-minutes <n>', 'Waiver TTL in minutes (default: 60)', (value) => Number.parseFloat(value))
+    .option('--waived-by <identity>', 'Human identity recording the waiver')
+    .option('--source <source>', 'Waiver source: local_cli | dashboard | mcp | unknown', 'local_cli')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.waiveGovernanceObligationCommand)({
+        obligationId: options.id,
+        reason: options.reason,
+        sessionId: options.sessionId,
+        expiresAt: options.expiresAt,
+        ttlMinutes: Number.isFinite(options.ttlMinutes) ? options.ttlMinutes : undefined,
+        waivedBy: options.waivedBy,
+        waiverSource: ['local_cli', 'dashboard', 'mcp', 'unknown'].includes(options.source) ? options.source : 'local_cli',
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
 function collectOption(value, previous = []) {
     return [...previous, value];
 }
