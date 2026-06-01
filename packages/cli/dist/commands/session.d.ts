@@ -8,7 +8,7 @@
  * - neurcode session end     - End the current or specified session
  * - neurcode session status  - Show status of current session
  */
-import { type AgentPlan, type AgentPlanAmendmentProposal, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
+import { type AgentPlan, type AgentPlanAmendmentProposal, type ArchitectureObligation, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
 import { type RuntimeConnection } from '../utils/runtime-connection';
 interface SessionCommandOptions {
     sessionId?: string;
@@ -59,6 +59,7 @@ interface PresentLocalGovernanceStatus {
     agentPlan: AgentPlan | null;
     agentPlanRevision: number | null;
     pendingPlanAmendments: AgentPlanAmendmentProposal[];
+    architectureObligations: ArchitectureObligation[];
     allowedGlobs: string[];
     sensitiveGlobs: string[];
     approvalRequiredGlobs: string[];
@@ -80,6 +81,7 @@ export declare function localGovernanceStatusCommand(options?: SessionCommandOpt
 export declare function replanGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function decideGovernanceReplanCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function approveGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
+export declare function showGovernanceObligationsCommand(options?: SessionCommandOptions): void;
 export declare function listRuntimeSessionsCommand(options?: SessionCommandOptions): void;
 export declare function showRuntimeSessionCommand(sessionId: string, options?: SessionCommandOptions): void;
 /**

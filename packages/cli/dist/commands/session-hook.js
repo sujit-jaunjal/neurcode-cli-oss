@@ -330,6 +330,7 @@ async function handleCheck(cmdCwd) {
     const intentCoherence = (0, governance_runtime_1.evaluateIntentCoherence)(session.contract, filePath);
     const planCoherence = (0, governance_runtime_1.evaluateSessionPlanCoherence)(session.contract, filePath);
     const planCoherencePolicy = (0, governance_runtime_1.evaluatePlanCoherencePolicy)(session.contract.planCoherenceMode, planCoherence);
+    const architectureObligationFeedback = (0, governance_runtime_1.evaluateArchitectureObligationFeedback)(session.contract.architectureObligations ?? [], filePath);
     if (result.verdict === 'ok' && planCoherencePolicy.action === 'block') {
         result = {
             ...result,
@@ -345,6 +346,15 @@ async function handleCheck(cmdCwd) {
             verdict: 'warn',
             message: `⚠️ Neurcode: ${filePath} is allowed by boundary rules but weakly linked to the task intent. ` +
                 `${intentCoherence.reasons[0]} Proceeding — recorded in session.`,
+        };
+    }
+    else if (result.verdict === 'ok' && architectureObligationFeedback.action === 'warn') {
+        result = {
+            ...result,
+            verdict: 'warn',
+            message: `⚠️ Neurcode: ${filePath} is allowed, but ${architectureObligationFeedback.pending.length} ` +
+                `architecture obligation${architectureObligationFeedback.pending.length === 1 ? '' : 's'} remain open. ` +
+                `${architectureObligationFeedback.reasons[0]} Proceeding — recorded in session.`,
         };
     }
     else if (result.verdict === 'ok' && planCoherencePolicy.action === 'warn') {
@@ -372,11 +382,13 @@ async function handleCheck(cmdCwd) {
                 intentCoherence,
                 planCoherence,
                 planCoherencePolicy,
+                architectureObligationFeedback,
                 boundaryVerdict,
             },
         };
         (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, event);
-        const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
+        const refreshed = (0, governance_runtime_1.refreshArchitectureObligations)(repoRoot, session.sessionId)
+            || (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
         if (refreshed)
             await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed, { profileFreshness });
     }

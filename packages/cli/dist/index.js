@@ -987,6 +987,19 @@ sessionCmd
         json: options.json === true,
     });
 });
+sessionCmd
+    .command('obligations')
+    .description('Show live source-free architecture obligations for the active in-flow session')
+    .option('--session-id <id>', 'Session ID to inspect (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.showGovernanceObligationsCommand)({
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
 function collectOption(value, previous = []) {
     return [...previous, value];
 }

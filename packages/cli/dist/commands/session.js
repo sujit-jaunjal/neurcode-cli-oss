@@ -48,6 +48,7 @@ exports.localGovernanceStatusCommand = localGovernanceStatusCommand;
 exports.replanGovernanceSessionCommand = replanGovernanceSessionCommand;
 exports.decideGovernanceReplanCommand = decideGovernanceReplanCommand;
 exports.approveGovernanceSessionCommand = approveGovernanceSessionCommand;
+exports.showGovernanceObligationsCommand = showGovernanceObligationsCommand;
 exports.listRuntimeSessionsCommand = listRuntimeSessionsCommand;
 exports.showRuntimeSessionCommand = showRuntimeSessionCommand;
 exports.listSessionsCommand = listSessionsCommand;
@@ -192,6 +193,7 @@ function buildLocalGovernanceStatus(options = {}) {
                 : null,
         pendingPlanAmendments: (session.contract.planAmendmentProposals ?? [])
             .filter((proposal) => proposal.status === 'pending'),
+        architectureObligations: session.contract.architectureObligations ?? [],
         allowedGlobs: session.contract.allowedGlobs,
         sensitiveGlobs: session.contract.sensitiveGlobs,
         approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
@@ -246,6 +248,11 @@ function localGovernanceStatusCommand(options = {}) {
     if (activeStatus.pendingPlanAmendments.length > 0) {
         const proposal = activeStatus.pendingPlanAmendments[0];
         console.log(`Re-plan: ${chalk.yellow(`${proposal.proposalId} pending human decision · ${proposal.risk.level} risk`)}`);
+    }
+    const obligationSummary = (0, governance_runtime_1.summarizeArchitectureObligations)(activeStatus.architectureObligations);
+    console.log(`Obligations: ${chalk.white(`${obligationSummary.satisfied}/${obligationSummary.total} satisfied`)}${obligationSummary.criticalPending ? chalk.yellow(` · ${obligationSummary.criticalPending} critical pending`) : ''}`);
+    for (const obligation of activeStatus.architectureObligations.filter((item) => item.status === 'pending').slice(0, 3)) {
+        console.log(chalk.dim(`  pending ${obligation.severity.padEnd(8)} ${obligation.title}`));
     }
     console.log(`Allowed: ${chalk.dim(compactList(activeStatus.allowedGlobs))}`);
     console.log(`Gates:   ${chalk.dim(compactList(activeStatus.approvalRequiredGlobs))}`);
@@ -430,6 +437,51 @@ async function approveGovernanceSessionCommand(options = {}) {
         process.exitCode = 1;
     }
 }
+function showGovernanceObligationsCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const session = loadLocalGovernanceSession(repoRoot, options.sessionId);
+    if (!session) {
+        const message = options.sessionId
+            ? `Local governance session ${options.sessionId} was not found.`
+            : 'No active in-flow governance session found.';
+        if (options.json)
+            console.log(JSON.stringify({ ok: false, repoRoot, error: message }, null, 2));
+        else
+            (0, messages_1.printError)('Architecture Obligations Unavailable', message);
+        process.exitCode = 1;
+        return;
+    }
+    const obligations = session.contract.architectureObligations ?? [];
+    const summary = (0, governance_runtime_1.summarizeArchitectureObligations)(obligations);
+    if (options.json) {
+        console.log(JSON.stringify({
+            ok: true,
+            repoRoot,
+            sessionId: session.sessionId,
+            summary,
+            obligations,
+        }, null, 2));
+        return;
+    }
+    console.log('');
+    console.log(chalk.bold(`Architecture obligations · ${session.sessionId}`));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Summary: ${chalk.white(`${summary.satisfied}/${summary.total} satisfied`)}${summary.criticalPending ? chalk.yellow(` · ${summary.criticalPending} critical pending`) : ''}`);
+    console.log('');
+    if (obligations.length === 0) {
+        console.log(chalk.dim('No deterministic architecture obligations derived for this session.'));
+    }
+    for (const obligation of obligations) {
+        const status = obligation.status === 'satisfied'
+            ? chalk.green('satisfied')
+            : chalk.yellow('pending');
+        console.log(`${status.padEnd(18)} ${chalk.white(obligation.title)}`);
+        console.log(chalk.dim(`  ${obligation.requiredEvidence[0]}`));
+        if (obligation.observedEvidence[0])
+            console.log(chalk.dim(`  evidence: ${obligation.observedEvidence[0].summary}`));
+    }
+    console.log('');
+}
 function listRuntimeSessionsCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const records = (0, runtime_evidence_1.listRuntimeSessions)(repoRoot);
@@ -510,6 +562,7 @@ function showRuntimeSessionCommand(sessionId, options = {}) {
         agentPlan: session.contract.agentPlan ?? null,
         agentPlanRevision: session.contract.agentPlanRevision ?? (session.contract.agentPlan ? 1 : null),
         agentPlanRevisions: session.contract.agentPlanRevisions ?? [],
+        architectureObligations: session.contract.architectureObligations ?? [],
         allowedGlobs: session.contract.allowedGlobs,
         approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
         approvedPaths: session.contract.approvedPaths,
@@ -535,6 +588,8 @@ function showRuntimeSessionCommand(sessionId, options = {}) {
     if (session.contract.agentPlan?.summary) {
         console.log(`Agent:    ${chalk.white(truncate(session.contract.agentPlan.summary))}`);
     }
+    const obligationSummary = (0, governance_runtime_1.summarizeArchitectureObligations)(session.contract.architectureObligations ?? []);
+    console.log(`Obligations: ${chalk.white(`${obligationSummary.satisfied}/${obligationSummary.total} satisfied`)}${obligationSummary.criticalPending ? chalk.yellow(` · ${obligationSummary.criticalPending} critical pending`) : ''}`);
     console.log(`Allowed:  ${chalk.dim(compactList(session.contract.allowedGlobs))}`);
     console.log(`Gates:    ${chalk.dim(compactList(session.contract.approvalRequiredGlobs))}`);
     console.log(`Approved: ${chalk.dim(compactList(session.contract.approvedPaths))}`);
