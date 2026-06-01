@@ -52,6 +52,12 @@ function cwdFromHookInput(hookInput, fallback) {
     }
     return fallback;
 }
+function sessionIdFromHookInput(hookInput) {
+    const raw = hookInput['session_id'] ||
+        hookInput['sessionId'];
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    return trimmed || undefined;
+}
 /** Emit a diagnostic to stderr without breaking the hook exit code. */
 function diagnostic(msg) {
     process.stderr.write(`[neurcode] ${msg}\n`);
@@ -189,10 +195,15 @@ async function handleCheck(cmdCwd) {
     const hookInput = readHookInput();
     const effectiveCwd = cwdFromHookInput(hookInput, cmdCwd);
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
-    const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const requestedSessionId = sessionIdFromHookInput(hookInput);
+    const activeSession = requestedSessionId
+        ? (0, governance_runtime_1.loadSession)(repoRoot, requestedSessionId)
+        : (0, governance_runtime_1.loadActiveSession)(repoRoot);
     if (!activeSession || activeSession.status !== 'active') {
         // No active session — not governed, pass through
-        diagnostic(`no active session at ${repoRoot} — edit allowed (ungoverned)`);
+        diagnostic(requestedSessionId
+            ? `no active session ${requestedSessionId} at ${repoRoot} — edit allowed (ungoverned)`
+            : `no active session at ${repoRoot} — edit allowed (ungoverned)`);
         process.exit(0);
         return;
     }
@@ -500,7 +511,10 @@ async function handleFinish(cmdCwd) {
     const hookInput = readHookInput();
     const effectiveCwd = cwdFromHookInput(hookInput, cmdCwd);
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
-    const session = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const requestedSessionId = sessionIdFromHookInput(hookInput);
+    const session = requestedSessionId
+        ? (0, governance_runtime_1.loadSession)(repoRoot, requestedSessionId)
+        : (0, governance_runtime_1.loadActiveSession)(repoRoot);
     if (!session || session.status !== 'active')
         return;
     try {

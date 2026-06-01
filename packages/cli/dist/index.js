@@ -69,6 +69,7 @@ const governance_1 = require("./commands/governance");
 const profile_1 = require("./commands/profile");
 const session_hook_1 = require("./commands/session-hook");
 const runtime_adapter_1 = require("./commands/runtime-adapter");
+const agent_1 = require("./commands/agent");
 const activate_1 = require("./commands/activate");
 const run_1 = require("./commands/run");
 const runtime_doctor_1 = require("./commands/runtime-doctor");
@@ -88,6 +89,10 @@ catch (error) {
 }
 const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
+    {
+        command: 'neurcode agent start codex --goal "<task>"',
+        description: 'Start a governed session for non-Claude agents using the universal runtime handshake',
+    },
     {
         command: 'neurcode run claude --goal "<task>"',
         description: 'Start a governed AI coding session and print the agent runtime handshake',
@@ -139,6 +144,7 @@ const CORE_WORKFLOW_STEPS = [
 ];
 const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
     'activate',
+    'agent',
     'run',
     'status',
     'sessions',
@@ -242,7 +248,7 @@ function buildAdvancedLegacyHints(root) {
     return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['activate', 'status', 'sessions', 'report', 'sync', 'login', 'init', 'start', 'quickstart', 'verify', 'remediate-export', 'replay'];
+    const primaryOrder = ['activate', 'agent', 'run', 'status', 'sessions', 'report', 'sync', 'login', 'init', 'start', 'quickstart', 'verify', 'remediate-export', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
@@ -431,6 +437,7 @@ program
 (0, profile_1.profileCommand)(program);
 (0, session_hook_1.sessionHookCommand)(program);
 (0, runtime_adapter_1.runtimeAdapterCommand)(program);
+(0, agent_1.agentCommand)(program);
 (0, activate_1.activateCommand)(program);
 (0, run_1.runCommand)(program);
 (0, runtime_report_1.reportCommand)(program);

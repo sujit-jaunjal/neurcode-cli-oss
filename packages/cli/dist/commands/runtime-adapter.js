@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.submitAgentRuntimeEvent = submitAgentRuntimeEvent;
 exports.runtimeAdapterCommand = runtimeAdapterCommand;
 const node_child_process_1 = require("node:child_process");
 const node_fs_1 = require("node:fs");
@@ -126,7 +127,7 @@ function launcherAdapterMatches(eventAdapter, launchedAdapter) {
         return true;
     return eventAdapter === launchedAdapter || eventAdapter === 'generic-mcp';
 }
-async function handleRuntimeEvent(event) {
+async function submitAgentRuntimeEvent(event) {
     const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)(event.adapter);
     if (!capability.events.includes(event.eventType)) {
         throw new Error(`${event.adapter} does not support ${event.eventType}; supported events: ${capability.events.join(', ')}`);
@@ -167,7 +168,10 @@ async function handleRuntimeEvent(event) {
             return decisionEnvelope(event, 'recorded', 'Governed agent session started.', result.json);
         }
         case 'plan.capture': {
-            const result = runHook(event, 'check', { plan: payload.plan });
+            const result = runHook(event, 'check', {
+                plan: payload.plan,
+                ...(payload.sessionId ? { session_id: payload.sessionId } : {}),
+            });
             if (result.status !== 0)
                 childFailure(event, result);
             return decisionEnvelope(event, 'recorded', 'Agent plan captured for the active session.', result.json);
@@ -197,6 +201,7 @@ async function handleRuntimeEvent(event) {
         }
         case 'edit.before': {
             const result = runHook(event, 'check', {
+                ...(payload.sessionId ? { session_id: payload.sessionId } : {}),
                 tool_name: payload.toolName ?? 'Write',
                 tool_input: { file_path: payload.filePath },
             });
@@ -207,6 +212,7 @@ async function handleRuntimeEvent(event) {
         }
         case 'edit.after': {
             const result = runHook(event, 'check', {
+                ...(payload.sessionId ? { session_id: payload.sessionId } : {}),
                 tool_name: payload.toolName ?? 'Write',
                 tool_input: { file_path: payload.filePath },
             });
@@ -218,7 +224,7 @@ async function handleRuntimeEvent(event) {
                 : 'Post-change observation recorded.', checked.payload, checked.decision === 'deny');
         }
         case 'session.finish': {
-            const result = runHook(event, 'finish');
+            const result = runHook(event, 'finish', payload.sessionId ? { session_id: payload.sessionId } : {});
             if (result.status !== 0)
                 childFailure(event, result);
             return decisionEnvelope(event, 'recorded', 'Governed agent session finished.', result.json);
@@ -318,7 +324,7 @@ function runtimeAdapterCommand(program) {
             if (!normalized.cwd)
                 throw new Error('Unable to resolve the runtime adapter repository root.');
             const event = { ...normalized, cwd: normalized.cwd };
-            emitJson(await handleRuntimeEvent(event));
+            emitJson(await submitAgentRuntimeEvent(event));
         }
         catch (error) {
             emitError(error, Boolean(options.json));
