@@ -1073,6 +1073,56 @@ sessionCmd
         json: options.json === true,
     });
 });
+// `amend-plan` is the human-facing alias of `replan`, matching the documented
+// `neurcode session amend-plan --summary "..." --reason "..." --scope "<glob>"`.
+// It shares the same revisioning engine; `--scope` is sugar for `--add-glob`.
+sessionCmd
+    .command('amend-plan')
+    .description('Amend the active in-flow agent plan (alias of replan; supports --scope)')
+    .option('--plan <text>', 'Full replacement plan text')
+    .option('--plan-file <path>', 'Read replacement plan text from a file')
+    .option('--summary <text>', 'Replace the active plan summary')
+    .option('--scope <glob>', 'Add an expected scope glob to the active plan', collectOption, [])
+    .option('--add-step <text>', 'Add a plan step', collectOption, [])
+    .option('--remove-step <text>', 'Remove a plan step by exact text', collectOption, [])
+    .option('--add-file <path>', 'Add an expected file to the active plan', collectOption, [])
+    .option('--remove-file <path>', 'Remove an expected file from the active plan', collectOption, [])
+    .option('--add-glob <glob>', 'Add an expected glob to the active plan', collectOption, [])
+    .option('--remove-glob <glob>', 'Remove an expected glob from the active plan', collectOption, [])
+    .option('--add-constraint <text>', 'Add a stated plan constraint', collectOption, [])
+    .option('--remove-constraint <text>', 'Remove a stated plan constraint by exact text', collectOption, [])
+    .option('--add-risk <text>', 'Add a stated plan risk/caveat', collectOption, [])
+    .option('--remove-risk <text>', 'Remove a stated plan risk/caveat by exact text', collectOption, [])
+    .option('--reason <text>', 'Why the plan changed')
+    .option('--proposed-by <actor>', 'Proposal actor: human | agent', 'human')
+    .option('--decided-by <identity>', 'Human identity when a human-authored re-plan is applied')
+    .option('--session-id <id>', 'Session ID to update (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.replanGovernanceSessionCommand)({
+        plan: options.plan,
+        planFile: options.planFile,
+        summary: options.summary,
+        scope: options.scope,
+        addStep: options.addStep,
+        removeStep: options.removeStep,
+        addFile: options.addFile,
+        removeFile: options.removeFile,
+        addGlob: options.addGlob,
+        removeGlob: options.removeGlob,
+        addConstraint: options.addConstraint,
+        removeConstraint: options.removeConstraint,
+        addRisk: options.addRisk,
+        removeRisk: options.removeRisk,
+        reason: options.reason,
+        proposedBy: options.proposedBy === 'agent' ? 'agent' : 'human',
+        decidedBy: options.decidedBy,
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
 sessionCmd
     .command('replan-decide')
     .description('Accept or reject a pending agent-authored plan amendment')

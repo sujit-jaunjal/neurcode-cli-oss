@@ -35,6 +35,8 @@ interface SessionCommandOptions {
     removeFile?: string[];
     addGlob?: string[];
     removeGlob?: string[];
+    /** `amend-plan --scope <glob>` sugar: expected globs to add to the active plan. */
+    scope?: string[];
     addConstraint?: string[];
     removeConstraint?: string[];
     addRisk?: string[];

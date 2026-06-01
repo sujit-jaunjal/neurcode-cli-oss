@@ -5,6 +5,7 @@ exports.resolveRepoRoot = resolveRepoRoot;
 exports.gitLsFiles = gitLsFiles;
 exports.governanceConfigPath = governanceConfigPath;
 exports.readRuntimeGovernanceConfig = readRuntimeGovernanceConfig;
+exports.readModuleImports = readModuleImports;
 exports.buildCurrentGovernanceProfile = buildCurrentGovernanceProfile;
 exports.profilePath = profilePath;
 exports.readGovernanceProfile = readGovernanceProfile;
@@ -176,11 +177,51 @@ function readRuntimeGovernanceConfig(repoRoot) {
         error: errors.length > 0 ? errors.join('; ') : undefined,
     };
 }
+// Architecture-graph import extraction is deterministic local analysis. To keep
+// `neurcode profile` / session start fast on large repos we cap the number of
+// files scanned and only read each file's head (imports live at the top). Only
+// import *specifiers* are kept; raw source is read, scanned, and discarded.
+const GRAPH_SOURCE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts|py|pyi)$/i;
+const MAX_GRAPH_FILES = 6000;
+const MAX_GRAPH_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_GRAPH_HEAD_LINES = 400;
+/**
+ * Read per-file import specifiers from the local working tree. Source-free
+ * output: returns only module specifier strings (e.g. "../billing/charge"),
+ * never file contents. Bounded + deterministic.
+ */
+function readModuleImports(repoRoot, paths) {
+    const sourcePaths = paths
+        .filter((p) => GRAPH_SOURCE_EXT.test(p))
+        .sort()
+        .slice(0, MAX_GRAPH_FILES);
+    const records = [];
+    for (const rel of sourcePaths) {
+        const abs = (0, path_1.join)(repoRoot, rel);
+        let content;
+        try {
+            if (!(0, fs_1.existsSync)(abs))
+                continue;
+            const raw = (0, fs_1.readFileSync)(abs, 'utf8');
+            if (raw.length > MAX_GRAPH_FILE_BYTES)
+                continue;
+            content = raw.split('\n').slice(0, MAX_GRAPH_HEAD_LINES).join('\n');
+        }
+        catch {
+            continue; // unreadable / binary — skip
+        }
+        const specifiers = (0, governance_runtime_1.extractImportSpecifiers)(rel, content);
+        if (specifiers.length > 0)
+            records.push({ filePath: rel, specifiers });
+    }
+    return records;
+}
 function buildCurrentGovernanceProfile(repoRoot) {
     const paths = gitLsFiles(repoRoot);
     const codeowners = readFirstExisting(repoRoot, exports.CODEOWNERS_CANDIDATES);
     const manifest = readFirstExisting(repoRoot, exports.MANIFEST_CANDIDATES);
     const governance = readRuntimeGovernanceConfig(repoRoot);
+    const imports = readModuleImports(repoRoot, paths);
     return (0, governance_runtime_1.buildRepoGovernanceProfile)({
         paths,
         codeownersContent: codeowners.content,
@@ -188,6 +229,7 @@ function buildCurrentGovernanceProfile(repoRoot) {
         repoName: (0, path_1.basename)(repoRoot),
         source: 'local',
         runtimeConfig: governance.config,
+        imports,
     });
 }
 function profilePath(repoRoot) {

@@ -300,6 +300,9 @@ async function replanGovernanceSessionCommand(options = {}) {
             : (0, node_path_1.resolve)(repoRoot, options.planFile);
         planText = (0, node_fs_1.readFileSync)(planPath, 'utf8');
     }
+    // `amend-plan --scope <glob>` is sugar for adding expected globs to the plan;
+    // merge it with any explicit --add-glob values.
+    const addExpectedGlobs = [...(options.addGlob || []), ...(options.scope || [])];
     try {
         const result = (0, governance_runtime_1.amendAgentPlan)(repoRoot, {
             sessionId: options.sessionId,
@@ -309,7 +312,7 @@ async function replanGovernanceSessionCommand(options = {}) {
             removeSteps: options.removeStep,
             addExpectedFiles: options.addFile,
             removeExpectedFiles: options.removeFile,
-            addExpectedGlobs: options.addGlob,
+            addExpectedGlobs,
             removeExpectedGlobs: options.removeGlob,
             addConstraints: options.addConstraint,
             removeConstraints: options.removeConstraint,

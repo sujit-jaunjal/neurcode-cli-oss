@@ -339,6 +339,16 @@ async function handleCheck(cmdCwd) {
     const planCoherence = (0, governance_runtime_1.evaluateSessionPlanCoherence)(session.contract, filePath);
     const planCoherencePolicy = (0, governance_runtime_1.evaluatePlanCoherencePolicy)(session.contract.planCoherenceMode, planCoherence);
     const architectureObligationFeedback = (0, governance_runtime_1.evaluateArchitectureObligationFeedback)(session.contract.architectureObligations ?? [], filePath);
+    // V2: structured architecture-aware verdict (pass / warn / block /
+    // obligation_pending / obligation_waived) evaluated against the dependency
+    // graph + live obligation ledger. Advisory metadata for evidence + dashboard;
+    // the deny/allow decision below is unchanged.
+    const architectureEdit = (0, governance_runtime_1.evaluateArchitectureEdit)({
+        filePath,
+        boundaryVerdict,
+        graph: session.contract.architectureGraph,
+        obligations: session.contract.architectureObligations ?? [],
+    });
     if (result.verdict === 'ok' && planCoherencePolicy.action === 'block') {
         result = {
             ...result,
@@ -384,6 +394,9 @@ async function handleCheck(cmdCwd) {
         };
     }
     // ── Record the event ─────────────────────────────────────────────────────
+    // Tag every check with the agent-plan revision that was active when it ran,
+    // so the evidence record can answer "which plan version governed this edit?".
+    const activePlanRevision = (0, governance_runtime_1.activeAgentPlanRevision)(session.contract);
     try {
         const event = {
             type: result.verdict === 'ok'
@@ -401,7 +414,16 @@ async function handleCheck(cmdCwd) {
                 planCoherence,
                 planCoherencePolicy,
                 architectureObligationFeedback,
+                architectureEdit: {
+                    status: architectureEdit.status,
+                    module: architectureEdit.module,
+                    surfaces: architectureEdit.surfaces,
+                    dependents: architectureEdit.dependents,
+                    message: architectureEdit.message,
+                },
                 boundaryVerdict,
+                activePlanRevision,
+                planPresent: Boolean(session.contract.agentPlan),
             },
         };
         (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, event);

@@ -1,4 +1,4 @@
-import { type RepoGovernanceProfile, type RuntimeGovernanceConfig } from '@neurcode-ai/governance-runtime';
+import { type ModuleImportRecord, type RepoGovernanceProfile, type RuntimeGovernanceConfig } from '@neurcode-ai/governance-runtime';
 export declare const CODEOWNERS_CANDIDATES: string[];
 export declare const MANIFEST_CANDIDATES: string[];
 export declare const CLAUDE_GOVERNANCE_HOOKS: {
@@ -86,6 +86,12 @@ export declare function resolveRepoRoot(cwd?: string): string;
 export declare function gitLsFiles(cwd: string): string[];
 export declare function governanceConfigPath(repoRoot: string): string;
 export declare function readRuntimeGovernanceConfig(repoRoot: string): GovernanceConfigReadResult;
+/**
+ * Read per-file import specifiers from the local working tree. Source-free
+ * output: returns only module specifier strings (e.g. "../billing/charge"),
+ * never file contents. Bounded + deterministic.
+ */
+export declare function readModuleImports(repoRoot: string, paths: string[]): ModuleImportRecord[];
 export declare function buildCurrentGovernanceProfile(repoRoot: string): RepoGovernanceProfile;
 export declare function profilePath(repoRoot: string): string;
 export declare function readGovernanceProfile(repoRoot: string): ProfileReadResult;
