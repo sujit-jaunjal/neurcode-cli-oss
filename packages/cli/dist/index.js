@@ -1733,7 +1733,8 @@ program
     });
     if (options.json === true) {
         console.log(JSON.stringify(run.execution, null, 2));
-        process.exit(run.execution.result?.success === true ? 0 : 1);
+        process.exitCode = run.execution.result?.success === true ? 0 : 1;
+        return;
     }
     const execution = run.execution;
     const statusIcon = execution.result?.success ? '✅' : '❌';
