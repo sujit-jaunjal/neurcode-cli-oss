@@ -14,6 +14,7 @@ export interface RuntimeLiveOutboxFlushResult {
     attempted: number;
     delivered: number;
     failed: number;
+    deadLettered: number;
     pending: number;
     skipped?: string;
     lastError?: string;

@@ -121,19 +121,27 @@ function runtimeDoctorCommand(options = {}) {
         label: 'Live runtime transport',
         status: !connection
             ? 'skip'
-            : transport.lastError
-                ? 'warn'
-                : 'pass',
+            : transport.health === 'degraded'
+                ? 'fail'
+                : transport.health === 'retrying'
+                    ? 'warn'
+                    : 'pass',
         message: !connection
             ? 'Runtime transport activates after this repo is paired with the dashboard.'
-            : transport.pendingEvents > 0
-                ? `${transport.pendingEvents} source-free event${transport.pendingEvents === 1 ? '' : 's'} queued locally (${transport.pendingSessionSnapshots} session snapshot${transport.pendingSessionSnapshots === 1 ? '' : 's'}, ${transport.pendingApprovalAcks} approval acknowledgement${transport.pendingApprovalAcks === 1 ? '' : 's'}).`
-                : transport.lastDeliveredAt
-                    ? `Outbox empty. Last cloud delivery: ${transport.lastDeliveredAt}.`
-                    : 'Outbox empty. No live runtime event has needed cloud delivery yet.',
-        recommendation: transport.lastError
-            ? `Cloud delivery will retry automatically. Last error: ${transport.lastError}`
-            : undefined,
+            : transport.health === 'degraded'
+                ? `${transport.deadLetterEvents} source-free event${transport.deadLetterEvents === 1 ? '' : 's'} moved to the local dead-letter queue after bounded delivery attempts.`
+                : transport.pendingEvents > 0
+                    ? `${transport.pendingEvents} source-free event${transport.pendingEvents === 1 ? '' : 's'} queued locally (${transport.retryingEvents} retrying, ${transport.pendingSessionSnapshots} session snapshot${transport.pendingSessionSnapshots === 1 ? '' : 's'}, ${transport.pendingApprovalAcks} approval acknowledgement${transport.pendingApprovalAcks === 1 ? '' : 's'}).`
+                    : transport.lastDeliveredAt
+                        ? `Outbox empty. Last cloud delivery: ${transport.lastDeliveredAt}.`
+                        : 'Outbox empty. No live runtime event has needed cloud delivery yet.',
+        recommendation: transport.health === 'degraded'
+            ? `Inspect the delivery error, then run \`neurcode sync --runtime --retry-dead-letters\`. Last dead-letter error: ${transport.lastDeadLetterError || 'unknown'}`
+            : transport.lastError
+                ? `Cloud delivery will retry automatically. Last error: ${transport.lastError}`
+                : transport.lastRecoveredAt
+                    ? `Transport recovered after a previous delivery failure at ${transport.lastRecoveredAt}.`
+                    : undefined,
     });
     const summary = {
         pass: checks.filter((c) => c.status === 'pass').length,

@@ -311,8 +311,8 @@ function localGovernanceStatusCommand(options = {}) {
         const sync = activeStatus.connection.autoSync;
         const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(activeStatus.repoRoot);
         console.log(chalk.dim(`Cloud:  connected to ${activeStatus.connection.repo.name} · auto-sync ${sync.enabled ? 'on' : 'off'} · ${sync.lastStatus || 'never'}`));
-        console.log(chalk.dim(`Live:   ${transport.pendingEvents === 0 ? 'delivered' : `${transport.pendingEvents} queued`} ` +
-            `${transport.lastError ? `· retrying after ${transport.lastError}` : ''}`));
+        console.log(chalk.dim(`Live:   ${transport.health} · ${transport.pendingEvents} queued · ${transport.retryingEvents} retrying · ${transport.deadLetterEvents} dead-lettered ` +
+            `${transport.lastError ? `· last error ${transport.lastError}` : ''}`));
     }
     console.log('');
 }

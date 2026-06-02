@@ -14,6 +14,7 @@ const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
+const runtime_outbox_2 = require("../utils/runtime-outbox");
 let chalk;
 try {
     chalk = require('chalk');
@@ -154,6 +155,9 @@ async function runtimeSyncCommand(options = {}) {
         }
         const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
         repoRootForStatus = repoRoot;
+        const requeuedDeadLetters = options.retryDeadLetters
+            ? (0, runtime_outbox_2.retryRuntimeDeadLetters)(repoRoot)
+            : 0;
         const allRecords = (0, runtime_evidence_1.listRuntimeSessions)(repoRoot, { since: options.since });
         const finishedRecords = options.includeActive
             ? allRecords
@@ -190,6 +194,7 @@ async function runtimeSyncCommand(options = {}) {
                 },
                 payload,
                 liveTransport,
+                requeuedDeadLetters,
             };
             if (options.json) {
                 console.log(JSON.stringify(result, null, 2));
@@ -232,6 +237,7 @@ async function runtimeSyncCommand(options = {}) {
                     skipped: skipped.length,
                     failed: 0,
                     liveTransport,
+                    requeuedDeadLetters,
                     message: 'No finished runtime sessions to upload.',
                 }, null, 2));
             }
@@ -270,6 +276,7 @@ async function runtimeSyncCommand(options = {}) {
                 endpoint: `${config.apiUrl?.replace(/\/$/, '')}/api/v1/runtime/evidence`,
                 localSkipped: skipped,
                 liveTransport,
+                requeuedDeadLetters,
             }, null, 2));
             return;
         }
@@ -282,6 +289,9 @@ async function runtimeSyncCommand(options = {}) {
         console.log(`Skipped:  ${chalk.yellow(String(response.skipped + skipped.length))}`);
         console.log(`Failed:   ${response.failed > 0 ? chalk.red(String(response.failed)) : '0'}`);
         console.log(`Live:     ${liveTransport.delivered} delivered · ${liveTransport.pending} queued`);
+        if (requeuedDeadLetters > 0) {
+            console.log(`DLQ:      ${chalk.yellow(String(requeuedDeadLetters))} event${requeuedDeadLetters === 1 ? '' : 's'} requeued`);
+        }
         console.log(chalk.dim('Privacy: no source code, diffs, or file contents were uploaded.'));
         console.log('');
     }
@@ -315,6 +325,7 @@ function syncCommand(program) {
         .option('--dry-run', 'Build and validate the upload payload without sending it')
         .option('--since <duration>', 'Limit to sessions with events in the window, e.g. 24h, 7d, 2w')
         .option('--include-active', 'Include active sessions; by default only finished sessions upload')
+        .option('--retry-dead-letters', 'Requeue bounded live-transport dead letters before syncing')
         .option('--dir <path>', 'Repository root (default: current directory)')
         .option('--json', 'Output machine-readable JSON')
         .action((options) => runtimeSyncCommand({
@@ -322,6 +333,7 @@ function syncCommand(program) {
         dryRun: options.dryRun === true,
         since: options.since,
         includeActive: options.includeActive === true,
+        retryDeadLetters: options.retryDeadLetters === true,
         dir: options.dir,
         json: options.json === true,
     }));

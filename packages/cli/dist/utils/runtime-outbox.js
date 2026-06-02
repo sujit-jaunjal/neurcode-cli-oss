@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.RUNTIME_DELIVERY_SCHEMA_VERSION = exports.RUNTIME_OUTBOX_SCHEMA_VERSION = void 0;
+exports.MAX_RUNTIME_DELIVERY_ATTEMPTS = exports.MAX_RUNTIME_DEAD_LETTER_EVENTS = exports.MAX_RUNTIME_OUTBOX_EVENTS = exports.RUNTIME_DELIVERY_SCHEMA_VERSION = exports.RUNTIME_OUTBOX_SCHEMA_VERSION = void 0;
 exports.runtimeOutboxPath = runtimeOutboxPath;
 exports.enqueueRuntimeSessionSnapshot = enqueueRuntimeSessionSnapshot;
 exports.enqueueRuntimeApprovalAck = enqueueRuntimeApprovalAck;
@@ -8,6 +8,7 @@ exports.runtimeDeliveryEnvelope = runtimeDeliveryEnvelope;
 exports.pendingRuntimeOutboxEvents = pendingRuntimeOutboxEvents;
 exports.markRuntimeOutboxDelivered = markRuntimeOutboxDelivered;
 exports.markRuntimeOutboxFailed = markRuntimeOutboxFailed;
+exports.retryRuntimeDeadLetters = retryRuntimeDeadLetters;
 exports.inspectRuntimeOutbox = inspectRuntimeOutbox;
 const crypto_1 = require("crypto");
 const fs_1 = require("fs");
@@ -17,7 +18,9 @@ exports.RUNTIME_OUTBOX_SCHEMA_VERSION = 'neurcode.runtime-outbox.v1';
 exports.RUNTIME_DELIVERY_SCHEMA_VERSION = 'neurcode.runtime-delivery.v1';
 const OUTBOX_FILE = 'runtime-outbox.json';
 const OUTBOX_LOCK = 'runtime-outbox.lock';
-const MAX_OUTBOX_EVENTS = 1_000;
+exports.MAX_RUNTIME_OUTBOX_EVENTS = 1_000;
+exports.MAX_RUNTIME_DEAD_LETTER_EVENTS = 100;
+exports.MAX_RUNTIME_DELIVERY_ATTEMPTS = 5;
 const LOCK_STALE_MS = 10_000;
 const SOURCE_LIKE_KEYS = new Set([
     'content',
@@ -37,12 +40,17 @@ function emptyOutbox() {
         schemaVersion: exports.RUNTIME_OUTBOX_SCHEMA_VERSION,
         nextSequenceBySession: {},
         events: [],
+        deadLetters: [],
         state: {
             lastEnqueuedAt: null,
             lastAttemptAt: null,
             lastDeliveredAt: null,
             lastDeliveredEventId: null,
             lastError: null,
+            lastDeadLetteredAt: null,
+            lastDeadLetteredEventId: null,
+            lastDeadLetterError: null,
+            lastRecoveredAt: null,
         },
     };
 }
@@ -109,6 +117,24 @@ function assertSourceFree(value, path = 'payload') {
         assertSourceFree(child, `${path}.${key}`);
     }
 }
+function isRuntimeOutboxEvent(event) {
+    if (!event || typeof event !== 'object' || Array.isArray(event))
+        return false;
+    const candidate = event;
+    return candidate.schemaVersion === exports.RUNTIME_DELIVERY_SCHEMA_VERSION
+        && typeof candidate.eventId === 'string'
+        && typeof candidate.sessionId === 'string'
+        && Number.isFinite(candidate.sequence)
+        && (candidate.eventType === 'session_snapshot' || candidate.eventType === 'approval_ack')
+        && Boolean(candidate.payload)
+        && typeof candidate.payload === 'object'
+        && !Array.isArray(candidate.payload);
+}
+function isRuntimeDeadLetterEvent(event) {
+    return isRuntimeOutboxEvent(event)
+        && typeof event.deadLetteredAt === 'string'
+        && typeof event.deadLetterReason === 'string';
+}
 function normalizeOutbox(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value))
         return emptyOutbox();
@@ -120,23 +146,18 @@ function normalizeOutbox(value) {
         nextSequenceBySession: input.nextSequenceBySession && typeof input.nextSequenceBySession === 'object'
             ? { ...input.nextSequenceBySession }
             : {},
-        events: Array.isArray(input.events)
-            ? input.events.filter((event) => Boolean(event)
-                && event.schemaVersion === exports.RUNTIME_DELIVERY_SCHEMA_VERSION
-                && typeof event.eventId === 'string'
-                && typeof event.sessionId === 'string'
-                && Number.isFinite(event.sequence)
-                && (event.eventType === 'session_snapshot' || event.eventType === 'approval_ack')
-                && Boolean(event.payload)
-                && typeof event.payload === 'object'
-                && !Array.isArray(event.payload))
-            : [],
+        events: Array.isArray(input.events) ? input.events.filter(isRuntimeOutboxEvent) : [],
+        deadLetters: Array.isArray(input.deadLetters) ? input.deadLetters.filter(isRuntimeDeadLetterEvent) : [],
         state: {
             lastEnqueuedAt: input.state?.lastEnqueuedAt || null,
             lastAttemptAt: input.state?.lastAttemptAt || null,
             lastDeliveredAt: input.state?.lastDeliveredAt || null,
             lastDeliveredEventId: input.state?.lastDeliveredEventId || null,
             lastError: input.state?.lastError || null,
+            lastDeadLetteredAt: input.state?.lastDeadLetteredAt || null,
+            lastDeadLetteredEventId: input.state?.lastDeadLetteredEventId || null,
+            lastDeadLetterError: input.state?.lastDeadLetterError || null,
+            lastRecoveredAt: input.state?.lastRecoveredAt || null,
         },
     };
 }
@@ -165,14 +186,23 @@ function nextSequence(outbox, sessionId) {
     return sequence;
 }
 function trimOutbox(events) {
-    if (events.length <= MAX_OUTBOX_EVENTS)
+    if (events.length <= exports.MAX_RUNTIME_OUTBOX_EVENTS)
         return events;
-    const approvalAcks = events.filter((event) => event.eventType === 'approval_ack');
-    const snapshots = events.filter((event) => event.eventType === 'session_snapshot');
-    const snapshotBudget = Math.max(0, MAX_OUTBOX_EVENTS - approvalAcks.length);
+    const sorted = [...events].sort((left, right) => left.generatedAt.localeCompare(right.generatedAt));
+    const approvalAcks = sorted.filter((event) => event.eventType === 'approval_ack');
+    if (approvalAcks.length >= exports.MAX_RUNTIME_OUTBOX_EVENTS) {
+        return approvalAcks.slice(-exports.MAX_RUNTIME_OUTBOX_EVENTS);
+    }
+    const snapshots = sorted.filter((event) => event.eventType === 'session_snapshot');
+    const snapshotBudget = exports.MAX_RUNTIME_OUTBOX_EVENTS - approvalAcks.length;
     const retainedSnapshots = snapshotBudget > 0 ? snapshots.slice(-snapshotBudget) : [];
     return [...approvalAcks, ...retainedSnapshots]
         .sort((left, right) => left.generatedAt.localeCompare(right.generatedAt));
+}
+function trimDeadLetters(events) {
+    return [...events]
+        .sort((left, right) => left.deadLetteredAt.localeCompare(right.deadLetteredAt))
+        .slice(-exports.MAX_RUNTIME_DEAD_LETTER_EVENTS);
 }
 function enqueue(repoRoot, sessionId, eventType, payload) {
     assertSourceFree(payload);
@@ -257,46 +287,113 @@ function markRuntimeOutboxDelivered(repoRoot, eventId) {
         outbox.state.lastAttemptAt = deliveredAt;
         outbox.state.lastDeliveredAt = deliveredAt;
         outbox.state.lastDeliveredEventId = eventId;
-        outbox.state.lastError = null;
+        if (!outbox.events.some((event) => event.lastError)) {
+            if (outbox.state.lastError)
+                outbox.state.lastRecoveredAt = deliveredAt;
+            outbox.state.lastError = null;
+        }
         writeOutbox(repoRoot, outbox);
     });
 }
 function markRuntimeOutboxFailed(repoRoot, eventId, error) {
-    withOutboxLock(repoRoot, () => {
+    return withOutboxLock(repoRoot, () => {
         const outbox = readOutbox(repoRoot);
-        if (!outbox.events.some((event) => event.eventId === eventId))
-            return;
+        const current = outbox.events.find((event) => event.eventId === eventId);
+        if (!current)
+            return { deadLettered: false, attemptCount: 0 };
         const attemptedAt = new Date().toISOString();
-        outbox.events = outbox.events.map((event) => {
-            if (event.eventId !== eventId)
-                return event;
-            const attemptCount = event.attemptCount + 1;
-            const retryDelayMs = Math.min(60_000, 1_000 * 2 ** Math.min(attemptCount - 1, 6));
-            return {
-                ...event,
+        const attemptCount = current.attemptCount + 1;
+        if (attemptCount >= exports.MAX_RUNTIME_DELIVERY_ATTEMPTS) {
+            const deadLetter = {
+                ...current,
                 attemptCount,
                 lastAttemptAt: attemptedAt,
-                nextAttemptAt: new Date(Date.now() + retryDelayMs).toISOString(),
+                nextAttemptAt: null,
                 lastError: error,
+                deadLetteredAt: attemptedAt,
+                deadLetterReason: error,
             };
-        });
+            outbox.events = outbox.events.filter((event) => event.eventId !== eventId);
+            outbox.deadLetters = trimDeadLetters([...outbox.deadLetters, deadLetter]);
+            outbox.state.lastDeadLetteredAt = attemptedAt;
+            outbox.state.lastDeadLetteredEventId = eventId;
+            outbox.state.lastDeadLetterError = error;
+        }
+        else {
+            const retryDelayMs = Math.min(60_000, 1_000 * 2 ** Math.min(attemptCount - 1, 6));
+            outbox.events = outbox.events.map((event) => event.eventId === eventId
+                ? {
+                    ...event,
+                    attemptCount,
+                    lastAttemptAt: attemptedAt,
+                    nextAttemptAt: new Date(Date.now() + retryDelayMs).toISOString(),
+                    lastError: error,
+                }
+                : event);
+        }
         outbox.state.lastAttemptAt = attemptedAt;
         outbox.state.lastError = error;
         writeOutbox(repoRoot, outbox);
+        return {
+            deadLettered: attemptCount >= exports.MAX_RUNTIME_DELIVERY_ATTEMPTS,
+            attemptCount,
+        };
+    });
+}
+function retryRuntimeDeadLetters(repoRoot, options = {}) {
+    return withOutboxLock(repoRoot, () => {
+        const outbox = readOutbox(repoRoot);
+        const limit = Math.max(1, Math.min(options.limit ?? 100, 100));
+        const selected = outbox.deadLetters
+            .filter((event) => !options.eventId || event.eventId === options.eventId)
+            .slice(0, limit);
+        if (selected.length === 0)
+            return 0;
+        const requeued = selected.map(({ deadLetteredAt: _deadLetteredAt, deadLetterReason: _deadLetterReason, ...event }) => ({
+            ...event,
+            attemptCount: 0,
+            nextAttemptAt: null,
+            lastAttemptAt: null,
+            lastError: null,
+        }));
+        outbox.events = trimOutbox([
+            ...outbox.events,
+            ...requeued,
+        ]);
+        const retainedIds = new Set(outbox.events.map((event) => event.eventId));
+        const requeuedIds = new Set(requeued.filter((event) => retainedIds.has(event.eventId)).map((event) => event.eventId));
+        outbox.deadLetters = outbox.deadLetters.filter((event) => !requeuedIds.has(event.eventId));
+        if (!outbox.events.some((event) => event.lastError))
+            outbox.state.lastError = null;
+        writeOutbox(repoRoot, outbox);
+        return requeuedIds.size;
     });
 }
 function inspectRuntimeOutbox(repoRoot) {
     const outbox = readOutbox(repoRoot);
     const sorted = [...outbox.events].sort((left, right) => left.generatedAt.localeCompare(right.generatedAt));
+    const deadLetters = [...outbox.deadLetters].sort((left, right) => left.deadLetteredAt.localeCompare(right.deadLetteredAt));
+    const retryingEvents = sorted.filter((event) => event.attemptCount > 0);
     const retries = sorted
         .map((event) => event.nextAttemptAt)
         .filter((value) => Boolean(value))
         .sort();
     return {
         schemaVersion: exports.RUNTIME_OUTBOX_SCHEMA_VERSION,
+        health: deadLetters.length > 0
+            ? 'degraded'
+            : retryingEvents.length > 0
+                ? 'retrying'
+                : sorted.length > 0
+                    ? 'queued'
+                    : 'healthy',
         pendingEvents: sorted.length,
         pendingSessionSnapshots: sorted.filter((event) => event.eventType === 'session_snapshot').length,
         pendingApprovalAcks: sorted.filter((event) => event.eventType === 'approval_ack').length,
+        retryingEvents: retryingEvents.length,
+        deadLetterEvents: deadLetters.length,
+        deadLetterSessionSnapshots: deadLetters.filter((event) => event.eventType === 'session_snapshot').length,
+        deadLetterApprovalAcks: deadLetters.filter((event) => event.eventType === 'approval_ack').length,
         oldestPendingAt: sorted[0]?.generatedAt || null,
         nextRetryAt: retries[0] || null,
         lastEnqueuedAt: outbox.state.lastEnqueuedAt,
@@ -304,6 +401,10 @@ function inspectRuntimeOutbox(repoRoot) {
         lastDeliveredAt: outbox.state.lastDeliveredAt,
         lastDeliveredEventId: outbox.state.lastDeliveredEventId,
         lastError: outbox.state.lastError,
+        lastDeadLetteredAt: outbox.state.lastDeadLetteredAt,
+        lastDeadLetteredEventId: outbox.state.lastDeadLetteredEventId,
+        lastDeadLetterError: outbox.state.lastDeadLetterError,
+        lastRecoveredAt: outbox.state.lastRecoveredAt,
     };
 }
 //# sourceMappingURL=runtime-outbox.js.map

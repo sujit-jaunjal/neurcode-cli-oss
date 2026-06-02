@@ -85,7 +85,7 @@ async function publishRuntimeLiveStatus(repoRoot, session, options = {}) {
             timeoutMs: 500,
         });
         return {
-            ok: flushed.failed === 0 && !flushed.skipped,
+            ok: flushed.failed === 0 && !flushed.skipped && flushed.status.health !== 'degraded',
             queued: flushed.pending > 0,
             pending: flushed.pending,
             ...(flushed.skipped ? { skipped: flushed.skipped } : {}),
@@ -103,6 +103,7 @@ async function flushRuntimeLiveOutbox(repoRoot, options = {}) {
             attempted: 0,
             delivered: 0,
             failed: 0,
+            deadLettered: 0,
             pending: status.pendingEvents,
             skipped: 'not connected',
             status,
@@ -114,6 +115,7 @@ async function flushRuntimeLiveOutbox(repoRoot, options = {}) {
     });
     let delivered = 0;
     let failed = 0;
+    let deadLettered = 0;
     let lastError;
     for (const event of events) {
         try {
@@ -149,7 +151,9 @@ async function flushRuntimeLiveOutbox(repoRoot, options = {}) {
         }
         catch (error) {
             lastError = error instanceof Error ? error.message : String(error);
-            (0, runtime_outbox_1.markRuntimeOutboxFailed)(repoRoot, event.eventId, lastError);
+            const failure = (0, runtime_outbox_1.markRuntimeOutboxFailed)(repoRoot, event.eventId, lastError);
+            if (failure.deadLettered)
+                deadLettered += 1;
             failed += 1;
         }
     }
@@ -158,6 +162,7 @@ async function flushRuntimeLiveOutbox(repoRoot, options = {}) {
         attempted: events.length,
         delivered,
         failed,
+        deadLettered,
         pending: status.pendingEvents,
         ...(lastError ? { lastError } : {}),
         status,

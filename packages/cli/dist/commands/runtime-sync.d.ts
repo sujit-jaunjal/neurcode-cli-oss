@@ -4,6 +4,7 @@ interface RuntimeSyncOptions {
     dryRun?: boolean;
     since?: string;
     includeActive?: boolean;
+    retryDeadLetters?: boolean;
     dir?: string;
     json?: boolean;
 }
