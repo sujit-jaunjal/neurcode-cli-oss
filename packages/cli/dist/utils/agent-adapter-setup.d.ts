@@ -1,7 +1,7 @@
 import type { AgentRuntimeAdapterId } from '@neurcode-ai/governance-runtime';
 export declare const AGENT_ADAPTER_SETUP_SCHEMA_VERSION: "neurcode.agent-adapter-setup.v1";
 export declare const AGENT_ADAPTER_DOCTOR_SCHEMA_VERSION: "neurcode.agent-adapter-doctor.v1";
-export type AgentSetupTarget = 'claude' | 'codex' | 'cursor' | 'generic-mcp';
+export type AgentSetupTarget = 'claude' | 'codex' | 'cursor' | 'generic-mcp' | 'vscode';
 export type AgentSetupFormat = 'json' | 'toml' | 'markdown' | 'text';
 export type AgentSetupWriteStatus = 'not_requested' | 'written' | 'already_configured' | 'unsupported';
 export interface AgentSetupSnippet {

@@ -439,6 +439,186 @@ function renderDoctor(payload) {
     console.log(chalk.dim(`Next: ${payload.next}`));
     console.log('');
 }
+function readinessCheck(id, label, status, message, recommendation) {
+    return { id, label, status, message, ...(recommendation ? { recommendation } : {}) };
+}
+function readinessMode(enforcementLevel) {
+    if (enforcementLevel === 'hard_deny')
+        return 'hard pre-write deny';
+    if (enforcementLevel === 'cooperative')
+        return 'cooperative pre-write checks + local guard supervision';
+    if (enforcementLevel === 'observe_only')
+        return 'observe-only companion visibility';
+    if (enforcementLevel === 'post_change_backstop')
+        return 'post-change backstop';
+    return 'unknown runtime guarantee';
+}
+function buildReadinessPayload(agentArg, options) {
+    const doctor = buildDoctorPayload(agentArg, options);
+    const repoRoot = doctor.repoRoot;
+    const target = doctor.target;
+    const adapter = doctor.adapter;
+    const capability = capabilityFor(adapter);
+    const session = options.sessionId
+        ? (0, governance_runtime_1.loadSession)(repoRoot, options.sessionId)
+        : (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const invocation = session ? (0, governance_runtime_1.buildAgentInvocationSummary)(session) : null;
+    const guardPosture = session ? (0, governance_runtime_1.buildAgentGuardPostureSummary)(session) : null;
+    const supervisor = session ? (0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, session.sessionId) : null;
+    const isCooperative = capability?.enforcementLevel === 'cooperative';
+    const isObserveOnly = capability?.enforcementLevel === 'observe_only';
+    const isHardDeny = capability?.enforcementLevel === 'hard_deny';
+    const checks = [
+        ...doctor.checks.map((check) => ({ ...check })),
+        readinessCheck('active_governed_session', 'Active governed session', session?.status === 'active' ? 'pass' : 'warn', session
+            ? `Session ${session.sessionId} is ${session.status} (${session.contract.scopeMode} scope).`
+            : 'No governed session is active in this repository.', `Run neurcode agent guard start ${target} --goal "<task>" for supervised agent work.`),
+    ];
+    if (session && invocation) {
+        checks.push(readinessCheck('agent_launch_binding', 'Agent launch binding', invocation.launched && invocation.adapter === adapter
+            ? 'pass'
+            : invocation.launched
+                ? 'warn'
+                : 'warn', invocation.launched
+            ? `Session is bound to ${invocation.adapter ?? 'unknown adapter'} (${invocation.enforcementLevel ?? 'unknown'}).`
+            : 'Session has no agent launch marker.', invocation.launched && invocation.adapter === adapter
+            ? undefined
+            : `Start this workflow with neurcode agent guard start ${target} --goal "<task>".`));
+        checks.push(readinessCheck('agent_protocol', 'Agent protocol', invocation.status === 'following_contract' || invocation.status === 'finished' || invocation.status === 'observe_only'
+            ? 'pass'
+            : invocation.status === 'attention_needed'
+                ? 'fail'
+                : 'warn', `${invocation.status.replace(/_/g, ' ')} · ${invocation.nextAction}`, invocation.nextAction));
+    }
+    else {
+        checks.push(readinessCheck('agent_launch_binding', 'Agent launch binding', 'warn', 'No active session exists to prove agent launch binding.', `Run neurcode agent guard start ${target} --goal "<task>".`));
+        checks.push(readinessCheck('agent_protocol', 'Agent protocol', 'skip', 'Protocol checks require an active governed session.'));
+    }
+    if (isCooperative) {
+        const guardStatus = guardPosture?.status ?? 'not_started';
+        checks.push(readinessCheck('guard_posture', 'Local guard posture', guardStatus === 'following_contract' || guardStatus === 'finished_clean'
+            ? 'pass'
+            : guardStatus === 'attention_required' || guardStatus === 'finished_attention'
+                ? 'fail'
+                : 'warn', guardPosture
+            ? `${guardStatus.replace(/_/g, ' ')} · ${guardPosture.nextAction}`
+            : 'No local guard posture was found.', guardStatus === 'following_contract' || guardStatus === 'finished_clean'
+            ? undefined
+            : `Use neurcode agent guard start ${target} --goal "<task>" and keep the supervisor running during agent work.`));
+        checks.push(readinessCheck('guard_supervisor', 'Guard supervisor', supervisor?.effectiveStatus === 'running'
+            ? 'pass'
+            : supervisor?.effectiveStatus === 'stale' || supervisor?.effectiveStatus === 'failed'
+                ? 'fail'
+                : 'warn', supervisor?.state
+            ? `Supervisor is ${supervisor.effectiveStatus} for session ${supervisor.state.sessionId}.`
+            : 'No detached supervisor state exists for this session.', supervisor?.effectiveStatus === 'running'
+            ? undefined
+            : 'Start it with neurcode agent guard supervise start, or launch through neurcode agent guard start.'));
+    }
+    else if (isObserveOnly) {
+        checks.push(readinessCheck('guard_posture', 'Local guard posture', guardPosture?.status === 'attention_required' || guardPosture?.status === 'finished_attention'
+            ? 'fail'
+            : 'warn', 'VS Code is observe-only; pair it with Codex/Cursor/MCP guard supervision for write accountability.', 'Use VS Code as the companion surface, then launch the real agent workflow from the Runtime Companion or CLI.'));
+    }
+    else if (isHardDeny) {
+        checks.push(readinessCheck('guard_posture', 'Local guard posture', 'skip', 'Claude Code hooks provide the hard-deny layer; guard supervision is optional as a bypass audit.'));
+    }
+    checks.push(readinessCheck('source_free_contract', 'Source-free contract', 'pass', 'Readiness uses paths, config presence, runtime metadata, guard posture, and integrity hashes only.'));
+    const summary = {
+        pass: checks.filter((item) => item.status === 'pass').length,
+        warn: checks.filter((item) => item.status === 'warn').length,
+        fail: checks.filter((item) => item.status === 'fail').length,
+        skip: checks.filter((item) => item.status === 'skip').length,
+    };
+    const nextActions = checks
+        .filter((item) => item.status === 'fail' || item.status === 'warn')
+        .map((item) => item.recommendation || item.message)
+        .filter(Boolean)
+        .slice(0, 8);
+    const readiness = summary.fail > 0
+        ? 'not_ready'
+        : summary.warn > 0
+            ? 'needs_attention'
+            : 'ready';
+    return {
+        schemaVersion: 'neurcode.agent-readiness.v1',
+        ok: summary.fail === 0 && (options.strict !== true || summary.warn === 0),
+        generatedAt: new Date().toISOString(),
+        repoRoot,
+        target,
+        adapter,
+        readiness,
+        guarantee: {
+            enforcementLevel: capability?.enforcementLevel ?? 'unknown',
+            automatic: capability?.automatic ?? false,
+            mode: readinessMode(capability?.enforcementLevel),
+            truthfulClaim: isCooperative
+                ? 'Agent writes are governed when the agent calls MCP/CLI pre-write checks; guard supervision detects bypassed writes.'
+                : isObserveOnly
+                    ? 'VS Code provides operator visibility and approval UX, not editor-level hard deny.'
+                    : isHardDeny
+                        ? 'Claude Code hooks can deny supported write tools before the write lands.'
+                        : capability?.description ?? 'Runtime guarantee is unknown.',
+        },
+        pilotReady: readiness === 'ready' || (readiness === 'needs_attention' && summary.fail === 0 && !isCooperative),
+        session: session
+            ? {
+                sessionId: session.sessionId,
+                status: session.status,
+                scopeMode: session.contract.scopeMode,
+                allowedGlobs: session.contract.allowedGlobs,
+                approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
+                replayHash: session.replayHash,
+            }
+            : null,
+        invocation,
+        guardPosture,
+        supervisor: supervisor
+            ? {
+                exists: supervisor.exists,
+                alive: supervisor.alive,
+                effectiveStatus: supervisor.effectiveStatus,
+                statePath: supervisor.statePath,
+                state: supervisor.state,
+                error: supervisor.error,
+            }
+            : null,
+        checks,
+        summary,
+        nextActions,
+        privacy: {
+            metadataOnly: true,
+            sourceUploaded: false,
+            sourceIncluded: false,
+            localContentDigestsOnly: true,
+        },
+    };
+}
+function renderReadiness(payload) {
+    console.log('');
+    console.log(chalk.bold(`Neurcode agent readiness - ${payload.target}`));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Repo:      ${chalk.white(payload.repoRoot)}`);
+    console.log(`Adapter:   ${payload.adapter}`);
+    console.log(`Guarantee: ${payload.guarantee.mode}`);
+    console.log(`Readiness: ${payload.readiness === 'ready' ? chalk.green(payload.readiness) : payload.readiness === 'not_ready' ? chalk.red(payload.readiness) : chalk.yellow(payload.readiness)}`);
+    console.log(`Pilot:     ${payload.pilotReady ? chalk.green('ready enough to test') : chalk.yellow('needs attention')}`);
+    if (payload.session)
+        console.log(`Session:   ${chalk.cyan(payload.session.sessionId)} (${payload.session.status})`);
+    console.log('');
+    for (const check of payload.checks) {
+        console.log(`${statusLabel(check.status)} ${chalk.bold(check.label)}`);
+        console.log(chalk.dim(`  ${check.message}`));
+        if (check.recommendation)
+            console.log(chalk.dim(`  Next: ${check.recommendation}`));
+    }
+    if (payload.nextActions.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Next actions'));
+        payload.nextActions.forEach((action, index) => console.log(chalk.dim(`  ${index + 1}. ${action}`)));
+    }
+    console.log('');
+}
 function loadGuardSession(repoRoot, sessionId) {
     return sessionId ? (0, governance_runtime_1.loadSession)(repoRoot, sessionId) : (0, governance_runtime_1.loadActiveSession)(repoRoot);
 }
@@ -700,6 +880,28 @@ function agentCommand(program) {
                 renderDoctor(payload);
             if (!payload.ok)
                 process.exitCode = 1;
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    cmd
+        .command('readiness [agent]')
+        .description('Assess enterprise readiness for an agent workflow, including setup, session protocol, guard posture, and truthful enforcement level')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--session-id <id>', 'Local governance session ID (default: active session)')
+        .option('--global', 'For Cursor, check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
+        .option('--strict', 'Exit non-zero when any readiness warning remains')
+        .option('--json', 'Output machine-readable JSON')
+        .action((agent, options) => {
+        try {
+            const payload = buildReadinessPayload(agent, options);
+            if (options.json)
+                emitJson(payload);
+            else
+                renderReadiness(payload);
+            if (!payload.ok)
+                process.exitCode = payload.summary.fail > 0 ? 2 : 1;
         }
         catch (error) {
             emitError(error, options.json);

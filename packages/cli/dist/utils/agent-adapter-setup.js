@@ -15,6 +15,7 @@ const node_path_1 = require("node:path");
 exports.AGENT_ADAPTER_SETUP_SCHEMA_VERSION = 'neurcode.agent-adapter-setup.v1';
 exports.AGENT_ADAPTER_DOCTOR_SCHEMA_VERSION = 'neurcode.agent-adapter-doctor.v1';
 const MCP_PACKAGE = '@neurcode-ai/mcp-server';
+const VSCODE_EXTENSION_ID = 'sujit-jaunjal.neurcode-governance';
 function mcpServerEntry() {
     return {
         command: 'npx',
@@ -46,7 +47,9 @@ function normalizeAgentSetupTarget(value) {
         return 'cursor';
     if (['generic', 'generic-mcp', 'mcp', 'gemini'].includes(normalized))
         return 'generic-mcp';
-    throw new Error(`Unsupported agent setup target "${value}". Supported: claude, codex, cursor, generic-mcp.`);
+    if (['vscode', 'vs-code', 'vscode-extension'].includes(normalized))
+        return 'vscode';
+    throw new Error(`Unsupported agent setup target "${value}". Supported: claude, codex, cursor, generic-mcp, vscode.`);
 }
 function adapterForSetupTarget(target) {
     if (target === 'claude')
@@ -55,6 +58,8 @@ function adapterForSetupTarget(target) {
         return 'codex-mcp';
     if (target === 'cursor')
         return 'cursor-mcp';
+    if (target === 'vscode')
+        return 'vscode-extension';
     return 'generic-mcp';
 }
 function codexConfigPath() {
@@ -65,11 +70,16 @@ function cursorConfigPath(repoRoot, global) {
         ? (0, node_path_1.join)((0, node_os_1.homedir)(), '.cursor', 'mcp.json')
         : (0, node_path_1.join)(repoRoot, '.cursor', 'mcp.json');
 }
+function vscodeExtensionsPath(repoRoot) {
+    return (0, node_path_1.join)(repoRoot, '.vscode', 'extensions.json');
+}
 function instructionPath(target, repoRoot) {
     if (target === 'codex')
         return (0, node_path_1.join)(repoRoot, 'AGENTS.md');
     if (target === 'cursor')
         return (0, node_path_1.join)(repoRoot, '.cursor', 'rules', 'neurcode-governance.mdc');
+    if (target === 'vscode')
+        return (0, node_path_1.join)(repoRoot, '.vscode', 'neurcode-runtime.md');
     if (target === 'generic-mcp')
         return (0, node_path_1.join)(repoRoot, 'NEURCODE_AGENT.md');
     return null;
@@ -79,6 +89,8 @@ function instructionDestination(target) {
         return 'AGENTS.md';
     if (target === 'cursor')
         return '.cursor/rules/neurcode-governance.mdc';
+    if (target === 'vscode')
+        return '.vscode/neurcode-runtime.md';
     if (target === 'generic-mcp')
         return 'NEURCODE_AGENT.md';
     return 'Claude Code hook contract';
@@ -105,6 +117,26 @@ function instructionBody(input) {
             '',
             'Claude Code is governed by Neurcode hooks after `neurcode activate claude`.',
             'Hooks run before Edit/Write/MultiEdit and can hard-deny writes before they land.',
+            '',
+        ].join('\n');
+    }
+    if (input.target === 'vscode') {
+        return [
+            '<!-- neurcode-agent-runtime-v1 -->',
+            '# Neurcode Runtime Companion',
+            '',
+            'This workspace uses the Neurcode VS Code companion as the live operator surface for governed AI coding sessions.',
+            '',
+            'Use this workflow for serious agentic work:',
+            '',
+            '1. Start the local Neurcode daemon from the command palette or CLI.',
+            '2. Run "Neurcode: Start Governed AI Session" and choose the real agent host: Claude Code, Codex, Cursor, or Generic MCP.',
+            '3. Treat the VS Code extension as observe-only. It shows live session state, active plan, blocked paths, guard posture, exact-path approvals, repo profile drift, and replayable evidence.',
+            '4. For Codex, Cursor, or another MCP-capable agent, keep the MCP/CLI runtime calls active before writes. VS Code visibility is not a substitute for pre-write checks.',
+            '5. If a protected path is blocked, approve the exact suggested path from the Runtime Companion or Control Plane. Do not broaden approval scope unless the human explicitly asks.',
+            '6. Finish the governed session so source-free replay evidence is written.',
+            '',
+            'Never send source code, diffs, patches, file contents, or before/after text to Neurcode runtime payloads. Runtime evidence is paths, owners, decisions, plan metadata, guard posture, and integrity hashes.',
             '',
         ].join('\n');
     }
@@ -184,6 +216,16 @@ function buildAgentSetupSnippet(input) {
                 body: jsonSnippet(),
                 instruction: 'Register this MCP server in any agent host that supports stdio MCP tools.',
             };
+        case 'vscode':
+            return {
+                target: input.target,
+                adapter,
+                destination: '.vscode/extensions.json',
+                configPath: vscodeExtensionsPath(input.repoRoot),
+                format: 'json',
+                body: JSON.stringify({ recommendations: [VSCODE_EXTENSION_ID] }, null, 2),
+                instruction: 'Add the Neurcode Runtime Companion extension recommendation for this workspace.',
+            };
     }
 }
 function buildAgentInstructionArtifact(input) {
@@ -198,7 +240,9 @@ function buildAgentInstructionArtifact(input) {
         body: instructionBody({ target: input.target, adapter }),
         instruction: input.target === 'claude'
             ? 'Use neurcode activate claude; hook installation is the enforcement layer.'
-            : `Add this runtime contract to ${instructionDestination(input.target)} so the agent knows when to call Neurcode tools.`,
+            : input.target === 'vscode'
+                ? 'Add this workspace runtime note so VS Code users understand the companion guarantee and the agent handoff.'
+                : `Add this runtime contract to ${instructionDestination(input.target)} so the agent knows when to call Neurcode tools.`,
     };
 }
 function readText(path) {
@@ -222,6 +266,18 @@ function isCursorConfigured(path) {
         return readText(path).includes(MCP_PACKAGE);
     }
 }
+function isVscodeRecommended(path) {
+    if (!(0, node_fs_1.existsSync)(path))
+        return false;
+    try {
+        const parsed = JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
+        return Array.isArray(parsed.recommendations)
+            && parsed.recommendations.some((item) => item === VSCODE_EXTENSION_ID);
+    }
+    catch {
+        return readText(path).includes(VSCODE_EXTENSION_ID);
+    }
+}
 function inspectAgentSetup(input) {
     const adapter = adapterForSetupTarget(input.target);
     if (input.target === 'claude') {
@@ -242,6 +298,20 @@ function inspectAgentSetup(input) {
             configured: null,
             configPath: null,
             message: 'Generic MCP clients require manual registration using the emitted snippet.',
+        };
+    }
+    if (input.target === 'vscode') {
+        const configPath = vscodeExtensionsPath(input.repoRoot);
+        const configured = isVscodeRecommended(configPath);
+        return {
+            target: input.target,
+            adapter,
+            supported: true,
+            configured,
+            configPath,
+            message: configured
+                ? `Neurcode VS Code extension is recommended in ${configPath}.`
+                : `Neurcode VS Code extension recommendation is missing from ${configPath}.`,
         };
     }
     const snippet = buildAgentSetupSnippet(input);
@@ -347,11 +417,42 @@ function writeCursorConfig(path) {
         message: `Wrote Neurcode MCP server entry to ${path}.`,
     };
 }
+function writeVscodeRecommendations(path) {
+    if (isVscodeRecommended(path)) {
+        return {
+            status: 'already_configured',
+            configPath: path,
+            message: `VS Code extension recommendations already include ${VSCODE_EXTENSION_ID} at ${path}.`,
+        };
+    }
+    ensureParent(path);
+    let parsed = {};
+    if ((0, node_fs_1.existsSync)(path)) {
+        try {
+            parsed = JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
+        }
+        catch (error) {
+            throw new Error(`Could not parse ${path}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    const recommendations = Array.isArray(parsed.recommendations)
+        ? parsed.recommendations.filter((item) => typeof item === 'string')
+        : [];
+    parsed.recommendations = Array.from(new Set([...recommendations, VSCODE_EXTENSION_ID]));
+    (0, node_fs_1.writeFileSync)(path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+    return {
+        status: 'written',
+        configPath: path,
+        message: `Added ${VSCODE_EXTENSION_ID} to VS Code extension recommendations at ${path}.`,
+    };
+}
 function writeAgentSetup(input) {
     if (input.target === 'codex')
         return writeCodexConfig(codexConfigPath());
     if (input.target === 'cursor')
         return writeCursorConfig(cursorConfigPath(input.repoRoot, input.global === true));
+    if (input.target === 'vscode')
+        return writeVscodeRecommendations(vscodeExtensionsPath(input.repoRoot));
     return {
         status: 'unsupported',
         configPath: null,
