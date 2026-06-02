@@ -25,6 +25,7 @@ const path_1 = require("path");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
+const admission_artifact_1 = require("../utils/admission-artifact");
 const runtime_live_1 = require("../utils/runtime-live");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -531,6 +532,15 @@ async function handleFinish(cmdCwd) {
             `   replayHash: ${finished.replayHash}`,
         ].join('\n');
         process.stdout.write(JSON.stringify({ message: summary }) + '\n');
+        // Phase A: emit the self-attested, source-free admission artifact. Never
+        // allowed to break session finish, so failures are diagnostic-only.
+        const admission = (0, admission_artifact_1.tryEmitSelfAttestedAdmissionRecord)({ repoRoot, session: finished });
+        if (admission.ok) {
+            diagnostic(`self-attested admission artifact written: ${admission.result.path}`);
+        }
+        else {
+            diagnostic(`admission artifact skipped: ${admission.error}`);
+        }
         await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, finished);
         try {
             const sync = (0, runtime_connection_1.triggerRuntimeAutoSync)(repoRoot);

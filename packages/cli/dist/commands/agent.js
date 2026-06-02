@@ -9,6 +9,7 @@ const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const v0_governance_1 = require("../utils/v0-governance");
 const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 const agent_guard_1 = require("../utils/agent-guard");
+const admission_artifact_1 = require("../utils/admission-artifact");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
 const runtime_adapter_1 = require("./runtime-adapter");
@@ -1345,6 +1346,9 @@ function agentCommand(program) {
                 ? null
                 : (0, governance_runtime_1.finishSession)(repoRoot, session.sessionId);
             if (closedSession) {
+                // Phase A: emit the self-attested, source-free admission artifact.
+                // Best-effort — never disrupts guard finish.
+                (0, admission_artifact_1.tryEmitSelfAttestedAdmissionRecord)({ repoRoot, session: closedSession });
                 await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, closedSession);
             }
             if (options.json) {
