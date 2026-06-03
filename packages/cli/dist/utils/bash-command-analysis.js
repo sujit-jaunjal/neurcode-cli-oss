@@ -22,6 +22,7 @@ const PATH_ROOTS = new Set([
     '.github',
 ]);
 const READ_ONLY_PREFIX = /^\s*(?:ls|cat|grep|rg|find|pwd|git\s+(?:status|diff|log|show|branch|rev-parse|ls-files)|sed(?!\s+-i\b)|awk|head|tail|wc|sort|uniq|jq)\b/;
+const NEURCODE_DIAGNOSTIC_RE = /^\s*(?:node\s+)?(?:packages\/cli\/dist\/index\.js|neurcode)\s+(?:(?:--version|-v)|doctor\b|status\b|session\s+(?:status|obligations)\b|runtime-sync\s+status\b|admission\b)/;
 function unique(values) {
     return Array.from(new Set(values.filter(Boolean)));
 }
@@ -175,6 +176,26 @@ function operationFor(command) {
         return 'redirect';
     return 'unknown_mutation';
 }
+function isReadOnlyDiagnosticCommand(command) {
+    const syntax = stripQuotedContent(command).trim();
+    if (!syntax)
+        return true;
+    if (READ_ONLY_PREFIX.test(syntax))
+        return true;
+    if (NEURCODE_DIAGNOSTIC_RE.test(syntax))
+        return true;
+    if (/^\s*node\s+-e\s+/.test(syntax) && /console\.log|require\.resolve|process\.versions|process\.cwd/.test(command)) {
+        return true;
+    }
+    return false;
+}
+function isOperatorDiagnosticCapture(command, operation, targets) {
+    if (targets.length > 0)
+        return false;
+    if (operation !== 'redirect' && operation !== 'tee')
+        return false;
+    return splitCommandSegments(command).some(isReadOnlyDiagnosticCommand);
+}
 function redirectionTargets(command) {
     const out = [];
     const re = /(?:^|[^0-9])(?:>|>>|2>|&>)\s*("?[^"\s;&|]+"?|'[^'\s;&|]+')/g;
@@ -247,6 +268,7 @@ function analyzeBashCommand(command) {
             mutates: false,
             suspicious: false,
             readOnly: true,
+            operatorDiagnostic: true,
             operation: 'read_only',
             targetPaths: [],
             commandFingerprint: fingerprint,
@@ -256,11 +278,14 @@ function analyzeBashCommand(command) {
     const operation = operationFor(trimmed);
     const mutates = operation !== 'unknown_mutation';
     const targets = mutates ? targetPathsForOperation(trimmed, operation) : [];
-    const readOnly = !mutates && READ_ONLY_PREFIX.test(trimmed);
+    const readOnly = !mutates && isReadOnlyDiagnosticCommand(trimmed);
+    const operatorDiagnostic = (!mutates && (readOnly || targets.length === 0)) ||
+        isOperatorDiagnosticCapture(trimmed, operation, targets);
     return {
         mutates,
-        suspicious: mutates && targets.length === 0,
+        suspicious: mutates && targets.length === 0 && !operatorDiagnostic,
         readOnly: readOnly || (!mutates && targets.length === 0),
+        operatorDiagnostic,
         operation: mutates ? operation : 'read_only',
         targetPaths: targets,
         commandFingerprint: fingerprint,

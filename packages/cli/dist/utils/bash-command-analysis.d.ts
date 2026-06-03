@@ -3,6 +3,13 @@ export interface BashCommandAnalysis {
     mutates: boolean;
     suspicious: boolean;
     readOnly: boolean;
+    /**
+     * True when the command is an operator diagnostic/readback command and should
+     * not be counted as a governed code edit in session evidence. This includes
+     * plain read-only commands and read-only commands whose stdout/stderr is
+     * redirected outside the repository for inspection.
+     */
+    operatorDiagnostic: boolean;
     operation: BashMutationOperation | 'read_only' | 'unclassified';
     targetPaths: string[];
     commandFingerprint: string;

@@ -227,14 +227,12 @@ async function recordBashCheck(repoRoot, session, args) {
 }
 async function handleBashCheck(repoRoot, session, command) {
     const analysis = (0, bash_command_analysis_1.analyzeBashCommand)(command);
+    if (analysis.operatorDiagnostic) {
+        diagnostic(`Bash ${analysis.operation} classified as operator diagnostic; not recorded as governed edit evidence`);
+        process.exit(0);
+        return;
+    }
     if (!analysis.mutates) {
-        await recordBashCheck(repoRoot, session, {
-            verdict: 'ok',
-            message: 'Neurcode: Bash command classified as read-only.',
-            operation: analysis.operation,
-            targetPaths: [],
-            commandFingerprint: analysis.commandFingerprint,
-        });
         process.exit(0);
         return;
     }
