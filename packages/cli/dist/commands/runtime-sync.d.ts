@@ -1,4 +1,6 @@
 import type { Command } from 'commander';
+import { type RuntimeEvidenceUploadRequest } from '../api-client';
+import { type LocalGovernanceSessionRecord } from '../utils/runtime-evidence';
 interface RuntimeSyncOptions {
     runtime?: boolean;
     dryRun?: boolean;
@@ -8,6 +10,7 @@ interface RuntimeSyncOptions {
     dir?: string;
     json?: boolean;
 }
+export declare function buildRuntimeEvidenceUploadBatches(repoRoot: string, records: LocalGovernanceSessionRecord[]): RuntimeEvidenceUploadRequest[];
 export declare function runtimeSyncCommand(options?: RuntimeSyncOptions): Promise<void>;
 export declare function syncCommand(program: Command): void;
 export {};

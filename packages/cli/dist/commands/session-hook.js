@@ -19,6 +19,10 @@
  *   plan-coherence policy returns 'block', we deny — intentional enforcement.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveSessionForHook = resolveSessionForHook;
+exports.normalizeHookFilePathForRepo = normalizeHookFilePathForRepo;
+exports.hookFilePathCandidates = hookFilePathCandidates;
+exports.shouldKeepSessionActiveForPendingApproval = shouldKeepSessionActiveForPendingApproval;
 exports.sessionHookCommand = sessionHookCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
@@ -26,8 +30,12 @@ const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const admission_artifact_1 = require("../utils/admission-artifact");
+const hook_heartbeat_1 = require("../utils/hook-heartbeat");
 const runtime_live_1 = require("../utils/runtime-live");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
+const governed_intent_1 = require("../utils/governed-intent");
+const intent_continuity_1 = require("../utils/intent-continuity");
+const bash_command_analysis_1 = require("../utils/bash-command-analysis");
 // ── Helpers ───────────────────────────────────────────────────────────────────
 /** Read the full hook JSON from stdin, or return {} on any error. */
 function readHookInput() {
@@ -59,6 +67,57 @@ function sessionIdFromHookInput(hookInput) {
     const trimmed = typeof raw === 'string' ? raw.trim() : '';
     return trimmed || undefined;
 }
+function resolveSessionForHook(repoRoot, requestedSessionId) {
+    if (requestedSessionId) {
+        const requested = (0, governance_runtime_1.loadSession)(repoRoot, requestedSessionId);
+        if (requested && requested.status === 'active') {
+            return { session: requested, requestedSessionId, usedActiveFallback: false };
+        }
+        const active = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+        if (active && active.status === 'active') {
+            return { session: active, requestedSessionId, usedActiveFallback: true };
+        }
+        return { session: null, requestedSessionId, usedActiveFallback: false };
+    }
+    const active = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    return { session: active && active.status === 'active' ? active : null, usedActiveFallback: false };
+}
+function safeRealpath(path) {
+    try {
+        return (0, fs_1.realpathSync)(path);
+    }
+    catch {
+        return null;
+    }
+}
+function absolutizeMissingPath(path) {
+    const parent = safeRealpath((0, path_1.dirname)(path));
+    return parent ? (0, path_1.join)(parent, (0, path_1.basename)(path)) : null;
+}
+function normalizeHookFilePathForRepo(rawPath, repoRoot) {
+    let filePath = rawPath.replace(/\\/g, '/');
+    if (!(0, path_1.isAbsolute)(filePath))
+        return filePath.replace(/^\.\//, '');
+    const repoReal = safeRealpath(repoRoot) || repoRoot;
+    const directCandidates = [
+        filePath,
+        safeRealpath(filePath),
+        absolutizeMissingPath(filePath),
+    ].filter((value) => Boolean(value));
+    for (const candidate of directCandidates) {
+        if (candidate === repoRoot)
+            return '';
+        if (candidate.startsWith(repoRoot + path_1.sep) || candidate.startsWith(repoRoot + '/')) {
+            return (0, path_1.relative)(repoRoot, candidate).replace(/\\/g, '/');
+        }
+        if (candidate === repoReal)
+            return '';
+        if (candidate.startsWith(repoReal + path_1.sep) || candidate.startsWith(repoReal + '/')) {
+            return (0, path_1.relative)(repoReal, candidate).replace(/\\/g, '/');
+        }
+    }
+    return filePath.replace(/^\//, '');
+}
 /** Emit a diagnostic to stderr without breaking the hook exit code. */
 function diagnostic(msg) {
     process.stderr.write(`[neurcode] ${msg}\n`);
@@ -72,6 +131,173 @@ function denyPreToolUse(reason, extra) {
             ...(extra || {}),
         },
     }) + '\n');
+    process.exit(0);
+}
+function stringFromUnknownPath(value) {
+    if (typeof value === 'string' && value.trim())
+        return value.trim();
+    if (!value || typeof value !== 'object')
+        return null;
+    const record = value;
+    for (const key of ['path', 'file_path', 'filePath', 'uri', 'fileUri', 'fsPath']) {
+        const candidate = record[key];
+        if (typeof candidate === 'string' && candidate.trim())
+            return candidate.trim();
+    }
+    return null;
+}
+function hookFilePathCandidates(hookInput) {
+    const toolInput = hookInput['tool_input'] ??
+        hookInput['toolInput'] ??
+        {};
+    const candidates = [];
+    for (const key of ['path', 'file_path', 'filePath', 'uri', 'fileUri', 'fsPath', 'targetFile', 'target_file']) {
+        const direct = stringFromUnknownPath(toolInput[key]) || stringFromUnknownPath(hookInput[key]);
+        if (direct)
+            candidates.push(direct);
+    }
+    const files = toolInput['files'] ?? hookInput['files'];
+    if (Array.isArray(files)) {
+        for (const file of files) {
+            const candidate = stringFromUnknownPath(file);
+            if (candidate)
+                candidates.push(candidate);
+        }
+    }
+    return Array.from(new Set(candidates));
+}
+function latestUnresolvedApprovalBlock(session) {
+    for (let i = session.events.length - 1; i >= 0; i -= 1) {
+        const event = session.events[i];
+        if (event.type !== 'check_block')
+            continue;
+        const context = event.detail?.approvalContext;
+        const blockedPath = event.filePath || context?.blockedPath || context?.suggestedApprovalPath;
+        if (!blockedPath)
+            continue;
+        const verdict = (0, governance_runtime_1.checkFileBoundary)({
+            filePath: blockedPath,
+            allowedGlobs: session.contract.allowedGlobs,
+            ownershipRules: session.contract.ownershipRules,
+            sensitiveGlobs: session.contract.sensitiveGlobs,
+            approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
+            approvedPaths: session.contract.approvedPaths,
+            approvalGrants: session.contract.approvalGrants,
+            scopeMode: session.contract.scopeMode,
+        });
+        if (verdict.verdict === 'block' && verdict.approvalContext) {
+            return {
+                filePath: blockedPath,
+                suggestedApprovalPath: verdict.approvalContext.suggestedApprovalPath || context?.suggestedApprovalPath || blockedPath,
+            };
+        }
+        return null;
+    }
+    return null;
+}
+function shouldKeepSessionActiveForPendingApproval(session, pendingApproval) {
+    if (!pendingApproval)
+        return false;
+    const hasRecordedApproval = session.contract.approvedPaths.length > 0 ||
+        (session.contract.approvalGrants ?? []).some((grant) => !grant.revokedAt) ||
+        session.events.some((event) => event.type === 'approval_decision' && event.decision === 'approved');
+    return !hasRecordedApproval;
+}
+async function recordBashCheck(repoRoot, session, args) {
+    (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+        type: args.verdict === 'ok' ? 'check_ok' : args.verdict === 'warn' ? 'check_warn' : 'check_block',
+        ts: new Date().toISOString(),
+        filePath: args.filePath,
+        verdict: args.verdict,
+        message: args.message,
+        detail: {
+            ...(args.approvalContext ? { approvalContext: args.approvalContext } : {}),
+            toolName: 'Bash',
+            bash: {
+                operation: args.operation,
+                targetPaths: args.targetPaths,
+                commandFingerprint: args.commandFingerprint,
+            },
+            ...(args.boundaryVerdict ? { boundaryVerdict: args.boundaryVerdict } : {}),
+        },
+    });
+    const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
+    if (refreshed)
+        await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed);
+}
+async function handleBashCheck(repoRoot, session, command) {
+    const analysis = (0, bash_command_analysis_1.analyzeBashCommand)(command);
+    if (!analysis.mutates) {
+        await recordBashCheck(repoRoot, session, {
+            verdict: 'ok',
+            message: 'Neurcode: Bash command classified as read-only.',
+            operation: analysis.operation,
+            targetPaths: [],
+            commandFingerprint: analysis.commandFingerprint,
+        });
+        process.exit(0);
+        return;
+    }
+    if (analysis.targetPaths.length === 0) {
+        await recordBashCheck(repoRoot, session, {
+            verdict: 'warn',
+            message: `⚠️ Neurcode: Bash command appears mutating (${analysis.operation}) but no repo path could be classified. Proceeding — recorded in session.`,
+            operation: analysis.operation,
+            targetPaths: [],
+            commandFingerprint: analysis.commandFingerprint,
+        });
+        process.stdout.write(JSON.stringify({
+            hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'allow',
+                reason: `⚠️ Neurcode: Bash command appears mutating (${analysis.operation}) but target extraction was inconclusive.`,
+            },
+        }) + '\n');
+        process.exit(0);
+        return;
+    }
+    const targetPaths = analysis.targetPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot));
+    const results = targetPaths.map((filePath) => ({
+        filePath,
+        result: (0, governance_runtime_1.checkFileBoundary)({
+            filePath,
+            allowedGlobs: session.contract.allowedGlobs,
+            ownershipRules: session.contract.ownershipRules,
+            sensitiveGlobs: session.contract.sensitiveGlobs,
+            approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
+            approvedPaths: session.contract.approvedPaths,
+            approvalGrants: session.contract.approvalGrants,
+            scopeMode: session.contract.scopeMode,
+        }),
+    }));
+    for (const { filePath, result } of results) {
+        await recordBashCheck(repoRoot, session, {
+            filePath,
+            verdict: result.verdict,
+            message: result.message,
+            operation: analysis.operation,
+            targetPaths,
+            commandFingerprint: analysis.commandFingerprint,
+            boundaryVerdict: result.verdict,
+            approvalContext: result.approvalContext,
+        });
+    }
+    const blocking = results.find(({ result }) => result.verdict === 'block');
+    if (blocking) {
+        const message = `⏸ Neurcode: Bash ${analysis.operation} targets ${blocking.filePath}. ` +
+            blocking.result.message.replace(/^⏸ Neurcode:\s*/, '');
+        denyPreToolUse(message, blocking.result.approvalContext ? { approvalContext: blocking.result.approvalContext } : undefined);
+    }
+    const warning = results.find(({ result }) => result.verdict === 'warn');
+    if (warning) {
+        process.stdout.write(JSON.stringify({
+            hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'allow',
+                reason: `⚠️ Neurcode: Bash ${analysis.operation} is allowed with warning for ${warning.filePath}.`,
+            },
+        }) + '\n');
+    }
     process.exit(0);
 }
 function parseDurationMs(value) {
@@ -144,15 +370,76 @@ async function maybeReuseLaunchedClaudeSession(repoRoot, goal, hookInput, profil
     await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session, { profileFreshness });
     return session;
 }
+async function maybeContinueActiveClaudeSession(repoRoot, rawPrompt, intentSelection, profileFreshness) {
+    const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    if (!activeSession || activeSession.status !== 'active')
+        return null;
+    const decision = (0, intent_continuity_1.classifyIntentContinuity)(rawPrompt, intentSelection, activeSession);
+    if (decision.action === 'start_new_session')
+        return null;
+    if (decision.action === 'record_operator_note') {
+        (0, governance_runtime_1.appendEvent)(repoRoot, activeSession.sessionId, {
+            type: 'user_decision',
+            ts: new Date().toISOString(),
+            decision: 'operator_prompt_recorded',
+            message: 'Human follow-up prompt recorded without changing the active governed plan.',
+            detail: {
+                intentContinuity: decision.detail,
+                reason: decision.reason,
+                confidence: decision.confidence,
+            },
+        });
+        const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, activeSession.sessionId) || activeSession;
+        await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed, { profileFreshness });
+        return refreshed;
+    }
+    if (!decision.amendment)
+        return activeSession;
+    const amended = (0, governance_runtime_1.amendAgentPlan)(repoRoot, {
+        ...decision.amendment,
+        amendedAt: new Date().toISOString(),
+    });
+    let session = (0, governance_runtime_1.loadSession)(repoRoot, amended.sessionId) || activeSession;
+    (0, governance_runtime_1.appendEvent)(repoRoot, amended.sessionId, {
+        type: 'user_decision',
+        ts: new Date().toISOString(),
+        decision: 'intent_continuity_amended',
+        message: amended.status === 'pending'
+            ? 'Human follow-up prompt proposed a plan amendment that is pending decision.'
+            : `Human follow-up prompt updated active plan revision ${amended.previousRevision} -> ${amended.revision}.`,
+        detail: {
+            intentContinuity: decision.detail,
+            reason: decision.reason,
+            confidence: decision.confidence,
+            planAmendment: {
+                status: amended.status,
+                previousRevision: amended.previousRevision,
+                revision: amended.revision,
+                action: amended.action,
+                risk: amended.risk,
+                proposalId: amended.proposal?.proposalId,
+            },
+        },
+    });
+    session = (0, governance_runtime_1.loadSession)(repoRoot, amended.sessionId) || session;
+    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session, { profileFreshness });
+    diagnostic(amended.status === 'pending'
+        ? `intent continuity proposed plan amendment ${amended.proposal?.proposalId || amended.eventId}`
+        : `intent continuity updated active plan revision ${amended.previousRevision} -> ${amended.revision}`);
+    return session;
+}
 // ── Hook handlers ─────────────────────────────────────────────────────────────
 /** UserPromptSubmit — create a new governance session from the prompt. */
 async function handleStart(cmdCwd) {
     const hookInput = readHookInput();
     const effectiveCwd = cwdFromHookInput(hookInput, cmdCwd);
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
-    const goal = hookInput['prompt'] ||
+    (0, hook_heartbeat_1.recordHookHeartbeat)({ repoRoot, eventType: 'start' });
+    const rawGoal = hookInput['prompt'] ||
         hookInput['user_prompt'] ||
         '';
+    const intentSelection = (0, governed_intent_1.selectGovernedIntent)(rawGoal);
+    const goal = intentSelection.goal;
     if (!goal.trim()) {
         // No text in the prompt — skip session creation (tool-use-only turn)
         return;
@@ -163,10 +450,28 @@ async function handleStart(cmdCwd) {
         if (profileResult.refreshed && profileResult.status !== 'missing') {
             diagnostic(`profile refreshed before session start (${profileResult.reasons.join('; ')})`);
         }
-        const reused = await maybeReuseLaunchedClaudeSession(repoRoot, goal.trim(), hookInput, profileFreshness);
+        for (const warning of intentSelection.warnings) {
+            diagnostic(warning);
+        }
+        const reused = await maybeReuseLaunchedClaudeSession(repoRoot, rawGoal.trim(), hookInput, profileFreshness);
         if (reused) {
             process.stdout.write(JSON.stringify({
                 message: `🤝 Neurcode session ${reused.sessionId} · launcher handshake complete`,
+            }) + '\n');
+            return;
+        }
+        const continued = await maybeContinueActiveClaudeSession(repoRoot, rawGoal.trim(), intentSelection, profileFreshness);
+        if (continued) {
+            process.stdout.write(JSON.stringify({
+                message: `🔁 Neurcode session ${continued.sessionId} · continuing active governed intent · ` +
+                    `plan revision ${(0, governance_runtime_1.activeAgentPlanRevision)(continued.contract)}`,
+            }) + '\n');
+            return;
+        }
+        if (!(0, governed_intent_1.shouldStartGovernedSession)(intentSelection)) {
+            process.stdout.write(JSON.stringify({
+                message: 'Neurcode did not start a governed session for this operator/status prompt. ' +
+                    'Use `Demo goal:` or `Governed goal:` when you want a new governed implementation session.',
             }) + '\n');
             return;
         }
@@ -175,6 +480,36 @@ async function handleStart(cmdCwd) {
         const plannedAtStart = maybeCaptureAgentPlan(repoRoot, session, hookInput);
         if (plannedAtStart)
             session = plannedAtStart;
+        if (intentSelection.source === 'labeled_goal' || intentSelection.operatorPrompt) {
+            (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+                type: 'user_decision',
+                ts: new Date().toISOString(),
+                decision: 'governed_intent_selected',
+                message: intentSelection.source === 'labeled_goal'
+                    ? 'Governed intent selected from labeled prompt section.'
+                    : 'Operator-style prompt used directly as governed intent.',
+                detail: {
+                    source: intentSelection.source,
+                    operatorPrompt: intentSelection.operatorPrompt,
+                    warnings: intentSelection.warnings,
+                },
+            });
+            const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
+            if (refreshed)
+                session = refreshed;
+        }
+        // Goal-quality warning (lightweight; does not redesign the parser): a very long or
+        // path-heavy goal tends to produce broad/noisy scope where everything is
+        // approval-required. Counts only — no goal/prompt text is echoed (source-free).
+        const trimmedGoal = goal.trim();
+        const goalLength = trimmedGoal.length;
+        const goalLines = trimmedGoal.split('\n').length;
+        const broadApprovalScope = session.contract.approvalRequiredGlobs.includes('**');
+        if (broadApprovalScope || goalLength > 600 || goalLines > 6) {
+            diagnostic(`⚠ goal is verbose (${goalLength} chars, ${goalLines} lines)` +
+                (broadApprovalScope ? ' and produced broad scope (approvalRequiredGlobs includes "**" — every file needs approval)' : '') +
+                '. For cleaner governance and demos, start the session with a short, crisp goal.');
+        }
         const scopeNote = session.contract.scopeMode === 'ambiguous'
             ? '(scope ambiguous — approval-required boundaries will block)'
             : session.contract.allowedGlobs.slice(0, 2).join(', ') +
@@ -196,17 +531,20 @@ async function handleCheck(cmdCwd) {
     const hookInput = readHookInput();
     const effectiveCwd = cwdFromHookInput(hookInput, cmdCwd);
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
+    (0, hook_heartbeat_1.recordHookHeartbeat)({ repoRoot, eventType: 'check' });
     const requestedSessionId = sessionIdFromHookInput(hookInput);
-    const activeSession = requestedSessionId
-        ? (0, governance_runtime_1.loadSession)(repoRoot, requestedSessionId)
-        : (0, governance_runtime_1.loadActiveSession)(repoRoot);
-    if (!activeSession || activeSession.status !== 'active') {
+    const resolution = resolveSessionForHook(repoRoot, requestedSessionId);
+    const activeSession = resolution.session;
+    if (!activeSession) {
         // No active session — not governed, pass through
         diagnostic(requestedSessionId
             ? `no active session ${requestedSessionId} at ${repoRoot} — edit allowed (ungoverned)`
             : `no active session at ${repoRoot} — edit allowed (ungoverned)`);
         process.exit(0);
         return;
+    }
+    if (resolution.usedActiveFallback && requestedSessionId) {
+        diagnostic(`Claude session_id ${requestedSessionId} did not match a Neurcode session; using active session ${activeSession.sessionId}`);
     }
     let session = activeSession;
     try {
@@ -261,23 +599,59 @@ async function handleCheck(cmdCwd) {
     // ── Extract the target file path ─────────────────────────────────────────
     // Claude Code PreToolUse payload shape:
     //   { tool_name, tool_input: { path, ... }, cwd, ... }
-    const toolInput = hookInput['tool_input'] ?? {};
-    const rawPath = toolInput['path'] ||
-        toolInput['file_path'] ||
-        hookInput['path'] ||
+    const toolName = hookInput['tool_name'] ||
+        hookInput['toolName'] ||
         '';
+    const toolInput = hookInput['tool_input'] ??
+        hookInput['toolInput'] ??
+        {};
+    if (/^(bash|shell|runCommand|run_command|runInTerminal|run_in_terminal|terminal)$/i.test(toolName)) {
+        const command = toolInput['command'] ||
+            toolInput['cmd'] ||
+            hookInput['command'] ||
+            '';
+        await handleBashCheck(repoRoot, session, command);
+        return;
+    }
+    const rawPaths = hookFilePathCandidates(hookInput);
+    if (rawPaths.length > 1) {
+        const message = `⏸ Neurcode: this ${toolName || 'tool'} call attempts to edit multiple files at once ` +
+            `(${rawPaths.length} paths). Split the edit into one file per tool call so each path can be governed before write.`;
+        try {
+            (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+                type: 'check_block',
+                ts: new Date().toISOString(),
+                filePath: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)).join(','),
+                verdict: 'block',
+                message,
+                detail: {
+                    reason: 'multi_file_tool_call_requires_split',
+                    paths: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)),
+                    toolName,
+                },
+            });
+            const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
+            if (refreshed)
+                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed);
+        }
+        catch {
+            // Recording failure must not weaken the deny.
+        }
+        denyPreToolUse(message, {
+            reason: 'multi_file_tool_call_requires_split',
+            paths: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)),
+        });
+    }
+    const rawPath = rawPaths[0] || '';
     if (!rawPath) {
         diagnostic('PreToolUse: no file path in hook input — edit allowed (cannot check)');
         process.exit(0);
         return;
     }
-    // Normalise to a path relative to the repo root
-    let filePath = rawPath;
-    if ((0, path_1.isAbsolute)(filePath)) {
-        filePath = filePath.startsWith(repoRoot + '/')
-            ? filePath.slice(repoRoot.length + 1)
-            : filePath.replace(/^\//, '');
-    }
+    // Normalise to a path relative to the repo root. Use realpath-aware
+    // comparison so macOS /tmp -> /private/tmp and other repo symlinks do not
+    // turn an in-repo edit into a bogus "tmp/repo/..." path.
+    const filePath = normalizeHookFilePathForRepo(rawPath, repoRoot);
     // ── Profile freshness guard ─────────────────────────────────────────────
     // Safe refreshes are automatic. If repo metadata changed enough that the
     // active session was derived from a different profile, the current edit is
@@ -512,22 +886,53 @@ async function handleFinish(cmdCwd) {
     const hookInput = readHookInput();
     const effectiveCwd = cwdFromHookInput(hookInput, cmdCwd);
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
+    (0, hook_heartbeat_1.recordHookHeartbeat)({ repoRoot, eventType: 'finish' });
     const requestedSessionId = sessionIdFromHookInput(hookInput);
-    const session = requestedSessionId
-        ? (0, governance_runtime_1.loadSession)(repoRoot, requestedSessionId)
-        : (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const resolution = resolveSessionForHook(repoRoot, requestedSessionId);
+    const session = resolution.session;
     if (!session || session.status !== 'active')
         return;
+    if (resolution.usedActiveFallback && requestedSessionId) {
+        diagnostic(`Claude session_id ${requestedSessionId} did not match a Neurcode session; finishing active session ${session.sessionId}`);
+    }
     try {
-        const finished = (0, governance_runtime_1.finishSession)(repoRoot, session.sessionId);
+        const pendingApproval = latestUnresolvedApprovalBlock(session);
+        if (shouldKeepSessionActiveForPendingApproval(session, pendingApproval)) {
+            process.stdout.write(JSON.stringify({
+                message: `⏸ Neurcode session ${session.sessionId} remains active; waiting for exact approval of ` +
+                    `${pendingApproval.suggestedApprovalPath}.`,
+            }) + '\n');
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+            try {
+                const sync = (0, runtime_connection_1.triggerRuntimeAutoSync)(repoRoot);
+                if (sync.started)
+                    diagnostic('runtime evidence auto-sync queued');
+            }
+            catch (syncError) {
+                diagnostic(`auto-sync queue failed: ${syncError instanceof Error ? syncError.message : String(syncError)}`);
+            }
+            return;
+        }
+        const finished = (0, governance_runtime_1.finishSession)(repoRoot, session.sessionId, pendingApproval
+            ? {
+                reason: 'finished_with_unresolved_approval_blocks',
+                unresolvedApprovalBlocks: [pendingApproval],
+            }
+            : undefined);
         if (!finished)
             return;
         const blockCount = finished.events.filter((e) => e.type === 'check_block').length;
         const warnCount = finished.events.filter((e) => e.type === 'check_warn').length;
+        const unresolvedLine = pendingApproval
+            ? `   Unresolved: 1 approval block left recorded (${pendingApproval.suggestedApprovalPath})`
+            : null;
         const summary = [
-            `✅ Neurcode session ${finished.sessionId} complete`,
+            pendingApproval
+                ? `✅ Neurcode session ${finished.sessionId} complete with unresolved block evidence`
+                : `✅ Neurcode session ${finished.sessionId} complete`,
             `   Scope mode: ${finished.contract.scopeMode}`,
             `   Boundaries: ${blockCount} block${blockCount !== 1 ? 's' : ''}, ${warnCount} warning${warnCount !== 1 ? 's' : ''}`,
+            ...(unresolvedLine ? [unresolvedLine] : []),
             `   Record: .neurcode/sessions/${finished.sessionId}.json`,
             `   replayHash: ${finished.replayHash}`,
         ].join('\n');

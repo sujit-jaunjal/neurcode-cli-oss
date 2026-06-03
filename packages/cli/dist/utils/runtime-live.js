@@ -20,6 +20,21 @@ const SOURCE_LIKE_KEYS = new Set([
     'before',
     'after',
 ]);
+const LIVE_SESSION_SCHEMA_VERSION = 'neurcode.runtime-live-session.v2';
+const MAX_LIVE_TEXT = 800;
+const MAX_LIVE_ARRAY_ITEMS = 80;
+const MAX_LIVE_EVENTS = 80;
+const MAX_LIVE_OBJECT_KEYS = 100;
+const LIVE_OMITTED_KEYS = new Set([
+    'architectureGraph',
+    'dependencyGraph',
+    'ownershipGraph',
+    'profile',
+    'profileGraph',
+    'facts',
+    'fileFacts',
+    'repoFacts',
+]);
 function sanitizeForRuntimeLive(value) {
     if (Array.isArray(value))
         return value.map((item) => sanitizeForRuntimeLive(item));
@@ -32,6 +47,89 @@ function sanitizeForRuntimeLive(value) {
         out[key] = sanitizeForRuntimeLive(child);
     }
     return out;
+}
+function isRecord(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+function compactText(value) {
+    if (value.length <= MAX_LIVE_TEXT)
+        return value;
+    return `${value.slice(0, MAX_LIVE_TEXT)}... [truncated ${value.length - MAX_LIVE_TEXT} chars]`;
+}
+function compactRuntimeLiveValue(value, depth = 0) {
+    if (typeof value === 'string')
+        return compactText(value);
+    if (Array.isArray(value)) {
+        return value
+            .slice(0, MAX_LIVE_ARRAY_ITEMS)
+            .map((item) => compactRuntimeLiveValue(item, depth + 1));
+    }
+    if (!isRecord(value))
+        return value;
+    const out = {};
+    let keys = 0;
+    for (const [key, child] of Object.entries(value)) {
+        if (SOURCE_LIKE_KEYS.has(key) || LIVE_OMITTED_KEYS.has(key))
+            continue;
+        if (keys >= MAX_LIVE_OBJECT_KEYS) {
+            out.__truncatedKeys = true;
+            break;
+        }
+        keys += 1;
+        out[key] = depth > 8 ? '[max-depth]' : compactRuntimeLiveValue(child, depth + 1);
+    }
+    return out;
+}
+function compactRuntimeLiveEvent(event) {
+    if (!isRecord(event))
+        return compactRuntimeLiveValue(event);
+    const out = {};
+    for (const key of [
+        'type',
+        'ts',
+        'filePath',
+        'verdict',
+        'decision',
+        'message',
+        'reason',
+        'source',
+    ]) {
+        if (key in event)
+            out[key] = compactRuntimeLiveValue(event[key]);
+    }
+    if (isRecord(event.detail)) {
+        out.detail = compactRuntimeLiveValue(event.detail);
+    }
+    return out;
+}
+function compactRuntimeLiveSession(session) {
+    const sanitized = sanitizeForRuntimeLive(session);
+    const input = isRecord(sanitized) ? sanitized : {};
+    const contract = isRecord(input.contract) ? input.contract : {};
+    const events = Array.isArray(input.events) ? input.events : [];
+    const compactEvents = events.slice(-MAX_LIVE_EVENTS).map(compactRuntimeLiveEvent);
+    return {
+        schemaVersion: input.schemaVersion,
+        runtimeLiveSchemaVersion: LIVE_SESSION_SCHEMA_VERSION,
+        sessionId: input.sessionId,
+        repoName: input.repoName,
+        profileHash: input.profileHash,
+        status: input.status,
+        startedAt: input.startedAt,
+        finishedAt: input.finishedAt,
+        replayHash: input.replayHash,
+        contract: compactRuntimeLiveValue(contract),
+        events: compactEvents,
+        livePayload: {
+            schemaVersion: LIVE_SESSION_SCHEMA_VERSION,
+            compacted: true,
+            originalEventCount: events.length,
+            includedEventCount: compactEvents.length,
+            maxTextChars: MAX_LIVE_TEXT,
+            maxArrayItems: MAX_LIVE_ARRAY_ITEMS,
+            omittedKeys: Array.from(LIVE_OMITTED_KEYS).sort(),
+        },
+    };
 }
 function runtimeAuth(repoRoot) {
     const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
@@ -76,7 +174,7 @@ async function publishRuntimeLiveStatus(repoRoot, session, options = {}) {
     const body = {
         repo,
         generatedAt: new Date().toISOString(),
-        session: sanitizeForRuntimeLive(session),
+        session: compactRuntimeLiveSession(session),
     };
     try {
         (0, runtime_outbox_1.enqueueRuntimeSessionSnapshot)(repoRoot, session.sessionId, body);

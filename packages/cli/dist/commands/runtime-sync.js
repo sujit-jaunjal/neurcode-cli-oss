@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.buildRuntimeEvidenceUploadBatches = buildRuntimeEvidenceUploadBatches;
 exports.runtimeSyncCommand = runtimeSyncCommand;
 exports.syncCommand = syncCommand;
 const crypto_1 = require("crypto");
@@ -15,6 +16,7 @@ const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
 const runtime_outbox_2 = require("../utils/runtime-outbox");
+const admission_artifact_1 = require("../utils/admission-artifact");
 let chalk;
 try {
     chalk = require('chalk');
@@ -41,6 +43,24 @@ const SOURCE_LIKE_KEYS = new Set([
     'before',
     'after',
 ]);
+const BULK_EVIDENCE_OMIT_KEYS = new Set([
+    'architectureGraph',
+    'dependencyGraph',
+    'ownershipGraph',
+    'graph',
+    'rawGraph',
+    'snapshot',
+    'rawSnapshot',
+    'environment',
+]);
+const BULK_UPLOAD_MAX_STRING_LENGTH = 2_000;
+const BULK_UPLOAD_MAX_ARRAY_ITEMS = 80;
+const BULK_UPLOAD_MAX_EVENT_ITEMS = 160;
+const BULK_UPLOAD_TARGET_BYTES = 850_000;
+const BULK_UPLOAD_MAX_SINGLE_SESSION_BYTES = 650_000;
+const BULK_UPLOAD_AGGRESSIVE_MAX_STRING_LENGTH = 500;
+const BULK_UPLOAD_AGGRESSIVE_MAX_ARRAY_ITEMS = 20;
+const BULK_UPLOAD_AGGRESSIVE_MAX_EVENT_ITEMS = 80;
 function sha256(input) {
     return (0, crypto_1.createHash)('sha256').update(input).digest('hex').slice(0, 32);
 }
@@ -82,6 +102,59 @@ function sanitizeForUpload(value, path = 'session') {
     }
     return out;
 }
+const DEFAULT_BULK_COMPACTION_LIMITS = {
+    maxStringLength: BULK_UPLOAD_MAX_STRING_LENGTH,
+    maxArrayItems: BULK_UPLOAD_MAX_ARRAY_ITEMS,
+    maxEventItems: BULK_UPLOAD_MAX_EVENT_ITEMS,
+};
+const AGGRESSIVE_BULK_COMPACTION_LIMITS = {
+    maxStringLength: BULK_UPLOAD_AGGRESSIVE_MAX_STRING_LENGTH,
+    maxArrayItems: BULK_UPLOAD_AGGRESSIVE_MAX_ARRAY_ITEMS,
+    maxEventItems: BULK_UPLOAD_AGGRESSIVE_MAX_EVENT_ITEMS,
+};
+function compactStringForBulk(value, limits) {
+    if (value.length <= limits.maxStringLength)
+        return value;
+    return `${value.slice(0, limits.maxStringLength)}...[truncated ${value.length - limits.maxStringLength} chars]`;
+}
+function compactForBulkEvidence(value, path = 'session', limits = DEFAULT_BULK_COMPACTION_LIMITS) {
+    if (typeof value === 'string')
+        return compactStringForBulk(value, limits);
+    if (Array.isArray(value)) {
+        const maxItems = path.endsWith('.events')
+            ? limits.maxEventItems
+            : limits.maxArrayItems;
+        const items = value.length > maxItems ? value.slice(-maxItems) : value;
+        const compacted = items.map((item, index) => compactForBulkEvidence(item, `${path}[${index}]`, limits));
+        if (value.length <= maxItems)
+            return compacted;
+        return [
+            {
+                truncated: true,
+                omittedItems: value.length - maxItems,
+                retainedItems: maxItems,
+                retention: path.endsWith('.events') ? 'last_events' : 'last_items',
+            },
+            ...compacted,
+        ];
+    }
+    if (!value || typeof value !== 'object')
+        return value;
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+        if (SOURCE_LIKE_KEYS.has(key))
+            continue;
+        if (BULK_EVIDENCE_OMIT_KEYS.has(key)) {
+            out[`${key}Omitted`] = true;
+            continue;
+        }
+        out[key] = compactForBulkEvidence(child, `${path}.${key}`, limits);
+    }
+    return out;
+}
+function byteSize(value) {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
 function assertPayloadHasNoSourceKeys(value, path = 'payload') {
     if (Array.isArray(value)) {
         value.forEach((item, index) => assertPayloadHasNoSourceKeys(item, `${path}[${index}]`));
@@ -101,11 +174,194 @@ function replayStatus(session) {
         return 'missing';
     return (0, governance_runtime_1.replaySession)(session).matchesOriginal ? 'verified' : 'mismatch';
 }
-function buildUploadPayload(repoRoot, records) {
+function repoRelative(repoRoot, path) {
+    return path.replace(repoRoot, '').replace(/^\/+/, '').replace(/\\/g, '/');
+}
+function buildAdmissionUploadMetadata(repoRoot, session) {
+    const localPath = (0, admission_artifact_1.admissionRecordPath)(repoRoot, session.sessionId);
+    const publicPath = (0, admission_artifact_1.publicAdmissionRecordPath)(repoRoot, session.sessionId);
+    const publicPresent = (0, fs_1.existsSync)(publicPath);
+    const base = {
+        localRecord: {
+            present: false,
+            path: repoRelative(repoRoot, localPath),
+        },
+        prArtifact: {
+            present: publicPresent,
+            path: repoRelative(repoRoot, publicPath),
+        },
+    };
+    if (!(0, fs_1.existsSync)(localPath))
+        return base;
+    try {
+        const record = (0, governance_runtime_1.readSelfAttestedAdmissionRecordFromText)((0, fs_1.readFileSync)(localPath, 'utf8'));
+        if (!record) {
+            return {
+                ...base,
+                localRecord: {
+                    ...base.localRecord,
+                    present: true,
+                    status: 'invalid',
+                },
+            };
+        }
+        const governedCoverageCount = record.manifest.coverage.filter((entry) => entry.classification === 'governed_prewrite' ||
+            entry.classification === 'governed_delete' ||
+            entry.classification === 'generated').length;
+        const ungovernedCoverageCount = record.manifest.coverage.filter((entry) => entry.classification === 'ungoverned').length;
+        return {
+            ...base,
+            localRecord: {
+                ...base.localRecord,
+                present: true,
+                status: 'valid',
+                schemaVersion: record.schemaVersion,
+                attestationKind: record.attestationKind,
+                admissionContractVersion: record.admissionContractVersion,
+                capture: {
+                    mode: record.capture.mode,
+                    ...(record.capture.baseRef ? { baseRef: record.capture.baseRef } : {}),
+                    ...(record.capture.headRef ? { headRef: record.capture.headRef } : {}),
+                },
+                manifest: {
+                    entryCount: record.manifest.entryCount,
+                    coverageCount: record.manifest.coverage.length,
+                    governedCoverageCount,
+                    ungovernedCoverageCount,
+                    deltaHash: record.manifest.deltaHash,
+                    coverageSetHash: record.manifest.coverageSetHash,
+                },
+            },
+        };
+    }
+    catch (error) {
+        return {
+            ...base,
+            localRecord: {
+                ...base.localRecord,
+                present: true,
+                status: 'unreadable',
+                error: error instanceof Error ? error.message : String(error),
+            },
+        };
+    }
+}
+function importantApprovalContext(detail) {
+    if (!detail || typeof detail !== 'object')
+        return undefined;
+    const approvalContext = detail.approvalContext;
+    if (!approvalContext || typeof approvalContext !== 'object')
+        return undefined;
+    const ctx = approvalContext;
+    const out = {};
+    for (const key of ['blockedPath', 'approvalRequired', 'owners', 'suggestedApprovalPath', 'reason', 'policyId']) {
+        if (ctx[key] !== undefined)
+            out[key] = compactForBulkEvidence(ctx[key], `event.detail.approvalContext.${key}`, AGGRESSIVE_BULK_COMPACTION_LIMITS);
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+}
+function compactEventForBulkSummary(event) {
+    if (!event || typeof event !== 'object')
+        return {};
+    const src = event;
+    const detail = src.detail;
+    const approvalContext = importantApprovalContext(detail);
+    const out = {};
+    for (const key of ['type', 'ts', 'filePath', 'verdict', 'decision', 'message']) {
+        if (src[key] !== undefined)
+            out[key] = compactForBulkEvidence(src[key], `event.${key}`, AGGRESSIVE_BULK_COMPACTION_LIMITS);
+    }
+    if (approvalContext)
+        out.detail = { approvalContext };
+    return out;
+}
+function summarizeOversizedSessionForBulk(session) {
+    const events = Array.isArray(session.events) ? session.events : [];
+    const retainedEvents = events.slice(-BULK_UPLOAD_AGGRESSIVE_MAX_EVENT_ITEMS).map(compactEventForBulkSummary);
+    return {
+        schemaVersion: session.schemaVersion,
+        sessionId: session.sessionId,
+        profileHash: session.profileHash,
+        status: session.status,
+        startedAt: session.startedAt,
+        finishedAt: session.finishedAt,
+        replayHash: session.replayHash,
+        contract: compactForBulkEvidence(session.contract || {}, 'session.contract', AGGRESSIVE_BULK_COMPACTION_LIMITS),
+        events: events.length > retainedEvents.length
+            ? [
+                {
+                    truncated: true,
+                    omittedItems: events.length - retainedEvents.length,
+                    retainedItems: retainedEvents.length,
+                    retention: 'last_events',
+                    reason: 'single_session_payload_budget',
+                },
+                ...retainedEvents,
+            ]
+            : retainedEvents,
+        uploadMetadata: {
+            ...(session.uploadMetadata && typeof session.uploadMetadata === 'object' ? session.uploadMetadata : {}),
+            bulkEvidence: {
+                ...(session.uploadMetadata?.bulkEvidence || {}),
+                compacted: true,
+                compactionLevel: 'event_summary',
+                maxSingleSessionBytes: BULK_UPLOAD_MAX_SINGLE_SESSION_BYTES,
+            },
+        },
+    };
+}
+function buildCompactUploadSession(repoRoot, record) {
+    const sanitized = sanitizeForUpload(record.session);
+    let compacted = compactForBulkEvidence(sanitized);
+    const bytesBefore = byteSize(sanitized);
+    compacted.uploadMetadata = {
+        recordPath: repoRelative(repoRoot, record.path),
+        replayStatus: replayStatus(record.session),
+        gitHead: gitValue(repoRoot, ['rev-parse', '--short=12', 'HEAD']),
+        admission: buildAdmissionUploadMetadata(repoRoot, record.session),
+        bulkEvidence: {
+            compacted: true,
+            compactionLevel: 'standard',
+            bytesBefore,
+            bytesAfter: byteSize(compacted),
+            maxEventItems: BULK_UPLOAD_MAX_EVENT_ITEMS,
+            maxArrayItems: BULK_UPLOAD_MAX_ARRAY_ITEMS,
+            maxStringLength: BULK_UPLOAD_MAX_STRING_LENGTH,
+            maxSingleSessionBytes: BULK_UPLOAD_MAX_SINGLE_SESSION_BYTES,
+        },
+    };
+    if (byteSize(compacted) > BULK_UPLOAD_MAX_SINGLE_SESSION_BYTES) {
+        compacted = compactForBulkEvidence(sanitized, 'session', AGGRESSIVE_BULK_COMPACTION_LIMITS);
+        compacted.uploadMetadata = {
+            recordPath: repoRelative(repoRoot, record.path),
+            replayStatus: replayStatus(record.session),
+            gitHead: gitValue(repoRoot, ['rev-parse', '--short=12', 'HEAD']),
+            admission: buildAdmissionUploadMetadata(repoRoot, record.session),
+            bulkEvidence: {
+                compacted: true,
+                compactionLevel: 'aggressive',
+                bytesBefore,
+                bytesAfter: byteSize(compacted),
+                maxEventItems: BULK_UPLOAD_AGGRESSIVE_MAX_EVENT_ITEMS,
+                maxArrayItems: BULK_UPLOAD_AGGRESSIVE_MAX_ARRAY_ITEMS,
+                maxStringLength: BULK_UPLOAD_AGGRESSIVE_MAX_STRING_LENGTH,
+                maxSingleSessionBytes: BULK_UPLOAD_MAX_SINGLE_SESSION_BYTES,
+            },
+        };
+    }
+    if (byteSize(compacted) > BULK_UPLOAD_MAX_SINGLE_SESSION_BYTES) {
+        compacted = summarizeOversizedSessionForBulk(compacted);
+    }
+    const metadata = compacted.uploadMetadata;
+    if (metadata?.bulkEvidence) {
+        metadata.bulkEvidence.bytesAfter = byteSize(compacted);
+    }
+    return compacted;
+}
+function buildUploadPayloadFromSessions(repoRoot, sessions) {
     const profile = readJsonFile((0, path_1.join)(repoRoot, '.neurcode', 'profile.json'));
     const freshness = (0, v0_governance_1.buildProfileFreshnessSignal)((0, v0_governance_1.getProfileStaleness)(repoRoot));
     const remote = gitValue(repoRoot, ['config', '--get', 'remote.origin.url']);
-    const head = gitValue(repoRoot, ['rev-parse', '--short=12', 'HEAD']);
     const repoName = typeof profile?.repo?.name === 'string' && profile.repo.name.trim()
         ? profile.repo.name.trim()
         : (0, path_1.basename)(repoRoot);
@@ -123,18 +379,65 @@ function buildUploadPayload(repoRoot, records) {
             source: 'local',
         },
         generatedAt: new Date().toISOString(),
-        sessions: records.map((record) => {
-            const sanitized = sanitizeForUpload(record.session);
-            sanitized.uploadMetadata = {
-                recordPath: record.path.replace(repoRoot, '').replace(/^\/+/, ''),
-                replayStatus: replayStatus(record.session),
-                gitHead: head,
-            };
-            return sanitized;
-        }),
+        sessions,
     };
     assertPayloadHasNoSourceKeys(payload);
     return payload;
+}
+function buildRuntimeEvidenceUploadBatches(repoRoot, records) {
+    const compactSessions = records.map((record) => buildCompactUploadSession(repoRoot, record));
+    const batches = [];
+    let current = [];
+    for (const session of compactSessions) {
+        const candidate = buildUploadPayloadFromSessions(repoRoot, [...current, session]);
+        if (current.length > 0 && byteSize(candidate) > BULK_UPLOAD_TARGET_BYTES) {
+            batches.push(buildUploadPayloadFromSessions(repoRoot, current));
+            current = [session];
+            continue;
+        }
+        current = candidate.sessions;
+    }
+    if (current.length > 0)
+        batches.push(buildUploadPayloadFromSessions(repoRoot, current));
+    return batches;
+}
+function summarizeUploadBatches(payloads) {
+    return payloads.map((payload, index) => ({
+        index: index + 1,
+        sessions: payload.sessions.length,
+        bytes: byteSize(payload),
+    }));
+}
+function aggregateRuntimeEvidenceResponses(responses) {
+    const first = responses[0];
+    if (!first) {
+        return {
+            ok: true,
+            batchId: '',
+            repo: { id: '', name: '', repoKey: '' },
+            uploaded: 0,
+            skipped: 0,
+            failed: 0,
+            sessions: [],
+            privacy: {
+                sourceUploaded: false,
+                uploadedFields: ['file paths', 'owners', 'verdicts', 'timestamps', 'contracts', 'replay hashes'],
+            },
+        };
+    }
+    const uploaded = responses.reduce((sum, response) => sum + response.uploaded, 0);
+    const skipped = responses.reduce((sum, response) => sum + response.skipped, 0);
+    const failed = responses.reduce((sum, response) => sum + response.failed, 0);
+    return {
+        ok: responses.every((response) => response.ok),
+        batchId: responses.map((response) => response.batchId).filter(Boolean).join(','),
+        repo: first.repo,
+        uploaded,
+        skipped,
+        failed,
+        sessions: responses.flatMap((response) => response.sessions),
+        privacy: first.privacy,
+    };
 }
 async function runtimeSyncCommand(options = {}) {
     let repoRootForStatus = null;
@@ -172,7 +475,14 @@ async function runtimeSyncCommand(options = {}) {
             }
             validRecords.push(record);
         }
-        const payload = buildUploadPayload(repoRoot, validRecords);
+        const uploadPayloads = buildRuntimeEvidenceUploadBatches(repoRoot, validRecords);
+        const dryRunPayload = uploadPayloads.length <= 1
+            ? uploadPayloads[0] || buildUploadPayloadFromSessions(repoRoot, [])
+            : {
+                ...buildUploadPayloadFromSessions(repoRoot, []),
+                sessions: uploadPayloads.flatMap((payload) => payload.sessions),
+            };
+        assertPayloadHasNoSourceKeys(dryRunPayload);
         if (options.dryRun) {
             const liveTransport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
             const result = {
@@ -192,7 +502,8 @@ async function runtimeSyncCommand(options = {}) {
                     sourceUploaded: false,
                     uploadedFields: ['file paths', 'owners', 'verdicts', 'timestamps', 'contracts', 'replay hashes'],
                 },
-                payload,
+                payload: dryRunPayload,
+                uploadBatches: summarizeUploadBatches(uploadPayloads),
                 liveTransport,
                 requeuedDeadLetters,
             };
@@ -256,7 +567,11 @@ async function runtimeSyncCommand(options = {}) {
             config.apiKey = (0, config_1.requireApiKey)(config.orgId);
         }
         const client = new api_client_1.ApiClient(config);
-        const response = await client.uploadRuntimeEvidence(payload);
+        const responses = [];
+        for (const payload of uploadPayloads) {
+            responses.push(await client.uploadRuntimeEvidence(payload));
+        }
+        const response = aggregateRuntimeEvidenceResponses(responses);
         (0, runtime_connection_1.updateRuntimeConnection)(repoRoot, (connection) => ({
             ...connection,
             autoSync: {

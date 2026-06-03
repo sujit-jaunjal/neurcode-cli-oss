@@ -23,7 +23,12 @@ export interface GitCaptureResult {
     baseRef: string | null;
     headRef: string | null;
 }
-/** Admission artifacts are provenance support records, never governed source effects. */
+/**
+ * Local runtime state and public admission records are provenance support
+ * artifacts, never governed source effects. Repo-authored policy files such as
+ * `.neurcode/governance.json` remain visible to capture; session/profile/cache
+ * state does not pollute admission coverage.
+ */
 export declare function isAdmissionSupportArtifactPath(path: string): boolean;
 export declare function detectGitObjectFormat(repoRoot: string): GitObjectFormat;
 /**

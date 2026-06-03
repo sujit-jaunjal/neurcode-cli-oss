@@ -45,6 +45,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.buildLocalGovernanceStatus = buildLocalGovernanceStatus;
 exports.localGovernanceStatusCommand = localGovernanceStatusCommand;
+exports.resetStaleGovernanceSessionCommand = resetStaleGovernanceSessionCommand;
 exports.replanGovernanceSessionCommand = replanGovernanceSessionCommand;
 exports.decideGovernanceReplanCommand = decideGovernanceReplanCommand;
 exports.approveGovernanceSessionCommand = approveGovernanceSessionCommand;
@@ -160,6 +161,55 @@ function approvalContextFrom(event) {
 }
 function loadLocalGovernanceSession(repoRoot, sessionId) {
     return sessionId ? (0, governance_runtime_1.loadSession)(repoRoot, sessionId) : (0, governance_runtime_1.loadActiveSession)(repoRoot);
+}
+function latestEventTimestamp(session) {
+    return [...session.events]
+        .reverse()
+        .find((event) => typeof event.ts === 'string' && event.ts.trim())?.ts ||
+        new Date(0).toISOString();
+}
+function sessionAgeMinutes(session, now = new Date()) {
+    const started = Date.parse(latestEventTimestamp(session));
+    if (!Number.isFinite(started))
+        return Number.POSITIVE_INFINITY;
+    return Math.max(0, (now.getTime() - started) / 60_000);
+}
+function approvedPathMatches(filePath, approvedPath) {
+    const normalizedFile = filePath.replace(/\\/g, '/');
+    const normalizedApproved = approvedPath.replace(/\\/g, '/');
+    if (normalizedFile === normalizedApproved)
+        return true;
+    if (normalizedApproved.endsWith('/**')) {
+        const prefix = normalizedApproved.slice(0, -3);
+        return normalizedFile === prefix || normalizedFile.startsWith(`${prefix}/`);
+    }
+    if (normalizedApproved.includes('*')) {
+        // Keep reset-stale conservative for uncommon glob approvals: do not assume
+        // a block is resolved unless it is an exact path or directory-scope grant.
+        return false;
+    }
+    return false;
+}
+function pendingApprovalBlock(session, now = new Date()) {
+    const activeApprovals = (0, governance_runtime_1.activeApprovalPaths)(session.contract, now.toISOString());
+    for (const event of [...session.events].reverse()) {
+        if (event.type !== 'check_block')
+            continue;
+        const context = approvalContextFrom(event);
+        const suggestedApprovalPath = context?.suggestedApprovalPath || event.filePath || null;
+        if (!suggestedApprovalPath)
+            continue;
+        if (activeApprovals.some((approved) => approvedPathMatches(suggestedApprovalPath, approved))) {
+            continue;
+        }
+        return {
+            filePath: event.filePath || context?.blockedPath || null,
+            suggestedApprovalPath,
+            owners: context?.owners ?? [],
+            message: event.message,
+        };
+    }
+    return null;
 }
 function buildLocalGovernanceStatus(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
@@ -302,6 +352,7 @@ function localGovernanceStatusCommand(options = {}) {
         if (activeStatus.latestBlock.owners.length > 0) {
             console.log(`  Owner: ${chalk.white(activeStatus.latestBlock.owners.join(', '))}`);
         }
+        console.log(`  UI:    ${chalk.cyan(`Approve exactly ${activeStatus.latestBlock.suggestedApprovalPath} in Runtime Control Plane`)}`);
         console.log(`  CLI:   ${chalk.cyan(activeStatus.latestBlock.approveCommand)}`);
         console.log(chalk.dim(`  MCP:   neurcode_session_approve({ path: "${activeStatus.latestBlock.suggestedApprovalPath}" })`));
         console.log('');
@@ -315,6 +366,119 @@ function localGovernanceStatusCommand(options = {}) {
             `${transport.lastError ? `· last error ${transport.lastError}` : ''}`));
     }
     console.log('');
+}
+async function resetStaleGovernanceSessionCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const now = new Date();
+    const maxAgeMinutes = Number.isFinite(options.maxAgeMinutes)
+        ? Math.max(0, Number(options.maxAgeMinutes))
+        : 120;
+    const active = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const output = (payload, statusCode = 0) => {
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+        }
+        else if (payload.ok === true) {
+            console.log(chalk.green(String(payload.message || 'Stale session reset complete.')));
+            if (payload.sessionId)
+                console.log(chalk.dim(`Session: ${payload.sessionId}`));
+            if (payload.replayHash)
+                console.log(chalk.dim(`replayHash: ${payload.replayHash}`));
+        }
+        else {
+            console.error(chalk.yellow(String(payload.message || payload.error || 'No reset performed.')));
+            if (payload.suggestedApprovalPath) {
+                console.error(chalk.dim(`Pending approval: ${payload.suggestedApprovalPath}`));
+            }
+        }
+        process.exitCode = statusCode;
+    };
+    if (!active || active.status !== 'active') {
+        output({
+            ok: true,
+            reset: false,
+            repoRoot,
+            reason: 'no_active_session',
+            message: 'No active in-flow governance session found.',
+        });
+        return;
+    }
+    const ageMinutes = sessionAgeMinutes(active, now);
+    const pending = pendingApprovalBlock(active, now);
+    const stale = ageMinutes >= maxAgeMinutes;
+    if (!stale && options.force !== true) {
+        output({
+            ok: true,
+            reset: false,
+            repoRoot,
+            sessionId: active.sessionId,
+            reason: 'session_not_stale',
+            ageMinutes: Number(ageMinutes.toFixed(2)),
+            maxAgeMinutes,
+            pendingApproval: pending,
+            message: `Active session ${active.sessionId} is not stale yet (${ageMinutes.toFixed(1)}m < ${maxAgeMinutes}m).`,
+        });
+        return;
+    }
+    if (pending && options.force !== true) {
+        output({
+            ok: false,
+            reset: false,
+            repoRoot,
+            sessionId: active.sessionId,
+            reason: 'pending_approval',
+            ageMinutes: Number(ageMinutes.toFixed(2)),
+            maxAgeMinutes,
+            filePath: pending.filePath,
+            owners: pending.owners,
+            suggestedApprovalPath: pending.suggestedApprovalPath,
+            message: 'Active session is waiting on an unresolved approval; refusing to reset without --force.',
+            next: [
+                `Approve exactly ${pending.suggestedApprovalPath} from the dashboard or MCP.`,
+                'Or run `neurcode session reset-stale --force` if this is abandoned rehearsal state.',
+            ],
+        }, 2);
+        return;
+    }
+    (0, governance_runtime_1.appendEvent)(repoRoot, active.sessionId, {
+        type: 'user_decision',
+        ts: now.toISOString(),
+        decision: 'reset_stale_session',
+        detail: {
+            source: 'local_cli',
+            force: options.force === true,
+            maxAgeMinutes,
+            ageMinutes: Number(ageMinutes.toFixed(2)),
+            pendingApproval: pending,
+        },
+    });
+    const finished = (0, governance_runtime_1.finishSession)(repoRoot, active.sessionId);
+    if (!finished) {
+        output({
+            ok: false,
+            reset: false,
+            repoRoot,
+            sessionId: active.sessionId,
+            reason: 'finish_failed',
+            message: `Could not finish active session ${active.sessionId}.`,
+        }, 1);
+        return;
+    }
+    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, finished);
+    output({
+        ok: true,
+        reset: true,
+        repoRoot,
+        sessionId: finished.sessionId,
+        previousGoal: finished.contract.goal,
+        status: finished.status,
+        replayHash: finished.replayHash,
+        ageMinutes: Number(ageMinutes.toFixed(2)),
+        maxAgeMinutes,
+        forced: options.force === true,
+        recordPath: `.neurcode/sessions/${finished.sessionId}.json`,
+        message: `Finished active session ${finished.sessionId} and cleared the active pointer.`,
+    });
 }
 async function replanGovernanceSessionCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());

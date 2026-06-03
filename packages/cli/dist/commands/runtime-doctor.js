@@ -5,6 +5,12 @@ const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
+const hook_heartbeat_1 = require("../utils/hook-heartbeat");
+/** True when the goal produced an over-broad approval scope (e.g. `**`). */
+function hasOverBroadApprovalScope(session) {
+    const globs = session.contract?.approvalRequiredGlobs ?? [];
+    return globs.includes('**');
+}
 let chalk;
 try {
     chalk = require('chalk');
@@ -40,11 +46,15 @@ function runtimeDoctorCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
     const activation = (0, v0_governance_1.inspectClaudeActivation)(repoRoot);
+    const copilotActivation = (0, v0_governance_1.inspectCopilotActivation)(repoRoot);
     const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
     const governanceConfig = (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot);
     const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
     const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
+    const heartbeat = (0, hook_heartbeat_1.readHookHeartbeat)(repoRoot);
     const checks = [];
+    const dashboardSyncFailed = Boolean(connection?.autoSync.enabled && connection.autoSync.lastStatus === 'failed');
+    const dashboardSyncRecovered = dashboardSyncFailed && transport.health === 'healthy' && Boolean(transport.lastDeliveredAt);
     checks.push({
         id: 'profile',
         label: 'Governance profile',
@@ -52,38 +62,177 @@ function runtimeDoctorCommand(options = {}) {
         message: staleness.status === 'fresh'
             ? `Fresh profile at ${staleness.profilePath} (${staleness.currentProfile.topology.trackedFileCount} tracked files).`
             : `${staleness.status}: ${staleness.reasons.join('; ') || 'profile needs refresh'}.`,
-        recommendation: staleness.status === 'fresh' ? undefined : 'Run `neurcode activate claude` to refresh it.',
+        recommendation: staleness.status === 'fresh' ? undefined : 'Run `neurcode activate claude` or `neurcode activate copilot` to refresh it.',
     });
+    // ── Claude Code hooks (on-disk correctness) ────────────────────────────────
+    // Priority: parse error > stale bare hooks > missing pinned entrypoint > installed > missing.
+    const h = activation.hooks;
+    const entrypointMissing = h.entrypoint !== null && h.entrypointExists === false;
+    let hooksStatus;
+    let hooksMessage;
+    let hooksRec;
+    if (h.error) {
+        hooksStatus = 'fail';
+        hooksMessage = `Could not parse ${h.settingsPath}: ${h.error}`;
+        hooksRec = 'Fix the JSON in .claude/settings.json, then run `neurcode activate claude`.';
+    }
+    else if (entrypointMissing) {
+        hooksStatus = 'fail';
+        hooksMessage = `Pinned hook entrypoint is missing on disk: ${h.entrypoint}. Claude Code cannot run governance and FAILS OPEN (writes proceed ungoverned).`;
+        hooksRec = 'Run `pnpm build:cli` to produce dist/index.js, then `neurcode activate claude`.';
+    }
+    else if (h.stale) {
+        hooksStatus = 'fail';
+        hooksMessage = `Stale Neurcode hooks in ${h.settingsPath}: ${h.staleCommands.join('; ')}.`;
+        hooksRec = 'Run `neurcode activate claude`, then restart Claude Code in this repo.';
+    }
+    else if (h.installed) {
+        hooksStatus = 'pass';
+        hooksMessage = `Installed in ${h.settingsPath}${h.entrypoint ? ` (pinned: ${h.entrypoint})` : ''}.`;
+        // Portability is advisory: absolute machine paths don't travel to other machines/CI.
+        if (h.entrypointPortable === false) {
+            hooksRec = `Pinned hook path is absolute and machine-specific; it will not work for teammates/CI on a different checkout. Each machine must run \`neurcode activate claude\` locally.`;
+        }
+    }
+    else {
+        hooksStatus = 'warn';
+        hooksMessage = `Missing one or more hooks in ${h.settingsPath}.`;
+        hooksRec = 'Run `neurcode activate claude`.';
+    }
     checks.push({
         id: 'claude_hooks',
         label: 'Claude Code hooks',
-        status: activation.hooks.error ? 'fail' : activation.hooks.installed ? 'pass' : 'warn',
-        message: activation.hooks.error
-            ? `Could not parse ${activation.hooks.settingsPath}: ${activation.hooks.error}`
-            : activation.hooks.installed
-                ? `Installed in ${activation.hooks.settingsPath}.`
-                : `Missing one or more hooks in ${activation.hooks.settingsPath}.`,
-        recommendation: activation.hooks.installed ? undefined : 'Run `neurcode activate claude`.',
+        status: hooksStatus,
+        message: hooksMessage,
+        recommendation: hooksRec,
     });
+    const ch = copilotActivation.hooks;
+    const copilotEntrypointMissing = ch.entrypoint !== null && ch.entrypointExists === false;
+    let copilotHooksStatus;
+    let copilotHooksMessage;
+    let copilotHooksRec;
+    if (ch.error) {
+        copilotHooksStatus = 'fail';
+        copilotHooksMessage = `Could not parse ${ch.hooksPath}: ${ch.error}`;
+        copilotHooksRec = 'Fix the JSON in .github/hooks/neurcode.json, then run `neurcode activate copilot`.';
+    }
+    else if (copilotEntrypointMissing) {
+        copilotHooksStatus = 'fail';
+        copilotHooksMessage = `Pinned Copilot hook entrypoint is missing on disk: ${ch.entrypoint}. Copilot cannot run governance and FAILS OPEN (writes proceed ungoverned).`;
+        copilotHooksRec = 'Run `pnpm build:cli` to produce dist/index.js, then `neurcode activate copilot`.';
+    }
+    else if (ch.stale) {
+        copilotHooksStatus = 'fail';
+        copilotHooksMessage = `Stale Neurcode hooks in ${ch.hooksPath}: ${ch.staleCommands.join('; ')}.`;
+        copilotHooksRec = 'Run `neurcode activate copilot`, then reload VS Code / Copilot Agent Mode in this repo.';
+    }
+    else if (ch.installed) {
+        copilotHooksStatus = 'pass';
+        copilotHooksMessage = `Installed in ${ch.hooksPath}${ch.entrypoint ? ` (pinned: ${ch.entrypoint})` : ''}.`;
+        if (ch.entrypointPortable === false) {
+            copilotHooksRec = 'Pinned hook path is absolute and machine-specific; each machine should run `neurcode activate copilot` locally.';
+        }
+    }
+    else {
+        copilotHooksStatus = 'skip';
+        copilotHooksMessage = `No Copilot hooks installed in ${ch.hooksPath}.`;
+        copilotHooksRec = 'Run `neurcode activate copilot` to govern VS Code Copilot Agent Mode.';
+    }
+    checks.push({
+        id: 'copilot_hooks',
+        label: 'GitHub Copilot hooks',
+        status: copilotHooksStatus,
+        message: copilotHooksMessage,
+        recommendation: copilotHooksRec,
+    });
+    // ── Live hook liveness / restart detection ─────────────────────────────────
+    // Hooks load at Claude Code startup and do NOT hot-reload. doctor green on disk does
+    // not prove the *running* session is governed. Compare the live heartbeat (written by
+    // the hook that is actually executing) against what is installed on disk now.
+    const activeHookEntrypoint = h.installed ? h.entrypoint : ch.installed ? ch.entrypoint : h.entrypoint || ch.entrypoint;
+    const activeHookLabel = h.installed ? 'Claude Code' : ch.installed ? 'GitHub Copilot' : 'agent';
+    const installedFingerprint = activeHookEntrypoint ? (0, hook_heartbeat_1.fingerprintEntrypoint)(activeHookEntrypoint) : null;
+    let liveness;
+    const RESTART_MSG = 'restart or reload the coding agent in this repo before demoing governance.';
+    const describeHeartbeat = (hb) => `last live hook: ${hb.lastEvent.type} @ ${hb.lastEvent.ts} (cli ${hb.cliVersion})`;
+    if ((h.stale || entrypointMissing || h.error) && !ch.installed) {
+        liveness = {
+            status: 'skip',
+            message: 'Resolve a hard-hook agent check above before live governance can be confirmed.',
+        };
+    }
+    else if (activeSession && activeSession.status === 'active') {
+        if (!heartbeat) {
+            liveness = {
+                status: 'warn',
+                message: `A Neurcode session is active but no live hook heartbeat has been recorded yet (the running ${activeHookLabel} session may not be executing the installed hooks).`,
+                recommendation: `If the agent was open before activation, ${RESTART_MSG}`,
+            };
+        }
+        else if (installedFingerprint && heartbeat.entrypointFingerprint !== installedFingerprint) {
+            // The live hook runs a different entrypoint than what is installed on disk now —
+            // hooks were changed after the running Claude session loaded them.
+            liveness = {
+                status: 'fail',
+                message: `Installed hooks changed after the active session started — the live hook runs ${heartbeat.entrypoint}, but disk now pins a different ${activeHookLabel} entrypoint. The running session is governed by stale hooks.`,
+                recommendation: RESTART_MSG,
+            };
+        }
+        else {
+            liveness = {
+                status: 'pass',
+                message: `Live governance confirmed: ${describeHeartbeat(heartbeat)}; running entrypoint matches disk.`,
+            };
+        }
+    }
+    else {
+        liveness = {
+            status: heartbeat ? 'pass' : 'skip',
+            message: heartbeat
+                ? `No active session. ${describeHeartbeat(heartbeat)}.`
+                : 'No live hook heartbeat yet (no governed Claude Code session has run in this repo).',
+        };
+    }
+    checks.push({ id: 'hook_liveness', label: 'Live hook heartbeat / restart', ...liveness });
     checks.push({
         id: 'claude_mcp',
         label: 'Claude MCP approval tool',
-        status: activation.mcp.error ? 'fail' : activation.mcp.configured ? 'pass' : 'warn',
+        status: activation.mcp.error
+            ? 'fail'
+            : activation.mcp.configured
+                ? 'pass'
+                : activation.mcp.stale
+                    ? 'fail'
+                    : 'warn',
         message: activation.mcp.error
             ? `Could not parse ${activation.mcp.configPath}: ${activation.mcp.error}`
             : activation.mcp.configured
-                ? `Configured in ${activation.mcp.configPath}.`
-                : `neurcode MCP server entry is missing from ${activation.mcp.configPath}.`,
-        recommendation: activation.mcp.configured ? undefined : 'Run `neurcode activate claude` or use `neurcode session approve --path <path>` locally.',
+                ? `Configured in ${activation.mcp.configPath}: npx -y @neurcode-ai/mcp-server.`
+                : activation.mcp.stale
+                    ? `Stale neurcode MCP server entry in ${activation.mcp.configPath}: ${activation.mcp.staleReasons.join('; ')}. Claude may not expose neurcode_session_approve.`
+                    : `neurcode MCP server entry is missing from ${activation.mcp.configPath}.`,
+        recommendation: activation.mcp.configured
+            ? undefined
+            : activation.mcp.stale
+                ? 'Run `neurcode activate claude`, then reload Claude MCP servers or restart Claude Code.'
+                : 'Run `neurcode activate claude` or use `neurcode session approve --path <path>` locally.',
     });
+    const sessionActive = Boolean(activeSession && activeSession.status === 'active');
+    const overBroadScope = sessionActive && activeSession ? hasOverBroadApprovalScope(activeSession) : false;
     checks.push({
         id: 'active_session',
         label: 'Active governance session',
-        status: activeSession && activeSession.status === 'active' ? 'pass' : 'skip',
-        message: activeSession && activeSession.status === 'active'
-            ? `Session ${activeSession.sessionId} is active (${activeSession.contract.scopeMode} scope).`
-            : 'No active in-flow session. This is normal until Claude Code receives a prompt.',
-        recommendation: activeSession ? 'Run `neurcode status` for live session details.' : undefined,
+        status: !sessionActive ? 'skip' : overBroadScope ? 'warn' : 'pass',
+        message: !sessionActive
+            ? 'No active in-flow session. This is normal until Claude Code receives a prompt.'
+            : overBroadScope
+                ? `Session ${activeSession.sessionId} is active but its scope is over-broad: approvalRequiredGlobs includes "**", so every file needs approval. This usually means the goal/prompt was very long or path-heavy.`
+                : `Session ${activeSession.sessionId} is active (${activeSession.contract.scopeMode} scope).`,
+        recommendation: !sessionActive
+            ? undefined
+            : overBroadScope
+                ? 'For demos, start sessions with a short, crisp goal (e.g. "Add retry with backoff to the export task") so scope stays tight.'
+                : 'Run `neurcode status` for live session details.',
     });
     checks.push({
         id: 'governance_config',
@@ -101,20 +250,33 @@ function runtimeDoctorCommand(options = {}) {
     checks.push({
         id: 'approval_ux',
         label: 'Approval UX',
-        status: activation.mcp.configured ? 'pass' : 'warn',
+        status: activation.mcp.configured ? 'pass' : activation.mcp.stale ? 'fail' : 'warn',
         message: activation.mcp.configured
             ? 'MCP tool `neurcode_session_approve` and CLI command `neurcode session approve` are available.'
-            : 'CLI approval is available; MCP approval is not configured yet.',
-        recommendation: activation.mcp.configured ? undefined : 'Run `neurcode activate claude` to configure MCP approval.',
+            : activation.mcp.stale
+                ? 'CLI approval is available; MCP approval config is stale, so Claude may not expose `neurcode_session_approve`.'
+                : 'CLI approval is available; MCP approval is not configured yet.',
+        recommendation: activation.mcp.configured
+            ? undefined
+            : activation.mcp.stale
+                ? 'Run `neurcode activate claude`, then reload Claude MCP servers or restart Claude Code.'
+                : 'Run `neurcode activate claude` to configure MCP approval.',
     });
     checks.push({
         id: 'dashboard_connection',
-        label: 'Dashboard connection',
-        status: connection ? 'pass' : 'warn',
+        label: 'Dashboard pairing / bulk evidence sync',
+        status: !connection ? 'warn' : dashboardSyncFailed ? dashboardSyncRecovered ? 'warn' : 'fail' : 'pass',
         message: connection
-            ? `Connected to ${connection.repo.name}; auto-sync is ${connection.autoSync.enabled ? 'enabled' : 'disabled'} (${connection.autoSync.lastStatus || 'never synced'}).`
+            ? `Connected to ${connection.repo.name}; bulk evidence sync is ${connection.autoSync.enabled ? 'enabled' : 'disabled'} (${connection.autoSync.lastStatus || 'never synced'}).` +
+                (dashboardSyncRecovered ? ` Live block/approval transport is separate and recovered at ${transport.lastDeliveredAt}.` : '')
             : 'This repo is not paired with the Neurcode dashboard yet.',
-        recommendation: connection ? undefined : 'From Runtime Evidence, copy the activation command or run `neurcode activate claude --connect <token>`.',
+        recommendation: !connection
+            ? 'From Runtime Evidence, copy the activation command or run `neurcode activate claude --connect <token>`.'
+            : dashboardSyncFailed
+                ? dashboardSyncRecovered
+                    ? 'Run `neurcode sync --runtime --json` to refresh bulk evidence metadata after recovery. Live approvals can still be visible while this is pending.'
+                    : `Run \`neurcode sync --runtime --json\` and inspect the bulk evidence error${connection.autoSync.lastError ? ` (${connection.autoSync.lastError})` : ''}.`
+                : undefined,
     });
     checks.push({
         id: 'runtime_transport',
@@ -153,6 +315,43 @@ function runtimeDoctorCommand(options = {}) {
         ok: summary.fail === 0,
         repoRoot,
         profileStatus: staleness.status,
+        restartRequired: liveness.status === 'fail',
+        hooks: {
+            installed: h.installed,
+            stale: h.stale,
+            entrypoint: h.entrypoint,
+            entrypointExists: h.entrypointExists,
+            entrypointPortable: h.entrypointPortable,
+        },
+        copilotHooks: {
+            installed: ch.installed,
+            stale: ch.stale,
+            hooksPath: ch.hooksPath,
+            entrypoint: ch.entrypoint,
+            entrypointExists: ch.entrypointExists,
+            entrypointPortable: ch.entrypointPortable,
+        },
+        mcp: {
+            configured: activation.mcp.configured,
+            present: activation.mcp.present,
+            stale: activation.mcp.stale,
+            configPath: activation.mcp.configPath,
+            entry: activation.mcp.entry,
+            expectedEntry: activation.mcp.expectedEntry,
+            staleReasons: activation.mcp.staleReasons,
+        },
+        hookHeartbeat: heartbeat
+            ? {
+                cliVersion: heartbeat.cliVersion,
+                entrypoint: heartbeat.entrypoint,
+                entrypointFingerprint: heartbeat.entrypointFingerprint,
+                lastEvent: heartbeat.lastEvent,
+                events: heartbeat.events,
+                matchesInstalled: installedFingerprint
+                    ? heartbeat.entrypointFingerprint === installedFingerprint
+                    : null,
+            }
+            : null,
         checks,
         summary,
     };

@@ -46,6 +46,8 @@ interface SessionCommandOptions {
     proposalId?: string;
     decision?: 'accept' | 'reject';
     decidedBy?: string;
+    force?: boolean;
+    maxAgeMinutes?: number;
 }
 interface MissingLocalGovernanceStatus {
     ok: false;
@@ -89,6 +91,7 @@ interface PresentLocalGovernanceStatus {
 type LocalGovernanceStatus = MissingLocalGovernanceStatus | PresentLocalGovernanceStatus;
 export declare function buildLocalGovernanceStatus(options?: SessionCommandOptions): LocalGovernanceStatus;
 export declare function localGovernanceStatusCommand(options?: SessionCommandOptions): void;
+export declare function resetStaleGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function replanGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function decideGovernanceReplanCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function approveGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;

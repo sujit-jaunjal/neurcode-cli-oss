@@ -24,11 +24,78 @@ exports.captureCommittedDelta = captureCommittedDelta;
 const child_process_1 = require("child_process");
 const fs_1 = require("fs");
 const path_1 = require("path");
-/** Admission artifacts are provenance support records, never governed source effects. */
+/**
+ * Local runtime state and public admission records are provenance support
+ * artifacts, never governed source effects. Repo-authored policy files such as
+ * `.neurcode/governance.json` remain visible to capture; session/profile/cache
+ * state does not pollute admission coverage.
+ */
 function isAdmissionSupportArtifactPath(path) {
     const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '');
-    return normalized.startsWith('.neurcode/admission/')
-        || normalized.startsWith('.neurcode-admission/');
+    return normalized.startsWith('.neurcode-admission/')
+        || normalized.startsWith('.neurcode/admission/')
+        || normalized.startsWith('.neurcode/sessions/')
+        || normalized.startsWith('.neurcode/evidence/')
+        || normalized.startsWith('.neurcode/executions/')
+        || normalized.startsWith('.neurcode/runtime-events/')
+        || normalized.startsWith('.neurcode/brain/cache/')
+        || normalized === '.neurcode/profile.json'
+        || normalized === '.neurcode/active-session.json'
+        || normalized === '.neurcode/runtime-connection.json'
+        || normalized === '.neurcode/runtime-outbox.json'
+        || normalized === '.neurcode/runtime-outbox.lock'
+        || normalized === '.neurcode/pilot-validation.latest.json'
+        || normalized === '.claude/settings.json'
+        || normalized === '.claude/settings.local.json';
+}
+const NEURCODE_GITIGNORE_HYGIENE_BLOCK = [
+    '# Neurcode runtime vs source separation',
+    '# Ignore all top-level runtime state by default.',
+    '.neurcode/*',
+    '# Allow source-controlled policy + template directories.',
+    '!.neurcode/policies/',
+    '!.neurcode/templates/',
+    '# Keep only canonical policy source JSON files.',
+    '.neurcode/policies/*',
+    '!.neurcode/policies/*.json',
+    '# Runtime-only policy activation snapshots are never committed.',
+    '.neurcode/policies/*.active.json',
+    '# Allow template sources.',
+    '.neurcode/templates/*',
+    '!.neurcode/templates/**',
+    '# Runtime-only files/directories are never committed.',
+    '.neurcode/intent-state.json',
+    '.neurcode/session.json',
+    '.neurcode/cache/',
+    '.neurcode/cache/**',
+];
+function stripNeurcodeGitignoreHygieneBlock(text) {
+    const lines = text.replace(/\r\n/g, '\n').split('\n');
+    for (let i = 0; i <= lines.length - NEURCODE_GITIGNORE_HYGIENE_BLOCK.length; i++) {
+        const matches = NEURCODE_GITIGNORE_HYGIENE_BLOCK.every((line, offset) => lines[i + offset]?.trim() === line);
+        if (!matches)
+            continue;
+        const next = lines[i + NEURCODE_GITIGNORE_HYGIENE_BLOCK.length];
+        const removeCount = next?.trim() === ''
+            ? NEURCODE_GITIGNORE_HYGIENE_BLOCK.length + 1
+            : NEURCODE_GITIGNORE_HYGIENE_BLOCK.length;
+        lines.splice(i, removeCount);
+        break;
+    }
+    return lines.join('\n').trim();
+}
+function isNeurcodeOnlyGitignoreHygieneChange(repoRoot, relPath, baseRef) {
+    if (relPath !== '.gitignore')
+        return false;
+    let currentText = '';
+    try {
+        currentText = (0, fs_1.readFileSync)((0, path_1.join)(repoRoot, relPath), 'utf8');
+    }
+    catch {
+        return false;
+    }
+    const baseText = baseRef ? gitTry(repoRoot, ['show', `${baseRef}:${relPath}`]) ?? '' : '';
+    return stripNeurcodeGitignoreHygieneBlock(currentText) === stripNeurcodeGitignoreHygieneBlock(baseText);
 }
 function gitText(repoRoot, args, input) {
     return (0, child_process_1.execFileSync)('git', args, {
@@ -154,6 +221,8 @@ function captureWorktreeCoverage(repoRoot, options = {}) {
         for (const rec of parseRawDiff(tokens)) {
             if (isAdmissionSupportArtifactPath(rec.path))
                 continue;
+            if (isNeurcodeOnlyGitignoreHygieneChange(repoRoot, rec.path, baseRef))
+                continue;
             seen.add(rec.path);
             const deleted = rec.status.charAt(0).toUpperCase() === 'D';
             if (deleted) {
@@ -185,6 +254,8 @@ function captureWorktreeCoverage(repoRoot, options = {}) {
     // Untracked (new) files — added.
     for (const path of splitZ(gitTry(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z']))) {
         if (isAdmissionSupportArtifactPath(path))
+            continue;
+        if (isNeurcodeOnlyGitignoreHygieneChange(repoRoot, path, baseRef))
             continue;
         if (seen.has(path))
             continue;

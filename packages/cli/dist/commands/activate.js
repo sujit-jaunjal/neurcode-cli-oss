@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activateClaudeCommand = activateClaudeCommand;
+exports.activateCopilotCommand = activateCopilotCommand;
 exports.activateCommand = activateCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
@@ -92,10 +93,10 @@ async function completeRuntimeRepoActivation(input) {
 async function activateClaudeCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: options.force === true });
-    (0, v0_governance_1.installClaudeGovernanceHooks)(repoRoot, { force: options.force === true });
-    if (options.mcp !== false) {
-        (0, v0_governance_1.installClaudeMcpConfig)({ force: options.force === true });
-    }
+    const hookResult = (0, v0_governance_1.installClaudeGovernanceHooks)(repoRoot, { force: options.force === true });
+    const mcpResult = options.mcp !== false
+        ? (0, v0_governance_1.installClaudeMcpConfig)({ force: options.force === true })
+        : null;
     const inspection = (0, v0_governance_1.inspectClaudeActivation)(repoRoot);
     const ok = inspection.hooks.installed &&
         (options.mcp === false || inspection.mcp.configured) &&
@@ -160,20 +161,121 @@ async function activateClaudeCommand(options = {}) {
             hooksInstalled: inspection.hooks.installed,
             settingsPath: inspection.hooks.settingsPath,
             hookEvents: inspection.hooks.events,
+            hooksAdded: hookResult.added,
+            hooksPreserved: hookResult.preserved,
+            hooksRepaired: hookResult.repaired,
             mcpConfigured: inspection.mcp.configured,
+            mcpPresent: inspection.mcp.present,
+            mcpStale: inspection.mcp.stale,
             mcpConfigPath: inspection.mcp.configPath,
+            mcpAdded: mcpResult?.added ?? [],
+            mcpPreserved: mcpResult?.preserved ?? [],
+            mcpRepaired: mcpResult?.repaired ?? [],
+            mcpRestartRequired: mcpResult?.restartRequired ?? false,
+            mcpStaleReasons: inspection.mcp.staleReasons,
         },
+        restartRequired: hookResult.restartRequired || (mcpResult?.restartRequired ?? false),
+        nextCheck: 'neurcode doctor --runtime',
         connection,
         next: [
-            'Open Claude Code in this repository.',
-            'Ask it to make a bounded code change.',
-            'Run `neurcode status` while the session is active.',
+            ...(hookResult.restartRequired
+                ? ['IMPORTANT: if Claude Code is already open in this repo, restart it now — hooks load at startup and do not hot-reload.']
+                : []),
+            ...(mcpResult?.restartRequired
+                ? ['IMPORTANT: Claude MCP approval config changed. Reload Claude MCP servers or restart Claude Code before relying on in-app approvals.']
+                : []),
+            'Open (or restart) Claude Code in this repository.',
+            'Run `neurcode doctor --runtime` and confirm it is green (no FAIL, no restart warning).',
+            'Give Claude Code a short, crisp goal, then make a bounded change to confirm in-flow governance.',
+        ],
+    };
+}
+async function activateCopilotCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: options.force === true });
+    const hookResult = (0, v0_governance_1.installCopilotGovernanceHooks)(repoRoot, { force: options.force === true });
+    const inspection = (0, v0_governance_1.inspectCopilotActivation)(repoRoot);
+    const ok = inspection.hooks.installed && profile.profile.topology.trackedFileCount > 0;
+    let connection;
+    if (options.connect) {
+        const parsed = parseConnectToken(options.connect, options.apiUrl);
+        const activation = await completeRuntimeRepoActivation({
+            token: parsed.token,
+            apiUrl: parsed.apiUrl,
+            repoRoot,
+            profileFreshness: (0, v0_governance_1.buildProfileFreshnessSignal)(profile, profile.refreshed ? 'auto_refreshed' : 'none'),
+        });
+        const autoSyncEnabled = options.autoSync !== false && activation.autoSync?.enabled !== false;
+        (0, config_1.saveGlobalAuth)(activation.apiKey, parsed.apiUrl, activation.organizationId);
+        (0, state_1.setWorkspaceContext)({
+            orgId: activation.organizationId,
+            ...(activation.projectId ? { projectId: activation.projectId } : {}),
+        });
+        const localConnection = {
+            schemaVersion: 1,
+            apiUrl: parsed.apiUrl,
+            organizationId: activation.organizationId,
+            projectId: activation.projectId || null,
+            repo: activation.repo,
+            profileHash: profile.profile.profileHash,
+            topologyHash: profile.profile.topology.hash,
+            keyPrefix: activation.keyPrefix,
+            connectedAt: new Date().toISOString(),
+            autoSync: {
+                enabled: autoSyncEnabled,
+                lastStatus: 'skipped',
+            },
+        };
+        (0, runtime_connection_1.saveRuntimeConnection)(repoRoot, localConnection);
+        connection = {
+            connected: true,
+            apiUrl: parsed.apiUrl,
+            organizationId: activation.organizationId,
+            projectId: activation.projectId || null,
+            repoId: activation.repo.id,
+            repoName: activation.repo.name,
+            repoKey: activation.repo.repoKey,
+            autoSyncEnabled,
+            keyPrefix: activation.keyPrefix,
+        };
+    }
+    return {
+        ok,
+        agent: 'copilot',
+        repoRoot,
+        profile: {
+            status: profile.status,
+            refreshed: profile.refreshed,
+            profileHash: profile.profile.profileHash,
+            topologyHash: profile.profile.topology.hash,
+            trackedFileCount: profile.profile.topology.trackedFileCount,
+            path: profile.profilePath,
+            reasons: profile.reasons,
+        },
+        copilot: {
+            hooksInstalled: inspection.hooks.installed,
+            hooksPath: inspection.hooks.hooksPath,
+            hookEvents: inspection.hooks.events,
+            hooksAdded: hookResult.added,
+            hooksPreserved: hookResult.preserved,
+            hooksRepaired: hookResult.repaired,
+        },
+        restartRequired: hookResult.restartRequired,
+        nextCheck: 'neurcode doctor --runtime',
+        connection,
+        next: [
+            ...(hookResult.restartRequired
+                ? ['IMPORTANT: if VS Code/Copilot Agent Mode is already open in this repo, reload the window so hooks are rediscovered.']
+                : []),
+            'Open VS Code in this repository and use Copilot Agent Mode.',
+            'Run `neurcode doctor --runtime` and confirm Copilot hooks are green.',
+            'Give Copilot a short, crisp goal; Neurcode will govern UserPromptSubmit, PreToolUse, and Stop.',
         ],
     };
 }
 function renderActivation(result, mcpSkipped) {
     console.log('');
-    console.log(chalk.bold('Neurcode activation - Claude Code'));
+    console.log(chalk.bold(`Neurcode activation - ${result.agent === 'copilot' ? 'GitHub Copilot' : 'Claude Code'}`));
     console.log(chalk.dim('-'.repeat(64)));
     console.log(`Repo:    ${chalk.white(result.repoRoot)}`);
     console.log(`Profile: ${result.profile.refreshed ? chalk.green('refreshed') : chalk.green('fresh')} ` +
@@ -182,13 +284,35 @@ function renderActivation(result, mcpSkipped) {
     if (result.profile.reasons.length > 0) {
         console.log(chalk.dim(`Reason:  ${result.profile.reasons.join('; ')}`));
     }
-    console.log(`Hooks:   ${result.claude.hooksInstalled ? chalk.green('installed') : chalk.red('not installed')} ` +
-        chalk.dim(result.claude.settingsPath));
-    console.log(`MCP:     ${mcpSkipped
-        ? chalk.yellow('skipped')
-        : result.claude.mcpConfigured
-            ? chalk.green('configured')
-            : chalk.red('not configured')} ${chalk.dim(result.claude.mcpConfigPath)}`);
+    const hookStats = result.agent === 'copilot'
+        ? result.copilot
+        : result.claude;
+    const hookPath = result.agent === 'copilot'
+        ? result.copilot.hooksPath
+        : result.claude.settingsPath;
+    const hooksInstalled = result.agent === 'copilot'
+        ? result.copilot.hooksInstalled
+        : result.claude.hooksInstalled;
+    const hookChange = hookStats.hooksRepaired.length > 0
+        ? chalk.yellow(`repaired ${hookStats.hooksRepaired.length}`)
+        : hookStats.hooksAdded.length > 0
+            ? chalk.green(`added ${hookStats.hooksAdded.length}`)
+            : chalk.green('already current');
+    console.log(`Hooks:   ${hooksInstalled ? chalk.green('installed') : chalk.red('not installed')} ` +
+        `(${hookChange}, ${hookStats.hooksPreserved.length} preserved) ` +
+        chalk.dim(hookPath));
+    if (result.agent === 'claude') {
+        console.log(`MCP:     ${mcpSkipped
+            ? chalk.yellow('skipped')
+            : result.claude.mcpConfigured
+                ? chalk.green('configured')
+                : result.claude.mcpStale
+                    ? chalk.yellow('stale')
+                    : chalk.red('not configured')} ${chalk.dim(result.claude.mcpConfigPath)}`);
+    }
+    else {
+        console.log(chalk.dim('MCP:     Copilot can use MCP tools separately; hard governance is provided by hooks.'));
+    }
     if (result.connection?.connected) {
         console.log(`Cloud:   ${chalk.green('connected')} ${chalk.dim(result.connection.repoName)} ` +
             chalk.dim(`(${result.connection.keyPrefix || 'runtime key'})`));
@@ -196,13 +320,22 @@ function renderActivation(result, mcpSkipped) {
             chalk.dim(result.connection.apiUrl));
     }
     console.log(chalk.dim('-'.repeat(64)));
-    console.log(chalk.green('Ready:') + ' Claude Code edits in this repo are governed in-flow.');
+    if (result.restartRequired) {
+        console.log(chalk.yellow('Restart required: ') +
+            (result.agent === 'copilot'
+                ? 'runtime config changed. If VS Code/Copilot Agent Mode is already open in this repo, reload the window.'
+                : 'runtime config changed. If Claude Code is already open in this repo, restart it or reload MCP servers.'));
+    }
+    else {
+        console.log(chalk.green('Ready:') + ` ${result.agent === 'copilot' ? 'Copilot Agent Mode' : 'Claude Code'} edits in this repo are governed in-flow.`);
+    }
+    console.log(chalk.dim(`Verify: run \`${result.nextCheck}\` and confirm it is green before relying on governance.`));
     console.log('');
     console.log(chalk.bold('Next'));
     for (const step of result.next) {
         console.log(chalk.dim(`  - ${step}`));
     }
-    console.log(chalk.dim('  - Blocked approvals can use `neurcode session approve --path <path>`.'));
+    console.log(chalk.dim('  - Blocked approvals can use dashboard approval or `neurcode session approve --path <path>`.'));
     console.log('');
 }
 function activateCommand(program) {
@@ -218,11 +351,11 @@ function activateCommand(program) {
         .option('--json', 'Output machine-readable JSON')
         .action(async (agentArg, options) => {
         const agent = (agentArg || 'claude').toLowerCase();
-        if (agent !== 'claude') {
+        if (agent !== 'claude' && agent !== 'copilot') {
             const payload = {
                 ok: false,
-                error: `Unsupported activation target "${agent}". V0.1 hard enforcement is Claude Code only.`,
-                supportedAgents: ['claude'],
+                error: `Unsupported activation target "${agent}".`,
+                supportedAgents: ['claude', 'copilot'],
             };
             if (options.json) {
                 console.log(JSON.stringify(payload, null, 2));
@@ -234,7 +367,9 @@ function activateCommand(program) {
             return;
         }
         try {
-            const result = await activateClaudeCommand(options);
+            const result = agent === 'copilot'
+                ? await activateCopilotCommand(options)
+                : await activateClaudeCommand(options);
             if (options.json) {
                 console.log(JSON.stringify(result, null, 2));
             }

@@ -75,6 +75,7 @@ const run_1 = require("./commands/run");
 const runtime_doctor_1 = require("./commands/runtime-doctor");
 const runtime_report_1 = require("./commands/runtime-report");
 const runtime_sync_1 = require("./commands/runtime-sync");
+const admission_1 = require("./commands/admission");
 const execution_bus_1 = require("./utils/execution-bus");
 const execution_actions_1 = require("./utils/execution-actions");
 // Read version from package.json
@@ -114,6 +115,10 @@ const CORE_WORKFLOW_STEPS = [
         description: 'Manual fallback upload for finished in-flow session records',
     },
     {
+        command: 'neurcode admission export',
+        description: 'Export the latest source-free runtime admission record for the GitHub Action',
+    },
+    {
         command: 'neurcode login',
         description: 'Connect this machine/runtime to Neurcode with browser approval',
     },
@@ -150,6 +155,7 @@ const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
     'sessions',
     'report',
     'sync',
+    'admission',
     'start',
     'quickstart',
     'verify',
@@ -248,7 +254,7 @@ function buildAdvancedLegacyHints(root) {
     return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['activate', 'agent', 'run', 'status', 'sessions', 'report', 'sync', 'login', 'init', 'start', 'quickstart', 'verify', 'remediate-export', 'replay'];
+    const primaryOrder = ['activate', 'agent', 'run', 'status', 'sessions', 'report', 'sync', 'admission', 'login', 'init', 'start', 'quickstart', 'verify', 'remediate-export', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
@@ -442,6 +448,7 @@ program
 (0, run_1.runCommand)(program);
 (0, runtime_report_1.reportCommand)(program);
 (0, runtime_sync_1.syncCommand)(program);
+(0, admission_1.admissionCommand)(program);
 program
     .command('status')
     .description('Show the active in-flow governance session for this repository')
@@ -999,6 +1006,21 @@ sessionCmd
         path: options.path,
         reason: options.reason,
         sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('reset-stale')
+    .description('Finish and clear an abandoned active in-flow governance session')
+    .option('--max-age-minutes <n>', 'Only reset sessions idle at least this many minutes (default: 120)', (value) => Number.parseFloat(value))
+    .option('--force', 'Reset even if the session is fresh or waiting on approval')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.resetStaleGovernanceSessionCommand)({
+        maxAgeMinutes: Number.isFinite(options.maxAgeMinutes) ? options.maxAgeMinutes : undefined,
+        force: options.force === true,
         dir: options.dir,
         json: options.json === true,
     });

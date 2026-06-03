@@ -10,7 +10,7 @@ interface ActivateOptions {
 }
 export interface ActivateResult {
     ok: boolean;
-    agent: 'claude';
+    agent: 'claude' | 'copilot';
     repoRoot: string;
     profile: {
         status: string;
@@ -21,13 +21,38 @@ export interface ActivateResult {
         path: string;
         reasons: string[];
     };
-    claude: {
+    claude?: {
         hooksInstalled: boolean;
         settingsPath: string;
         hookEvents: Record<string, boolean>;
+        /** Hook events freshly added (no prior Neurcode hook). */
+        hooksAdded: string[];
+        /** Hook events left untouched because they were already current. */
+        hooksPreserved: string[];
+        /** Hook events whose stale/older Neurcode command was replaced. */
+        hooksRepaired: string[];
         mcpConfigured: boolean;
+        mcpPresent: boolean;
+        mcpStale: boolean;
         mcpConfigPath: string;
+        mcpAdded: string[];
+        mcpPreserved: string[];
+        mcpRepaired: string[];
+        mcpRestartRequired: boolean;
+        mcpStaleReasons: string[];
     };
+    copilot?: {
+        hooksInstalled: boolean;
+        hooksPath: string;
+        hookEvents: Record<string, boolean>;
+        hooksAdded: string[];
+        hooksPreserved: string[];
+        hooksRepaired: string[];
+    };
+    /** True when hooks or MCP config changed; if Claude Code was already open, restart/reload it. */
+    restartRequired: boolean;
+    /** The exact command an operator should run next to confirm live governance. */
+    nextCheck: string;
     connection?: {
         connected: boolean;
         apiUrl: string;
@@ -42,6 +67,7 @@ export interface ActivateResult {
     next: string[];
 }
 export declare function activateClaudeCommand(options?: ActivateOptions): Promise<ActivateResult>;
+export declare function activateCopilotCommand(options?: ActivateOptions): Promise<ActivateResult>;
 export declare function activateCommand(program: Command): void;
 export {};
 //# sourceMappingURL=activate.d.ts.map
