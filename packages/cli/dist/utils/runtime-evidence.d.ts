@@ -24,6 +24,7 @@ export interface RuntimeEvidenceReport {
         totalChecks: number;
         blockedEdits: number;
         warnedSensitiveEdits: number;
+        allowedWithAdvisories: number;
         allowedEdits: number;
         approvalsGranted: number;
     };

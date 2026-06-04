@@ -51,6 +51,22 @@ function eventTime(event) {
     const parsed = Date.parse(event.ts);
     return Number.isFinite(parsed) ? parsed : 0;
 }
+function boundaryVerdict(event) {
+    const detail = event.detail;
+    if (!detail || typeof detail !== 'object' || Array.isArray(detail))
+        return null;
+    const value = detail.boundaryVerdict;
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+function isAllowedAdvisoryEvent(event) {
+    return event.type === 'check_warn' && boundaryVerdict(event) === 'ok';
+}
+function isSensitiveWarningEvent(event) {
+    if (event.type !== 'check_warn')
+        return false;
+    const verdict = boundaryVerdict(event);
+    return verdict !== 'ok';
+}
 function parseSinceDuration(input) {
     if (!input)
         return { cutoffMs: null, label: null };
@@ -87,8 +103,8 @@ function listRuntimeSessions(repoRoot, options = {}) {
                 path,
                 startedAt: sessionStartedAt(session),
                 blockCount: session.events.filter((event) => event.type === 'check_block').length,
-                warnCount: session.events.filter((event) => event.type === 'check_warn').length,
-                okCount: session.events.filter((event) => event.type === 'check_ok').length,
+                warnCount: session.events.filter(isSensitiveWarningEvent).length,
+                okCount: session.events.filter((event) => event.type === 'check_ok' || isAllowedAdvisoryEvent(event)).length,
                 approvalCount: session.events.filter((event) => event.type === 'approval_decision').length,
             });
         }
@@ -127,6 +143,7 @@ function buildRuntimeEvidenceReport(repoRoot, options = {}) {
     const activeSessions = records.filter((record) => record.session.status === 'active').length;
     const finishedSessions = records.filter((record) => record.session.status === 'finished').length;
     const totalChecks = records.reduce((sum, record) => sum + record.blockCount + record.warnCount + record.okCount, 0);
+    const allowedWithAdvisories = records.reduce((sum, record) => sum + record.session.events.filter(isAllowedAdvisoryEvent).length, 0);
     return {
         repoRoot,
         generatedAt: new Date().toISOString(),
@@ -143,6 +160,7 @@ function buildRuntimeEvidenceReport(repoRoot, options = {}) {
             totalChecks,
             blockedEdits: records.reduce((sum, record) => sum + record.blockCount, 0),
             warnedSensitiveEdits: records.reduce((sum, record) => sum + record.warnCount, 0),
+            allowedWithAdvisories,
             allowedEdits: records.reduce((sum, record) => sum + record.okCount, 0),
             approvalsGranted: records.reduce((sum, record) => sum + record.approvalCount, 0),
         },
@@ -185,6 +203,7 @@ function renderRuntimeEvidenceMarkdown(report) {
     lines.push(`- Total edit checks: ${report.summary.totalChecks}`);
     lines.push(`- Blocked edits: ${report.summary.blockedEdits}`);
     lines.push(`- Warned sensitive edits: ${report.summary.warnedSensitiveEdits}`);
+    lines.push(`- Allowed edits with advisory obligations: ${report.summary.allowedWithAdvisories}`);
     lines.push(`- Allowed edits: ${report.summary.allowedEdits}`);
     lines.push(`- Approvals granted: ${report.summary.approvalsGranted}`);
     lines.push('');

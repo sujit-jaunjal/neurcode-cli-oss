@@ -76,6 +76,7 @@ const runtime_doctor_1 = require("./commands/runtime-doctor");
 const runtime_report_1 = require("./commands/runtime-report");
 const runtime_sync_1 = require("./commands/runtime-sync");
 const admission_1 = require("./commands/admission");
+const demo_1 = require("./commands/demo");
 const execution_bus_1 = require("./utils/execution-bus");
 const execution_actions_1 = require("./utils/execution-actions");
 // Read version from package.json
@@ -119,6 +120,10 @@ const CORE_WORKFLOW_STEPS = [
         description: 'Export the latest source-free runtime admission record for the GitHub Action',
     },
     {
+        command: 'neurcode demo rehearse',
+        description: 'Print the canonical production demo rehearsal protocol',
+    },
+    {
         command: 'neurcode login',
         description: 'Connect this machine/runtime to Neurcode with browser approval',
     },
@@ -144,6 +149,7 @@ const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
     'report',
     'sync',
     'admission',
+    'demo',
     'start',
     'quickstart',
     'replay',
@@ -240,7 +246,7 @@ function buildAdvancedLegacyHints(root) {
     return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['activate', 'agent', 'run', 'status', 'sessions', 'report', 'sync', 'admission', 'login', 'init', 'start', 'quickstart', 'replay'];
+    const primaryOrder = ['activate', 'agent', 'run', 'status', 'sessions', 'report', 'sync', 'admission', 'demo', 'login', 'init', 'start', 'quickstart', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
@@ -435,6 +441,7 @@ program
 (0, runtime_report_1.reportCommand)(program);
 (0, runtime_sync_1.syncCommand)(program);
 (0, admission_1.admissionCommand)(program);
+(0, demo_1.demoCommand)(program);
 program
     .command('status')
     .description('Show the active in-flow governance session for this repository')

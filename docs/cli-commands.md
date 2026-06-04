@@ -22,6 +22,7 @@ neurcode activate claude --connect <token>
 neurcode doctor --runtime
 neurcode status --json
 neurcode report --runtime
+neurcode demo rehearse
 ```
 
 Primary loop:
@@ -78,6 +79,15 @@ Export the latest source-free runtime admission record for the GitHub Action com
 ```bash
 neurcode admission export
 neurcode admission export --json
+```
+
+### `neurcode demo rehearse`
+
+Print the canonical production demo rehearsal protocol: exact goal, safe edit path, approval-required probe path, neighboring-file isolation check, dashboard approval rules, and the operator reply to continue after approval.
+
+```bash
+neurcode demo rehearse
+neurcode demo rehearse --json
 ```
 
 ## Compatibility Command Reference
