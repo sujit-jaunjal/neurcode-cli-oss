@@ -136,6 +136,15 @@ function renderDecision(result, target) {
 function capabilityFor(adapter) {
     return (0, governance_runtime_1.listAgentRuntimeAdapterCapabilities)().find((capability) => capability.adapter === adapter);
 }
+function controlLevelLabel(level) {
+    if (level === 'hard_block_capable')
+        return 'hard-block capable';
+    if (level === 'supervised_advisory_capable')
+        return 'supervised/advisory capable';
+    if (level === 'evidence_only_capable')
+        return 'evidence-only capable';
+    return 'unsupported/unknown';
+}
 function firstRunCommands(input) {
     const session = input.sessionIdPlaceholder || '<session-id>';
     if (input.target === 'claude') {
@@ -212,6 +221,7 @@ function buildSetupPayload(agentArg, options) {
         adapter: snippet.adapter,
         enforcement: {
             level: capability?.enforcementLevel ?? 'cooperative',
+            controlLevel: capability?.controlLevel ?? 'unsupported_unknown',
             automatic: capability?.automatic ?? false,
             description: capability?.description ?? 'Portable MCP runtime adapter.',
         },
@@ -264,6 +274,7 @@ function renderSetup(payload) {
     console.log(chalk.dim('-'.repeat(72)));
     console.log(`Repo:     ${chalk.white(payload.repoRoot)}`);
     console.log(`Adapter:  ${payload.adapter} ${chalk.dim(`(${payload.enforcement.level}${payload.enforcement.automatic ? ', automatic' : ', explicit'})`)}`);
+    console.log(`Control:  ${controlLevelLabel(payload.enforcement.controlLevel)}`);
     console.log(`Profile:  ${payload.profile.refreshed ? chalk.green('refreshed') : chalk.green(payload.profile.status)} ${chalk.dim(payload.profile.profileHash)}`);
     console.log(`MCP:      ${payload.mcp.after.configured === true ? chalk.green('configured') : payload.mcp.after.configured === false ? chalk.yellow('not configured') : chalk.dim('manual')}`);
     console.log(`Rules:    ${payload.instructions.after.installed === true ? chalk.green('installed') : payload.instructions.after.installed === false ? chalk.yellow('missing') : chalk.dim('optional')}`);
@@ -374,7 +385,7 @@ function buildDoctorPayload(agentArg, options) {
             id: 'adapter',
             label: 'Adapter capability',
             status: 'pass',
-            message: `${inspection.adapter} reports ${capability?.enforcementLevel ?? 'cooperative'} enforcement (${capability?.automatic ? 'automatic' : 'explicit agent calls'}).`,
+            message: `${inspection.adapter} reports ${controlLevelLabel(capability?.controlLevel)} (${capability?.enforcementLevel ?? 'cooperative'}, ${capability?.automatic ? 'automatic' : 'explicit agent calls'}).`,
         },
         configCheck(inspection),
         instructionCheck(instructionInspection),
@@ -410,6 +421,8 @@ function buildDoctorPayload(agentArg, options) {
         repoRoot,
         target,
         adapter: inspection.adapter,
+        controlLevel: capability?.controlLevel ?? 'unsupported_unknown',
+        controlLabel: controlLevelLabel(capability?.controlLevel),
         checks,
         summary,
         next: summary.fail > 0
@@ -427,6 +440,7 @@ function renderDoctor(payload) {
     console.log(chalk.dim('-'.repeat(72)));
     console.log(`Repo:    ${chalk.white(payload.repoRoot)}`);
     console.log(`Adapter: ${payload.adapter}`);
+    console.log(`Control: ${payload.controlLabel}`);
     console.log('');
     for (const check of payload.checks) {
         console.log(`${statusLabel(check.status)} ${chalk.bold(check.label)}`);
@@ -551,6 +565,8 @@ function buildReadinessPayload(agentArg, options) {
         readiness,
         guarantee: {
             enforcementLevel: capability?.enforcementLevel ?? 'unknown',
+            controlLevel: capability?.controlLevel ?? 'unsupported_unknown',
+            controlLabel: controlLevelLabel(capability?.controlLevel),
             automatic: capability?.automatic ?? false,
             mode: readinessMode(capability?.enforcementLevel),
             truthfulClaim: isCooperative
@@ -601,7 +617,7 @@ function renderReadiness(payload) {
     console.log(chalk.dim('-'.repeat(72)));
     console.log(`Repo:      ${chalk.white(payload.repoRoot)}`);
     console.log(`Adapter:   ${payload.adapter}`);
-    console.log(`Guarantee: ${payload.guarantee.mode}`);
+    console.log(`Guarantee: ${payload.guarantee.controlLabel} · ${payload.guarantee.mode}`);
     console.log(`Readiness: ${payload.readiness === 'ready' ? chalk.green(payload.readiness) : payload.readiness === 'not_ready' ? chalk.red(payload.readiness) : chalk.yellow(payload.readiness)}`);
     console.log(`Pilot:     ${payload.pilotReady ? chalk.green('ready enough to test') : chalk.yellow('needs attention')}`);
     if (payload.session)
@@ -840,7 +856,7 @@ function agentCommand(program) {
             return;
         }
         for (const capability of capabilities) {
-            console.log(`${capability.adapter.padEnd(18)} ${capability.enforcementLevel.padEnd(20)} ` +
+            console.log(`${capability.adapter.padEnd(18)} ${controlLevelLabel(capability.controlLevel).padEnd(28)} ${capability.enforcementLevel.padEnd(20)} ` +
                 `${capability.automatic ? 'automatic' : 'explicit'} · ${capability.description}`);
         }
     });

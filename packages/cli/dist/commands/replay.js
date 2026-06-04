@@ -5,6 +5,7 @@ const fs_1 = require("fs");
 const path_1 = require("path");
 const replay_runtime_1 = require("../utils/replay-runtime");
 const replay_html_report_1 = require("../utils/replay-html-report");
+const runtime_receipt_1 = require("../utils/runtime-receipt");
 function asPrettyJson(value) {
     return JSON.stringify(value, null, 2);
 }
@@ -165,6 +166,34 @@ function printTimelineSummary(result) {
     }
     console.log('');
 }
+function printReceiptVerificationSummary(filePath, entries) {
+    const ok = entries.every((entry) => entry.verification.valid);
+    console.log('\nRuntime Receipt Verification\n');
+    console.log(`File: ${filePath}`);
+    console.log(`Receipts: ${entries.length}`);
+    console.log(`Result: ${ok ? 'valid' : 'failed'}`);
+    for (const entry of entries) {
+        const receipt = entry.receipt;
+        const verification = entry.verification;
+        console.log('');
+        console.log(`- ${receipt.receiptId} (${entry.path})`);
+        console.log(`  Status: ${verification.status}`);
+        console.log(`  Session: ${receipt.sessionId} · repo ${receipt.repoKey || receipt.repoId || 'unknown'}`);
+        console.log(`  Record hash: ${receipt.recordHash}`);
+        console.log(`  Evidence hash: ${receipt.evidenceHash}`);
+        console.log(`  Signature: ${receipt.signatureStatus}${receipt.signingKeyId ? ` · key ${receipt.signingKeyId}` : ''}`);
+        console.log(`  Checks: canonical ${verification.checks.canonicalHash ? 'ok' : 'fail'} · ` +
+            `receipt ${verification.checks.receiptHash ? 'ok' : 'fail'} · ` +
+            `signature ${verification.checks.signature ? 'ok' : 'fail'} · ` +
+            `source-free ${verification.checks.sourceFree ? 'ok' : 'fail'}`);
+        if (verification.reasons.length > 0) {
+            console.log('  Reasons:');
+            for (const reason of verification.reasons)
+                console.log(`  - ${reason}`);
+        }
+    }
+    console.log('');
+}
 function replayCommand(program) {
     const root = program
         .command('replay')
@@ -234,6 +263,61 @@ function replayCommand(program) {
                 return;
             }
             printStateSummary(state);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`❌ ${message}`);
+            process.exit(1);
+        }
+    });
+    root
+        .command('verify-receipt <path>')
+        .description('Verify a backend-signed runtime evidence receipt or exported session JSON')
+        .option('--json', 'Output JSON')
+        .action((filePath, options) => {
+        try {
+            const rootOptions = root.opts();
+            const jsonEnabled = optionEnabled(options, rootOptions, 'json');
+            const resolvedPath = (0, path_1.resolve)(filePath);
+            const parsed = JSON.parse((0, fs_1.readFileSync)(resolvedPath, 'utf-8'));
+            const artifacts = (0, runtime_receipt_1.extractRuntimeReceiptArtifacts)(parsed);
+            if (artifacts.length === 0) {
+                throw new Error('No runtime backend evidence receipt found in the provided JSON file');
+            }
+            const entries = artifacts.map((artifact) => ({
+                ...artifact,
+                verification: (0, runtime_receipt_1.verifyRuntimeBackendEvidenceReceipt)(artifact.receipt),
+            }));
+            const ok = entries.every((entry) => entry.verification.valid);
+            const payload = {
+                generatedAt: new Date().toISOString(),
+                file: resolvedPath,
+                ok,
+                receiptCount: entries.length,
+                verifications: entries.map((entry) => ({
+                    path: entry.path,
+                    receiptId: entry.receipt.receiptId,
+                    issuedAt: entry.receipt.issuedAt,
+                    organizationId: entry.receipt.organizationId,
+                    repoId: entry.receipt.repoId,
+                    repoKey: entry.receipt.repoKey,
+                    sessionId: entry.receipt.sessionId,
+                    recordHash: entry.receipt.recordHash,
+                    replayHash: entry.receipt.replayHash,
+                    evidenceHash: entry.receipt.evidenceHash,
+                    signatureStatus: entry.receipt.signatureStatus,
+                    signingKeyId: entry.receipt.signingKeyId,
+                    verification: entry.verification,
+                })),
+            };
+            if (jsonEnabled) {
+                console.log(asPrettyJson(payload));
+            }
+            else {
+                printReceiptVerificationSummary(resolvedPath, entries);
+            }
+            if (!ok)
+                process.exit(1);
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
