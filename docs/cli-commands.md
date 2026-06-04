@@ -22,6 +22,7 @@ neurcode activate claude --connect <token>
 neurcode doctor --runtime
 neurcode status --json
 neurcode runtime cloud-status --json
+neurcode runtime reset-stale-cloud --json
 neurcode report --runtime
 neurcode demo rehearse
 ```
@@ -75,6 +76,18 @@ neurcode runtime cloud-status --session-id <sessionId> --json
 ```
 
 This command is read-only. It does not approve, deny, retry, upload source, or change session state.
+
+### `neurcode runtime reset-stale-cloud`
+
+Finish a stale dashboard-visible live session and revoke pending exact-path approvals for that session. This is an operator cleanup command for demo and production hygiene when an agent session stopped before its final hook could close the live pointer.
+
+```bash
+neurcode runtime reset-stale-cloud
+neurcode runtime reset-stale-cloud --session-id <sessionId> --json
+neurcode runtime reset-stale-cloud --reason "Operator closed stale rehearsal session"
+```
+
+By default, the backend refuses to finish a session that is not stale yet. Use `--force` only when an operator intentionally closes an active session. The command is source-free: it sends session id, repo key, reason, and operator metadata, never source code.
 
 ### `neurcode report --runtime`
 

@@ -225,6 +225,17 @@ export interface RuntimeControlPlaneApprovalsResponse {
         uploadedFields: string[];
     };
 }
+export interface RuntimeLiveSessionFinishResponse {
+    ok: boolean;
+    alreadyFinished?: boolean;
+    session: RuntimeLiveSession;
+    revokedApprovals: RuntimeLiveApproval[];
+    staleSeconds?: number | null;
+    privacy: {
+        sourceUploaded: false;
+        uploadedFields: string[];
+    };
+}
 export interface RuntimeEvidenceSummaryResponse {
     generatedAt: string;
     summary: {
@@ -558,6 +569,11 @@ export declare class ApiClient {
         repoKey?: string;
     }): Promise<RuntimeEvidenceSummaryResponse>;
     getRuntimeOperationsStatus(): Promise<RuntimeOperationsStatusResponse>;
+    finishStaleRuntimeLiveSession(sessionId: string, input?: {
+        repoKey?: string;
+        reason?: string;
+        force?: boolean;
+    }): Promise<RuntimeLiveSessionFinishResponse>;
     acknowledgeRuntimeLiveApproval(sessionId: string, approvalId: string, body: {
         status?: 'applied' | 'failed' | 'revoked';
         appliedPath?: string;

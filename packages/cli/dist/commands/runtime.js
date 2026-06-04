@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runtimeCloudStatusCommand = runtimeCloudStatusCommand;
+exports.runtimeResetStaleCloudCommand = runtimeResetStaleCloudCommand;
 exports.runtimeCommand = runtimeCommand;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const api_client_1 = require("../api-client");
@@ -168,6 +169,14 @@ function printCloudStatus(payload) {
     console.log('');
     console.log(chalk.dim('Privacy: read-only command; no source, diff, patch, before/after, or file content is uploaded.'));
 }
+function buildClientForConnection(connection) {
+    const config = (0, config_1.loadConfig)();
+    config.apiUrl = connection.apiUrl;
+    config.orgId = connection.organizationId;
+    config.projectId = connection.projectId || config.projectId;
+    config.apiKey = (0, config_1.requireApiKey)(connection.organizationId);
+    return new api_client_1.ApiClient(config);
+}
 async function runtimeCloudStatusCommand(options = {}) {
     try {
         const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
@@ -225,6 +234,106 @@ async function runtimeCloudStatusCommand(options = {}) {
         process.exitCode = 1;
     }
 }
+async function runtimeResetStaleCloudCommand(options = {}) {
+    try {
+        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+        const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+        if (!connection) {
+            const payload = {
+                ok: false,
+                error: 'Repository is not paired with the Runtime Control Plane.',
+                next: 'Run `neurcode activate claude --connect <token>` or connect the repo from the dashboard.',
+                privacy: {
+                    sourceUploaded: false,
+                    commandMode: 'stale_session_cleanup',
+                },
+            };
+            if (options.json) {
+                console.log(JSON.stringify(payload, null, 2));
+            }
+            else {
+                console.error(chalk.red(payload.error));
+                console.log(chalk.dim(payload.next));
+            }
+            process.exitCode = 1;
+            return;
+        }
+        const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+        const client = buildClientForConnection(connection);
+        const repoKey = options.repoKey || connection.repo.repoKey;
+        const initialSessionId = firstString(options.sessionId) || activeSession?.sessionId || null;
+        let sessionId = initialSessionId;
+        if (!sessionId) {
+            const live = await client.getRuntimeLiveSessions({ repoKey, limit: 50 });
+            const stale = live.liveSessions.find((session) => session.lifecycle?.phase === 'stale');
+            sessionId = stale?.sessionId || live.liveSessions.find((session) => session.status === 'active')?.sessionId || null;
+        }
+        if (!sessionId) {
+            const payload = {
+                ok: false,
+                error: 'No local or cloud live session found to reset.',
+                privacy: {
+                    sourceUploaded: false,
+                    commandMode: 'stale_session_cleanup',
+                },
+            };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else
+                console.error(chalk.yellow(payload.error));
+            process.exitCode = 1;
+            return;
+        }
+        const response = await client.finishStaleRuntimeLiveSession(sessionId, {
+            repoKey,
+            reason: options.reason || 'Operator closed stale runtime session',
+            force: options.force === true,
+        });
+        const payload = {
+            ok: true,
+            repoRoot,
+            repo: connection.repo,
+            sessionId,
+            force: options.force === true,
+            result: response,
+            privacy: {
+                sourceUploaded: false,
+                commandMode: 'stale_session_cleanup',
+                uploadedFields: response.privacy.uploadedFields,
+            },
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        console.log(chalk.bold('Runtime stale session cleanup'));
+        console.log(chalk.dim(`Repo:       ${connection.repo.name} (${connection.repo.repoKey})`));
+        console.log(chalk.dim(`Session:    ${sessionId}`));
+        console.log(`Status:     ${response.alreadyFinished ? chalk.green('already finished') : chalk.green('finished')}`);
+        console.log(chalk.dim(`Approvals:  revoked ${response.revokedApprovals.length} pending request${response.revokedApprovals.length === 1 ? '' : 's'}`));
+        if (typeof response.staleSeconds === 'number') {
+            console.log(chalk.dim(`Age:        ${Math.floor(response.staleSeconds / 60)}m stale`));
+        }
+        console.log(chalk.dim('Privacy: source-free; no code, diff, patch, before/after, or file content uploaded.'));
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json) {
+            console.log(JSON.stringify({
+                ok: false,
+                error: message,
+                privacy: {
+                    sourceUploaded: false,
+                    commandMode: 'stale_session_cleanup',
+                },
+            }, null, 2));
+        }
+        else {
+            console.error(chalk.red(`Runtime stale cleanup failed: ${message}`));
+        }
+        process.exitCode = 1;
+    }
+}
 function runtimeCommand(program) {
     const runtime = program
         .command('runtime')
@@ -240,6 +349,25 @@ function runtimeCommand(program) {
         await runtimeCloudStatusCommand({
             sessionId: options.sessionId,
             repoKey: options.repoKey,
+            dir: options.dir,
+            json: options.json === true,
+        });
+    });
+    runtime
+        .command('reset-stale-cloud')
+        .description('Finish a stale dashboard live session and revoke its pending approvals')
+        .option('--session-id <id>', 'Governance session ID (default: active local session or latest stale cloud session)')
+        .option('--repo-key <key>', 'Runtime repo key (default: paired repo)')
+        .option('--reason <text>', 'Operator cleanup reason')
+        .option('--force', 'Finish even if the session is not older than the stale threshold')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        await runtimeResetStaleCloudCommand({
+            sessionId: options.sessionId,
+            repoKey: options.repoKey,
+            reason: options.reason,
+            force: options.force === true,
             dir: options.dir,
             json: options.json === true,
         });

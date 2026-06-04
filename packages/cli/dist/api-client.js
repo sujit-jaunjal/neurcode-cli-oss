@@ -411,6 +411,16 @@ class ApiClient {
             },
         });
     }
+    async finishStaleRuntimeLiveSession(sessionId, input = {}) {
+        const url = `${this.apiUrl}/api/v1/runtime/live-sessions/${encodeURIComponent(sessionId)}/finish-stale`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(input),
+        });
+    }
     async acknowledgeRuntimeLiveApproval(sessionId, approvalId, body) {
         const url = `${this.apiUrl}/api/v1/runtime/live-sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approvalId)}/applied`;
         return this.makeRequest(url, {
