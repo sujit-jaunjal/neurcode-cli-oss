@@ -4,6 +4,7 @@ export interface InFlowConsequenceNudge {
     severity: 'high' | 'medium';
     headline: string;
     finding: ConsequenceTopFinding;
+    surfacedFindings: ConsequenceTopFinding[];
     artifactHash: string;
     provenance: 'deterministic-static';
 }

@@ -155,6 +155,22 @@ export interface ConsequenceConsumerReference {
     inChangedFile: boolean;
     provenance: 'typescript-compiler';
 }
+export interface ConsequenceConsumerSummary {
+    productionConsumerCount: number;
+    testConsumerCount: number;
+    externalProductionConsumerCount: number;
+    sensitiveConsumerCount: number;
+    approvalRequiredConsumerCount: number;
+    runtimeGovernanceConsumerCount: number;
+    productionFiles: string[];
+    testFiles: string[];
+    sensitiveFiles: string[];
+    approvalRequiredFiles: string[];
+    runtimeGovernanceFiles: string[];
+    highFanout: boolean;
+    architectureRelevant: boolean;
+    provenance: 'typescript-compiler+governance-profile+path-classifier';
+}
 export interface ConsequenceContractDelta {
     symbol: string;
     file: string;
@@ -186,7 +202,8 @@ export interface ConsequenceTopFinding {
     testConsumerCount: number;
     externalConsumerCount: number;
     externalConsumerFiles: string[];
-    reasonCodes: Array<'effect_added' | 'effect_removed' | 'filesystem_write' | 'session_evidence_write' | 'network_send' | 'contract_changed' | 'breaking_contract_shape' | 'has_consumers' | 'non_test_consumers' | 'external_consumers' | 'changed_file_only' | 'test_only_consumers' | 'test_file_effect' | 'inheritor_affected'>;
+    consumerSummary: ConsequenceConsumerSummary;
+    reasonCodes: Array<'effect_added' | 'effect_removed' | 'filesystem_write' | 'session_evidence_write' | 'network_send' | 'contract_changed' | 'breaking_contract_shape' | 'has_consumers' | 'non_test_consumers' | 'external_consumers' | 'changed_file_only' | 'test_only_consumers' | 'test_file_effect' | 'inheritor_affected' | 'sensitive_consumers' | 'approval_required_consumers' | 'runtime_governance_consumers' | 'high_fanout' | 'architecture_relevant'>;
     provenance: 'deterministic-ranking';
 }
 export interface ConsequenceUnderstandingArtifact {

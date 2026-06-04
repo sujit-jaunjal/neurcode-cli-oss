@@ -159,7 +159,8 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
             maxProgramFiles: hookAnalysisLimit('NEURCODE_CONSEQUENCE_NUDGE_MAX_PROGRAM_FILES', 2500),
             timeBudgetMs: hookAnalysisLimit('NEURCODE_CONSEQUENCE_NUDGE_TIME_BUDGET_MS', 3500),
         });
-        const [nudge] = (0, consequence_nudges_1.selectInFlowConsequenceNudges)(artifact, { max: 1 });
+        const nudges = (0, consequence_nudges_1.selectInFlowConsequenceNudges)(artifact, { max: 3 });
+        const [nudge] = nudges;
         if (!nudge)
             return null;
         const latest = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId) || session;
@@ -177,6 +178,11 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
                 artifactHash: artifact.artifactHash,
                 artifactPath: artifactPath.replace(`${repoRoot}/`, ''),
                 analysis: artifact.analysis,
+                changedFiles: artifact.changedFiles,
+                changedSymbols: artifact.changedSymbols,
+                digest: artifact.digest,
+                boundaryImpact: artifact.boundaryImpact,
+                suppressedArtifacts: artifact.suppressedArtifacts,
                 consequenceUnderstanding: {
                     schemaVersion: artifact.consequenceUnderstanding.schemaVersion,
                     analyzed: artifact.consequenceUnderstanding.analyzed,
@@ -203,10 +209,25 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
                     file: nudge.finding.file,
                     symbol: nudge.finding.symbol,
                     summary: nudge.finding.summary,
+                    consumerCount: nudge.finding.consumerCount,
+                    nonTestConsumerCount: nudge.finding.nonTestConsumerCount,
+                    testConsumerCount: nudge.finding.testConsumerCount,
                     externalConsumerCount: nudge.finding.externalConsumerCount,
                     externalConsumerFiles: nudge.finding.externalConsumerFiles,
+                    consumerSummary: nudge.finding.consumerSummary,
                     reasonCodes: nudge.finding.reasonCodes,
                 },
+                topFindings: nudges.map((item) => ({
+                    nudgeKey: item.nudgeKey,
+                    severity: item.severity,
+                    findingType: item.finding.findingType,
+                    file: item.finding.file,
+                    symbol: item.finding.symbol,
+                    externalConsumerCount: item.finding.externalConsumerCount,
+                    externalConsumerFiles: item.finding.externalConsumerFiles,
+                    consumerSummary: item.finding.consumerSummary,
+                    reasonCodes: item.finding.reasonCodes,
+                })),
                 provenance: nudge.provenance,
                 killSwitch: 'NEURCODE_DISABLE_CONSEQUENCE_NUDGES=1',
             },
@@ -998,8 +1019,19 @@ async function handleCheck(cmdCwd) {
                         symbol: consequenceNudge.finding.symbol,
                         externalConsumerCount: consequenceNudge.finding.externalConsumerCount,
                         externalConsumerFiles: consequenceNudge.finding.externalConsumerFiles,
+                        consumerSummary: consequenceNudge.finding.consumerSummary,
                         reasonCodes: consequenceNudge.finding.reasonCodes,
                     },
+                    surfacedFindingLimit: 3,
+                    topFindings: consequenceNudge.surfacedFindings.map((finding) => ({
+                        findingType: finding.findingType,
+                        file: finding.file,
+                        symbol: finding.symbol,
+                        externalConsumerCount: finding.externalConsumerCount,
+                        externalConsumerFiles: finding.externalConsumerFiles,
+                        consumerSummary: finding.consumerSummary,
+                        reasonCodes: finding.reasonCodes,
+                    })),
                 },
             },
         }) + '\n');

@@ -909,6 +909,29 @@ function ownersForReference(profile, file) {
 function approvalRequiredForReference(profile, file) {
     return profile ? profile.approvalRequiredPaths.some((glob) => matchesSimpleGlob(file, glob)) : false;
 }
+function sensitiveForReference(profile, file) {
+    return profile ? profile.sensitiveBoundaries.some((boundary) => matchesSimpleGlob(file, boundary.glob)) : false;
+}
+function runtimeGovernanceConsumer(consumer) {
+    const haystack = [
+        consumer.file,
+        consumer.symbol ?? '',
+        consumer.kind ?? '',
+    ].join(' ').toLowerCase();
+    return /\b(runtime|governance|approval|approv|session|evidence|ledger|hook|control-plane|controlplane|audit|receipt|policy)\b/.test(haystack);
+}
+function profileFromSession(session) {
+    if (!session)
+        return null;
+    return {
+        ownershipBoundaries: session.contract.ownershipRules ?? [],
+        approvalRequiredPaths: session.contract.approvalRequiredGlobs ?? [],
+        sensitiveBoundaries: (session.contract.sensitiveGlobs ?? []).map((glob) => ({
+            glob,
+            reason: 'session-contract',
+        })),
+    };
+}
 function plannedFileMatches(planAlignment, file) {
     if (!planAlignment)
         return false;
@@ -1418,6 +1441,52 @@ function contractReasonCodes(delta) {
         out.push('test_only_consumers');
     return out;
 }
+function consumerSummaryReasonCodes(summary) {
+    const out = [];
+    if (summary.sensitiveConsumerCount > 0)
+        out.push('sensitive_consumers');
+    if (summary.approvalRequiredConsumerCount > 0)
+        out.push('approval_required_consumers');
+    if (summary.runtimeGovernanceConsumerCount > 0)
+        out.push('runtime_governance_consumers');
+    if (summary.highFanout)
+        out.push('high_fanout');
+    if (summary.architectureRelevant)
+        out.push('architecture_relevant');
+    return out;
+}
+function orderedConsequenceReasonCodes(values) {
+    return Array.from(new Set(values));
+}
+function buildConsumerSummary(input) {
+    const production = input.consumers.filter((consumer) => !consumer.isTestFile);
+    const tests = input.consumers.filter((consumer) => consumer.isTestFile);
+    const externalProduction = input.externalConsumers.filter((consumer) => !consumer.isTestFile);
+    const sensitive = input.consumers.filter((consumer) => sensitiveForReference(input.profile, consumer.file));
+    const approvalRequired = input.consumers.filter((consumer) => approvalRequiredForReference(input.profile, consumer.file));
+    const runtimeGovernance = input.consumers.filter(runtimeGovernanceConsumer);
+    const highFanout = externalProduction.length >= 3 || production.length >= 5;
+    const architectureRelevant = highFanout ||
+        sensitive.length > 0 ||
+        approvalRequired.length > 0 ||
+        runtimeGovernance.length > 0;
+    return {
+        productionConsumerCount: production.length,
+        testConsumerCount: tests.length,
+        externalProductionConsumerCount: externalProduction.length,
+        sensitiveConsumerCount: sensitive.length,
+        approvalRequiredConsumerCount: approvalRequired.length,
+        runtimeGovernanceConsumerCount: runtimeGovernance.length,
+        productionFiles: uniqueSorted(externalProduction.map((consumer) => consumer.file)).slice(0, 12),
+        testFiles: uniqueSorted(tests.map((consumer) => consumer.file)).slice(0, 12),
+        sensitiveFiles: uniqueSorted(sensitive.map((consumer) => consumer.file)).slice(0, 12),
+        approvalRequiredFiles: uniqueSorted(approvalRequired.map((consumer) => consumer.file)).slice(0, 12),
+        runtimeGovernanceFiles: uniqueSorted(runtimeGovernance.map((consumer) => consumer.file)).slice(0, 12),
+        highFanout,
+        architectureRelevant,
+        provenance: 'typescript-compiler+governance-profile+path-classifier',
+    };
+}
 function externalConsumerSummary(consumers, max = 3) {
     const files = uniqueSorted(consumers.map((consumer) => consumer.file));
     if (files.length === 0)
@@ -1448,6 +1517,11 @@ function summarizeContract(delta) {
 function buildTopFindings(input) {
     const rows = [];
     for (const effect of input.effectDeltas) {
+        const consumerSummary = buildConsumerSummary({
+            consumers: effect.consumers,
+            externalConsumers: effect.externalConsumers,
+            profile: input.profile,
+        });
         rows.push({
             rank: 0,
             score: effectSeverityScore(effect),
@@ -1460,13 +1534,22 @@ function buildTopFindings(input) {
             testConsumerCount: effect.consumers.filter((consumer) => consumer.isTestFile).length,
             externalConsumerCount: effect.externalConsumers.length,
             externalConsumerFiles: uniqueSorted(effect.externalConsumers.map((consumer) => consumer.file)),
-            reasonCodes: effectReasonCodes(effect),
+            consumerSummary,
+            reasonCodes: orderedConsequenceReasonCodes([
+                ...effectReasonCodes(effect),
+                ...consumerSummaryReasonCodes(consumerSummary),
+            ]),
             provenance: 'deterministic-ranking',
         });
     }
     for (const delta of input.contractDeltas) {
         const tests = delta.consumers.filter((consumer) => consumer.isTestFile);
         const escapingConsumers = contractEscapingConsumers(delta);
+        const consumerSummary = buildConsumerSummary({
+            consumers: delta.consumers,
+            externalConsumers: escapingConsumers,
+            profile: input.profile,
+        });
         rows.push({
             rank: 0,
             score: contractSeverityScore(delta),
@@ -1479,11 +1562,32 @@ function buildTopFindings(input) {
             testConsumerCount: tests.length,
             externalConsumerCount: escapingConsumers.length,
             externalConsumerFiles: uniqueSorted(escapingConsumers.map((consumer) => consumer.file)),
-            reasonCodes: contractReasonCodes(delta),
+            consumerSummary,
+            reasonCodes: orderedConsequenceReasonCodes([
+                ...contractReasonCodes(delta),
+                ...consumerSummaryReasonCodes(consumerSummary),
+            ]),
             provenance: 'deterministic-ranking',
         });
     }
     for (const projection of input.inheritorProjections) {
+        const consumer = {
+            file: projection.inheritorFile,
+            symbol: projection.inheritorSymbol,
+            kind: null,
+            line: 0,
+            isTestFile: projection.isTestFile,
+            inChangedFile: false,
+            provenance: 'typescript-compiler',
+        };
+        const consumerSummary = buildConsumerSummary({
+            consumers: [consumer],
+            externalConsumers: projection.isTestFile ? [] : [consumer],
+            profile: input.profile,
+        });
+        const projectionReasonCodes = projection.isTestFile
+            ? ['inheritor_affected', 'test_only_consumers']
+            : ['inheritor_affected', 'non_test_consumers'];
         rows.push({
             rank: 0,
             score: projection.isTestFile ? 15 : 45,
@@ -1496,7 +1600,11 @@ function buildTopFindings(input) {
             testConsumerCount: projection.isTestFile ? 1 : 0,
             externalConsumerCount: projection.isTestFile ? 0 : 1,
             externalConsumerFiles: projection.isTestFile ? [] : [projection.inheritorFile],
-            reasonCodes: projection.isTestFile ? ['inheritor_affected', 'test_only_consumers'] : ['inheritor_affected', 'non_test_consumers'],
+            consumerSummary,
+            reasonCodes: orderedConsequenceReasonCodes([
+                ...projectionReasonCodes,
+                ...consumerSummaryReasonCodes(consumerSummary),
+            ]),
             provenance: 'deterministic-ranking',
         });
     }
@@ -1609,7 +1717,12 @@ function buildConsequenceUnderstanding(input) {
         contractDeltas,
         changedFileSet: input.changedFileSet,
     });
-    const topFindings = buildTopFindings({ effectDeltas, contractDeltas, inheritorProjections });
+    const topFindings = buildTopFindings({
+        effectDeltas,
+        contractDeltas,
+        inheritorProjections,
+        profile: input.profile,
+    });
     const headline = consequenceHeadline(input.targets.length, topFindings);
     const core = {
         schemaVersion: exports.CONSEQUENCE_UNDERSTANDING_SCHEMA_VERSION,
@@ -1655,6 +1768,7 @@ function structuralUnderstandingPath(projectRoot, sessionId) {
 function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
     const generatedAt = options.generatedAt ?? new Date().toISOString();
     const changedFiles = diffFiles.map((file) => normalizeRepoPath(file.path));
+    const profile = options.profile ?? profileFromSession(options.session);
     const suppressedArtifacts = classifyGeneratedArtifacts(projectRoot, changedFiles);
     const suppressedArtifactPaths = new Set(suppressedArtifacts.map((item) => item.path));
     const tsChanged = changedFiles.filter((file) => TS_LIKE.test(file) &&
@@ -1666,7 +1780,7 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
             : 'no TypeScript/JavaScript files in change set';
         const artifact = none(projectRoot, diffFiles, reason, generatedAt, suppressedArtifacts);
         artifact.planAlignment = buildPlanAlignment(options.session ?? null, changedFiles, []);
-        artifact.boundaryImpact = buildBoundaryImpact(options.profile ?? null, changedFiles);
+        artifact.boundaryImpact = buildBoundaryImpact(profile, changedFiles);
         artifact.artifactHash = hash(artifactHashInput(artifact));
         return artifact;
     }
@@ -1832,7 +1946,7 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
         a.line - b.line);
     const testReferences = references.filter((ref) => ref.isTestFile);
     const planAlignment = buildPlanAlignment(options.session ?? null, changedFiles, changedSymbols);
-    const boundaryImpact = buildBoundaryImpact(options.profile ?? null, changedFiles);
+    const boundaryImpact = buildBoundaryImpact(profile, changedFiles);
     const digest = buildStructuralDigest({
         generatedAt,
         changedSymbols,
@@ -1841,7 +1955,7 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
         workspace,
         changedPackageNames,
         changedFiles,
-        profile: options.profile ?? null,
+        profile,
         planAlignment,
     });
     const consequenceUnderstanding = buildConsequenceUnderstanding({
@@ -1854,6 +1968,7 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
         checker,
         changedFileSet,
         suppressedArtifacts,
+        profile,
     });
     const core = {
         schemaVersion: exports.STRUCTURAL_UNDERSTANDING_SCHEMA_VERSION,

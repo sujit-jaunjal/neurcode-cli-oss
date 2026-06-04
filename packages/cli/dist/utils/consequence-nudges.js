@@ -27,18 +27,20 @@ function isDisabledValue(value) {
         normalized === 'false';
 }
 function selectInFlowConsequenceNudges(artifact, options = {}) {
-    const max = Number.isFinite(options.max) && options.max > 0 ? Math.floor(options.max) : 1;
+    const max = Number.isFinite(options.max) && options.max > 0 ? Math.floor(options.max) : 3;
     const consequence = artifact.consequenceUnderstanding;
     if (!consequence?.analyzed)
         return [];
-    return consequence.topFindings
+    const selected = consequence.topFindings
         .filter(isHighTrustInFlowFinding)
-        .slice(0, max)
+        .slice(0, max);
+    return selected
         .map((finding) => ({
         nudgeKey: nudgeKey(artifact.artifactHash, finding),
         severity: finding.findingType === 'effect-delta' ? 'high' : 'medium',
         headline: formatInFlowConsequenceNudge(finding),
         finding,
+        surfacedFindings: selected,
         artifactHash: artifact.artifactHash,
         provenance: 'deterministic-static',
     }));
@@ -57,16 +59,28 @@ function isHighTrustInFlowFinding(finding) {
     return false;
 }
 function formatInFlowConsequenceNudge(finding) {
-    const external = finding.externalConsumerFiles.slice(0, 3).join(', ');
-    const hidden = finding.externalConsumerFiles.length > 3
-        ? `, +${finding.externalConsumerFiles.length - 3} more`
+    const summary = finding.consumerSummary;
+    const production = (summary?.productionFiles ?? finding.externalConsumerFiles).slice(0, 3).join(', ');
+    const hidden = (summary?.productionFiles ?? finding.externalConsumerFiles).length > 3
+        ? `, +${(summary?.productionFiles ?? finding.externalConsumerFiles).length - 3} more`
         : '';
+    const tests = summary?.testConsumerCount
+        ? ` tests: ${summary.testConsumerCount}`
+        : ' tests: 0';
+    const sensitive = summary && (summary.sensitiveConsumerCount > 0 || summary.approvalRequiredConsumerCount > 0 || summary.runtimeGovernanceConsumerCount > 0)
+        ? ` sensitive/runtime/approval consumers: ${summary.sensitiveConsumerCount}/${summary.runtimeGovernanceConsumerCount}/${summary.approvalRequiredConsumerCount}.`
+        : '';
+    const architecture = summary?.highFanout
+        ? ' High-fanout.'
+        : summary?.architectureRelevant
+            ? ' Architecture-relevant.'
+            : '';
     const kind = finding.findingType === 'effect-delta'
         ? 'runtime effect'
         : 'externally consumed contract';
     return (`⚡ Neurcode consequence: ${finding.file}#${finding.symbol} changed a ${kind} ` +
         `and reaches ${finding.externalConsumerCount} external non-test caller` +
-        `${finding.externalConsumerCount === 1 ? '' : 's'}: ${external}${hidden}.`);
+        `${finding.externalConsumerCount === 1 ? '' : 's'}: ${production}${hidden}.${tests}.${sensitive}${architecture}`);
 }
 function nudgeKey(artifactHash, finding) {
     const payload = JSON.stringify({
