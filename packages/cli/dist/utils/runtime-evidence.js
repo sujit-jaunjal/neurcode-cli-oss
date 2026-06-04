@@ -47,6 +47,14 @@ function matchesBoundary(filePath, glob) {
 function sessionStartedAt(session) {
     return session.events.find((event) => event.type === 'session_start')?.ts ?? null;
 }
+function isReportActiveSession(record) {
+    if (record.session.status !== 'active')
+        return false;
+    if (!record.startedAt)
+        return false;
+    const parsed = Date.parse(record.startedAt);
+    return Number.isFinite(parsed);
+}
 function eventTime(event) {
     const parsed = Date.parse(event.ts);
     return Number.isFinite(parsed) ? parsed : 0;
@@ -140,7 +148,7 @@ function buildRuntimeEvidenceReport(repoRoot, options = {}) {
             }
         }
     }
-    const activeSessions = records.filter((record) => record.session.status === 'active').length;
+    const activeSessions = records.filter(isReportActiveSession).length;
     const finishedSessions = records.filter((record) => record.session.status === 'finished').length;
     const totalChecks = records.reduce((sum, record) => sum + record.blockCount + record.warnCount + record.okCount, 0);
     const allowedWithAdvisories = records.reduce((sum, record) => sum + record.session.events.filter(isAllowedAdvisoryEvent).length, 0);

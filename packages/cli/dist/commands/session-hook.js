@@ -357,18 +357,12 @@ async function handleBashCheck(repoRoot, session, command) {
         return;
     }
     if (analysis.targetPaths.length === 0) {
-        await recordBashCheck(repoRoot, session, {
-            verdict: 'warn',
-            message: `⚠️ Neurcode: Bash command appears mutating (${analysis.operation}) but no repo path could be classified. Proceeding — recorded in session.`,
-            operation: analysis.operation,
-            targetPaths: [],
-            commandFingerprint: analysis.commandFingerprint,
-        });
+        diagnostic(`Bash ${analysis.operation} target extraction was inconclusive; not recorded as governed edit evidence`);
         process.stdout.write(JSON.stringify({
             hookSpecificOutput: {
                 hookEventName: 'PreToolUse',
                 permissionDecision: 'allow',
-                reason: `⚠️ Neurcode: Bash command appears mutating (${analysis.operation}) but target extraction was inconclusive.`,
+                reason: `⚠️ Neurcode: Bash ${analysis.operation} target extraction was inconclusive; allowed without governed edit evidence.`,
             },
         }) + '\n');
         process.exit(0);
