@@ -53,6 +53,8 @@ exports.showGovernanceObligationsCommand = showGovernanceObligationsCommand;
 exports.waiveGovernanceObligationCommand = waiveGovernanceObligationCommand;
 exports.listRuntimeSessionsCommand = listRuntimeSessionsCommand;
 exports.showRuntimeSessionCommand = showRuntimeSessionCommand;
+exports.aiChangeRecordCommand = aiChangeRecordCommand;
+exports.structuralUnderstandingCommand = structuralUnderstandingCommand;
 exports.listSessionsCommand = listSessionsCommand;
 exports.endSessionCommand = endSessionCommand;
 exports.sessionStatusCommand = sessionStatusCommand;
@@ -66,13 +68,16 @@ const state_1 = require("../utils/state");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const messages_1 = require("../utils/messages");
 const project_root_1 = require("../utils/project-root");
+const diff_parser_1 = require("@neurcode-ai/diff-parser");
 const session_continuity_1 = require("../utils/session-continuity");
 const runtime_evidence_1 = require("../utils/runtime-evidence");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
+const structural_understanding_1 = require("../utils/structural-understanding");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
+const node_child_process_1 = require("node:child_process");
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const readline = __importStar(require("readline"));
@@ -136,6 +141,8 @@ function eventLabel(event) {
         return 'WAIVE';
     if (event.type === 'obligation_state_changed')
         return 'OBLIG';
+    if (event.type === 'structural_understanding')
+        return 'STRUCT';
     if (event.type === 'session_finish')
         return 'FINISH';
     return event.type.toUpperCase();
@@ -158,6 +165,23 @@ function approvalContextFrom(event) {
             ? context['suggestedApprovalPath']
             : event?.filePath,
     };
+}
+function resolveUnderstandingDiff(repoRoot, options) {
+    const args = ['diff'];
+    if (options.staged) {
+        args.push('--cached');
+    }
+    else if (options.base && options.base.trim()) {
+        args.push(options.base.trim());
+    }
+    else {
+        args.push('HEAD');
+    }
+    return (0, node_child_process_1.execFileSync)('git', args, {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+    });
 }
 function loadLocalGovernanceSession(repoRoot, sessionId) {
     return sessionId ? (0, governance_runtime_1.loadSession)(repoRoot, sessionId) : (0, governance_runtime_1.loadActiveSession)(repoRoot);
@@ -852,6 +876,374 @@ function showRuntimeSessionCommand(sessionId, options = {}) {
         console.log(chalk.dim(`  ${event.ts}  ${eventLabel(event).padEnd(7)} ${target}`));
     }
     console.log('');
+}
+function resolveAIChangeRecordSession(repoRoot, options) {
+    if (options.sessionId)
+        return (0, governance_runtime_1.loadSession)(repoRoot, options.sessionId);
+    const active = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    if (active && !options.latest)
+        return active;
+    const [latest] = (0, runtime_evidence_1.listRuntimeSessions)(repoRoot);
+    return latest?.session ?? active ?? null;
+}
+function renderAIChangeRecord(record, recordPath) {
+    const counts = record.session.counts;
+    const blocked = record.trajectory.filter((path) => path.verdicts.includes('block'));
+    const warned = record.trajectory.filter((path) => path.verdicts.includes('warn'));
+    const activeApprovals = record.approvals.filter((approval) => approval.status === 'active');
+    const pendingAmendments = record.plan.pendingAmendments.length;
+    const consequenceFindings = topConsequenceFindingsFromRecord(record.understanding.latest?.consequenceUnderstanding);
+    console.log('');
+    console.log(chalk.bold(`AI Change Record ${record.session.sessionId}`));
+    console.log(chalk.dim('-'.repeat(76)));
+    console.log(`Repo:      ${chalk.white(record.session.repoName)}`);
+    console.log(`Status:    ${chalk.white(record.session.status)}${record.integrity.replayHashStatus === 'present' ? '' : chalk.yellow(' · replay pending')}`);
+    console.log(`Goal:      ${chalk.white(truncate(record.intent.contract?.summary || record.session.goal, 120))}`);
+    console.log(`Scope:     ${chalk.white(record.session.scopeMode)} · ${chalk.dim(compactList(record.scope.allowedGlobs, 8))}`);
+    console.log(`Plan:      ${chalk.white(record.plan.activeSummary ? truncate(record.plan.activeSummary, 120) : 'not captured')}${record.plan.activeRevision ? chalk.dim(` · rev ${record.plan.activeRevision}`) : ''}`);
+    if (pendingAmendments > 0) {
+        console.log(`Re-plan:   ${chalk.yellow(`${pendingAmendments} pending amendment${pendingAmendments === 1 ? '' : 's'}`)}`);
+    }
+    console.log(`Checks:    ok=${counts.ok} warn=${counts.warn} block=${counts.block} approvals=${counts.approval}`);
+    console.log(`Oblig:     ${record.architecture.summary.satisfied}/${record.architecture.summary.total} satisfied${record.architecture.summary.blockingPending ? chalk.yellow(` · ${record.architecture.summary.blockingPending} blocking`) : ''}`);
+    console.log(`Approvals: ${activeApprovals.length} active · ${record.approvals.length} lifecycle entr${record.approvals.length === 1 ? 'y' : 'ies'}`);
+    if (record.understanding.latest) {
+        const understanding = record.understanding.latest;
+        console.log(`Understand: ${understanding.changedSymbolCount} changed symbols · ` +
+            `${understanding.referenceCount} references · ${understanding.testReferenceCount} test refs`);
+        const digest = understanding.digest;
+        const topConsequences = digest?.topConsequences ?? [];
+        if (topConsequences.length > 0) {
+            const hidden = digest?.hidden && typeof digest.hidden === 'object'
+                ? digest.hidden
+                : {};
+            const hiddenRefs = typeof hidden.references === 'number' ? hidden.references : 0;
+            const hiddenTests = typeof hidden.testReferences === 'number' ? hidden.testReferences : 0;
+            console.log(`Digest:    ${topConsequences.length} consequences · hidden ${hiddenRefs} refs / ${hiddenTests} tests`);
+        }
+        if (consequenceFindings.length > 0) {
+            const headline = consequenceHeadlineFromRecord(record.understanding.latest?.consequenceUnderstanding);
+            if (headline)
+                console.log(`Reach:     ${headline}`);
+            console.log(`Consequences: ${consequenceFindings.length} ranked finding${consequenceFindings.length === 1 ? '' : 's'}`);
+            for (const finding of consequenceFindings.slice(0, 5)) {
+                const consumers = finding.consumerCount > 0
+                    ? ` · ${finding.nonTestConsumerCount} non-test consumer(s), ${finding.testConsumerCount} test`
+                    : '';
+                const reasons = finding.reasonCodes.slice(0, 3).join(', ');
+                console.log(chalk.dim(`  ${finding.rank}. ${truncate(finding.summary, 140)}${consumers}${reasons ? ` · ${reasons}` : ''}`));
+            }
+        }
+    }
+    if (blocked.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Blocked paths'));
+        for (const item of blocked.slice(0, 8)) {
+            const owners = item.owners.length ? ` · ${item.owners.join(', ')}` : '';
+            const approval = item.suggestedApprovalPath ? ` · approve ${item.suggestedApprovalPath}` : '';
+            console.log(chalk.dim(`  ${item.filePath}${owners}${approval}`));
+        }
+        if (blocked.length > 8)
+            console.log(chalk.dim(`  +${blocked.length - 8} more`));
+    }
+    if (warned.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Warned paths'));
+        for (const item of warned.slice(0, 5)) {
+            console.log(chalk.dim(`  ${item.filePath}`));
+        }
+        if (warned.length > 5)
+            console.log(chalk.dim(`  +${warned.length - 5} more`));
+    }
+    console.log('');
+    console.log(`Record:    ${chalk.dim(recordPath)}`);
+    console.log(`Hash:      ${chalk.dim(record.integrity.recordHash)}`);
+    console.log(`Replay:    ${chalk.dim(record.integrity.replayHash ?? 'pending-session-finish')}`);
+    console.log(chalk.dim('Privacy:   source-free; no source code, diff hunks, patches, or shell command bodies.'));
+    console.log('');
+}
+function consequenceHeadlineFromRecord(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return null;
+    const summary = value.summary;
+    if (!summary || typeof summary !== 'object' || Array.isArray(summary))
+        return null;
+    const headline = summary.headline;
+    return typeof headline === 'string' && headline.trim() ? headline.trim() : null;
+}
+function topConsequenceFindingsFromRecord(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return [];
+    const record = value;
+    if (!Array.isArray(record.topFindings))
+        return [];
+    return record.topFindings.flatMap((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item))
+            return [];
+        const row = item;
+        const summary = typeof row.summary === 'string' ? row.summary.trim() : '';
+        if (!summary)
+            return [];
+        const rank = typeof row.rank === 'number' && Number.isFinite(row.rank) ? row.rank : 0;
+        const consumerCount = typeof row.consumerCount === 'number' && Number.isFinite(row.consumerCount) ? row.consumerCount : 0;
+        const nonTestConsumerCount = typeof row.nonTestConsumerCount === 'number' && Number.isFinite(row.nonTestConsumerCount) ? row.nonTestConsumerCount : 0;
+        const testConsumerCount = typeof row.testConsumerCount === 'number' && Number.isFinite(row.testConsumerCount) ? row.testConsumerCount : 0;
+        const reasonCodes = Array.isArray(row.reasonCodes)
+            ? row.reasonCodes.filter((reason) => typeof reason === 'string').slice(0, 6)
+            : [];
+        return [{ rank, summary, consumerCount, nonTestConsumerCount, testConsumerCount, reasonCodes }];
+    }).sort((a, b) => a.rank - b.rank || a.summary.localeCompare(b.summary));
+}
+function aiChangeRecordCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const session = resolveAIChangeRecordSession(repoRoot, options);
+    if (!session) {
+        if (options.json) {
+            console.log(JSON.stringify({
+                ok: false,
+                repoRoot,
+                error: options.sessionId
+                    ? `Session not found: ${options.sessionId}`
+                    : 'No local governance sessions found.',
+            }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)('AI Change Record Not Found', options.sessionId
+                ? `No local governance session found for ${options.sessionId}`
+                : 'No local governance sessions found.');
+        }
+        process.exitCode = 1;
+        return;
+    }
+    const { record, path } = (0, governance_runtime_1.writeAIChangeRecord)(repoRoot, session);
+    if (options.json) {
+        console.log(JSON.stringify({
+            ok: true,
+            repoRoot,
+            recordPath: path,
+            record,
+        }, null, 2));
+        return;
+    }
+    renderAIChangeRecord(record, path.replace(`${repoRoot}/`, ''));
+}
+function referenceLabel(ref) {
+    const owner = ref.referencingSymbol
+        ? `${ref.referencingFile}#${ref.referencingSymbol}:${ref.line}`
+        : `${ref.referencingFile}:${ref.line}`;
+    const test = ref.isTestFile ? ' test' : '';
+    return `${ref.targetFile}#${ref.targetSymbol} <- ${owner}${test}`;
+}
+function structuralEventDetail(artifact, artifactPath, repoRoot) {
+    return {
+        schemaVersion: artifact.schemaVersion,
+        artifactHash: artifact.artifactHash,
+        artifactPath: artifactPath.replace(`${repoRoot}/`, ''),
+        analysis: artifact.analysis,
+        changedSymbols: artifact.changedSymbols.map((symbol) => ({
+            file: symbol.file,
+            name: symbol.name,
+            kind: symbol.kind,
+            action: symbol.action,
+        })),
+        topReferences: artifact.references.slice(0, 25).map((ref) => ({
+            targetFile: ref.targetFile,
+            targetSymbol: ref.targetSymbol,
+            referencingFile: ref.referencingFile,
+            referencingSymbol: ref.referencingSymbol,
+            line: ref.line,
+            isTestFile: ref.isTestFile,
+        })),
+        suppressedArtifacts: artifact.suppressedArtifacts,
+        digest: artifact.digest,
+        consequenceUnderstanding: artifact.consequenceUnderstanding,
+        planAlignment: artifact.planAlignment,
+        boundaryImpact: artifact.boundaryImpact,
+        privacy: artifact.privacy,
+    };
+}
+function renderStructuralUnderstanding(artifact, artifactPath, repoRoot) {
+    const analysis = artifact.analysis;
+    console.log('');
+    console.log(chalk.bold('Local Structural Understanding'));
+    console.log(chalk.dim('-'.repeat(76)));
+    console.log(`Mode:      ${analysis.confidence}${analysis.reason ? chalk.yellow(` · ${analysis.reason}`) : ''}`);
+    console.log(`Files:     ${analysis.changedFileCount} changed · ${analysis.filesAnalyzed} analyzed`);
+    console.log(`Symbols:   ${analysis.changedSymbolCount} changed`);
+    console.log(`Edges:     ${analysis.referenceCount} references · ${analysis.testReferenceCount} test references`);
+    if (artifact.suppressedArtifacts?.length > 0) {
+        const preview = artifact.suppressedArtifacts
+            .slice(0, 3)
+            .map((item) => `${item.path} (${item.reasonCode})`)
+            .join(', ');
+        const suffix = artifact.suppressedArtifacts.length > 3
+            ? `, +${artifact.suppressedArtifacts.length - 3} more`
+            : '';
+        console.log(chalk.yellow(`Suppressed: ${artifact.suppressedArtifacts.length} generated artifact(s): ${preview}${suffix}`));
+    }
+    const consequence = artifact.consequenceUnderstanding;
+    if (consequence?.analyzed &&
+        (consequence.topFindings.length > 0 ||
+            consequence.effectDeltas.length > 0 ||
+            consequence.contractDeltas.length > 0 ||
+            consequence.inheritorProjections.length > 0)) {
+        console.log('');
+        console.log(chalk.bold('Consequence understanding'));
+        if (consequence.summary.headline) {
+            console.log(chalk.dim(`  ${consequence.summary.headline}`));
+        }
+        if (consequence.topFindings.length > 0) {
+            for (const finding of consequence.topFindings.slice(0, 8)) {
+                const consumers = finding.consumerCount > 0
+                    ? ` · ${finding.nonTestConsumerCount} non-test consumer(s), ${finding.testConsumerCount} test`
+                    : '';
+                const reasons = finding.reasonCodes.slice(0, 3).join(', ');
+                console.log(chalk.dim(`  ${finding.rank}. ${finding.summary}${consumers} · ${reasons}`));
+            }
+        }
+        else {
+            for (const effect of consequence.effectDeltas.slice(0, 5)) {
+                console.log(chalk.dim(`  ${effect.file}#${effect.symbol} ${effect.direction} ${effect.effectCategory}` +
+                    ` (${effect.calleeName}${effect.line ? ` @ line ${effect.line}` : ''})`));
+            }
+        }
+    }
+    if (artifact.digest.topReferences.length > 0 || artifact.digest.topSymbols.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Structural digest'));
+        for (const symbol of artifact.digest.topSymbols.slice(0, 3)) {
+            console.log(chalk.dim(`  ${symbol.file}#${symbol.name} · ${symbol.referenceCount} refs` +
+                ` · ${symbol.crossPackageReferenceCount} cross-package` +
+                ` · ${symbol.testReferenceCount} tests`));
+        }
+        if (artifact.digest.topConsequences.length > 0) {
+            console.log(chalk.dim('  Top consequences:'));
+            for (const item of artifact.digest.topConsequences.slice(0, 5)) {
+                const reasons = item.reasonCodes.slice(0, 3).join(', ');
+                const lines = item.representativeLines.length ? ` lines ${item.representativeLines.join(',')}` : '';
+                console.log(chalk.dim(`    ${item.rank}. ${item.targetFile}#${item.targetSymbol} <- ${item.referencingFile}` +
+                    ` · ${item.referenceCount} refs (${item.nonTestReferenceCount} non-test, ${item.testReferenceCount} tests)${lines} · ${reasons}`));
+            }
+        }
+        else if (artifact.digest.topReferences.length > 0) {
+            console.log(chalk.dim('  Most relevant references:'));
+            for (const ref of artifact.digest.topReferences.slice(0, 5)) {
+                const reasons = ref.reasonCodes.slice(0, 3).join(', ');
+                console.log(chalk.dim(`    ${ref.rank}. ${referenceLabel(ref)} · ${reasons}`));
+            }
+        }
+        console.log(chalk.dim(`  Hidden: ${artifact.digest.hidden.references} refs, ` +
+            `${artifact.digest.hidden.testReferences} test refs, ` +
+            `${artifact.digest.hidden.lowSignalReferences} low-signal refs.`));
+    }
+    if (artifact.changedSymbols.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Changed symbols'));
+        for (const symbol of artifact.changedSymbols.slice(0, 10)) {
+            const refs = artifact.references.filter((ref) => ref.targetFile === symbol.file &&
+                ref.targetSymbol === symbol.name &&
+                ref.targetKind === symbol.kind);
+            const tests = refs.filter((ref) => ref.isTestFile);
+            console.log(chalk.dim(`  ${symbol.file}#${symbol.name} (${symbol.kind}) · ${refs.length} refs · ${tests.length} tests`));
+        }
+        if (artifact.changedSymbols.length > 10) {
+            console.log(chalk.dim(`  +${artifact.changedSymbols.length - 10} more`));
+        }
+    }
+    if (artifact.references.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Relational facts'));
+        for (const ref of artifact.references.slice(0, 12)) {
+            console.log(chalk.dim(`  ${referenceLabel(ref)}`));
+        }
+        if (artifact.references.length > 12) {
+            console.log(chalk.dim(`  +${artifact.references.length - 12} more references in artifact`));
+        }
+    }
+    if (artifact.planAlignment) {
+        console.log('');
+        console.log(chalk.bold('Plan vs actual'));
+        console.log(chalk.dim(`  planned touched:   ${compactList(artifact.planAlignment.plannedFilesTouched, 6)}`));
+        console.log(chalk.dim(`  unplanned touched: ${compactList(artifact.planAlignment.unplannedFilesTouched, 6)}`));
+        console.log(chalk.dim(`  symbols named:     ${compactList(artifact.planAlignment.changedSymbolsMentionedInPlan, 6)}`));
+    }
+    if (artifact.boundaryImpact.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Boundary impact'));
+        for (const item of artifact.boundaryImpact.slice(0, 8)) {
+            const approval = item.approvalRequired ? chalk.yellow('approval-required') : 'owned';
+            console.log(chalk.dim(`  ${item.file} · ${approval} · ${compactList(item.owners, 4)}`));
+        }
+    }
+    console.log('');
+    console.log(`Artifact:  ${chalk.dim(artifactPath.replace(`${repoRoot}/`, ''))}`);
+    console.log(`Hash:      ${chalk.dim(artifact.artifactHash)}`);
+    console.log(chalk.dim('Privacy:   facts-only; no source code, diff hunks, patch text, or model judgments.'));
+    console.log('');
+}
+function structuralUnderstandingCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const session = resolveAIChangeRecordSession(repoRoot, options);
+    if (!session) {
+        if (options.json) {
+            console.log(JSON.stringify({
+                ok: false,
+                repoRoot,
+                error: 'No local governance session found. Start a governed session before building structural understanding.',
+            }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)('No Governed Session', 'Start a governed session first, then run `neurcode session understanding` while the agent change is in progress.');
+        }
+        process.exitCode = 1;
+        return;
+    }
+    let diffText = '';
+    try {
+        diffText = resolveUnderstandingDiff(repoRoot, options);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: false, repoRoot, sessionId: session.sessionId, error: message }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)('Unable to Read Diff', message);
+        }
+        process.exitCode = 1;
+        return;
+    }
+    const diffFiles = diffText.trim() ? (0, diff_parser_1.parseDiff)(diffText) : [];
+    const profile = (0, v0_governance_1.getProfileStaleness)(repoRoot).currentProfile;
+    const artifact = (0, structural_understanding_1.buildStructuralUnderstanding)(repoRoot, diffFiles, {
+        session,
+        profile,
+        maxProgramFiles: options.maxProgramFiles,
+        timeBudgetMs: options.timeBudgetMs,
+    });
+    const artifactPath = (0, structural_understanding_1.writeStructuralUnderstanding)(repoRoot, session.sessionId, artifact);
+    const message = artifact.analysis.analyzed
+        ? `Structural understanding: ${artifact.analysis.changedSymbolCount} changed symbols, ${artifact.analysis.referenceCount} references, ${artifact.analysis.testReferenceCount} test references.`
+        : `Structural understanding not analyzed: ${artifact.analysis.reason ?? 'unknown reason'}.`;
+    const eventSession = (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+        type: 'structural_understanding',
+        ts: artifact.generatedAt,
+        message,
+        detail: structuralEventDetail(artifact, artifactPath, repoRoot),
+    });
+    if (eventSession)
+        (0, governance_runtime_1.writeAIChangeRecord)(repoRoot, eventSession);
+    if (options.json) {
+        console.log(JSON.stringify({
+            ok: true,
+            repoRoot,
+            sessionId: session.sessionId,
+            artifactPath,
+            artifact,
+        }, null, 2));
+        return;
+    }
+    renderStructuralUnderstanding(artifact, artifactPath, repoRoot);
 }
 /**
  * List all sessions

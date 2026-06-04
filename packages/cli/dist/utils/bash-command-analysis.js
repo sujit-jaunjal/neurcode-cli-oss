@@ -22,7 +22,7 @@ const PATH_ROOTS = new Set([
     '.github',
 ]);
 const READ_ONLY_PREFIX = /^\s*(?:ls|cat|grep|rg|find|pwd|git\s+(?:status|diff|log|show|branch|rev-parse|ls-files)|sed(?!\s+-i\b)|awk|head|tail|wc|sort|uniq|jq)\b/;
-const NEURCODE_DIAGNOSTIC_RE = /^\s*(?:node\s+)?(?:packages\/cli\/dist\/index\.js|neurcode)\s+(?:(?:--version|-v)|doctor\b|status\b|session\s+(?:status|obligations)\b|runtime-sync\s+status\b|admission\b)/;
+const NEURCODE_DIAGNOSTIC_RE = /^\s*(?:node\s+)?(?:packages\/cli\/dist\/index\.js|neurcode)\s+(?:(?:--version|-v)|doctor\b|status\b|session\s+(?:status|obligations)\b|runtime-sync\s+status\b|admission\b|session-hook\b[^;&|]*\b(?:start|check|finish)\b)/;
 function unique(values) {
     return Array.from(new Set(values.filter(Boolean)));
 }

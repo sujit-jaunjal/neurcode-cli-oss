@@ -24,6 +24,7 @@ exports.normalizeHookFilePathForRepo = normalizeHookFilePathForRepo;
 exports.hookFilePathCandidates = hookFilePathCandidates;
 exports.shouldKeepSessionActiveForPendingApproval = shouldKeepSessionActiveForPendingApproval;
 exports.sessionHookCommand = sessionHookCommand;
+const child_process_1 = require("child_process");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
@@ -36,6 +37,9 @@ const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const governed_intent_1 = require("../utils/governed-intent");
 const intent_continuity_1 = require("../utils/intent-continuity");
 const bash_command_analysis_1 = require("../utils/bash-command-analysis");
+const diff_parser_1 = require("@neurcode-ai/diff-parser");
+const structural_understanding_1 = require("../utils/structural-understanding");
+const consequence_nudges_1 = require("../utils/consequence-nudges");
 // ── Helpers ───────────────────────────────────────────────────────────────────
 /** Read the full hook JSON from stdin, or return {} on any error. */
 function readHookInput() {
@@ -121,6 +125,101 @@ function normalizeHookFilePathForRepo(rawPath, repoRoot) {
 /** Emit a diagnostic to stderr without breaking the hook exit code. */
 function diagnostic(msg) {
     process.stderr.write(`[neurcode] ${msg}\n`);
+}
+function hookAnalysisLimit(envName, fallback) {
+    const raw = process.env[envName];
+    if (!raw)
+        return fallback;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+function sessionAlreadyEmittedNudge(session, nudgeKey) {
+    return session.events.some((event) => event.type === 'consequence_nudge' &&
+        event.detail &&
+        typeof event.detail === 'object' &&
+        event.detail['nudgeKey'] === nudgeKey);
+}
+function readWorkingDiff(repoRoot) {
+    return (0, child_process_1.execFileSync)('git', ['-C', repoRoot, 'diff', '--no-ext-diff', 'HEAD'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        maxBuffer: 48 * 1024 * 1024,
+    });
+}
+async function maybeRecordConsequenceNudge(repoRoot, session) {
+    if (!(0, consequence_nudges_1.consequenceNudgesEnabled)())
+        return null;
+    try {
+        const diffText = readWorkingDiff(repoRoot);
+        if (!diffText.trim())
+            return null;
+        const diffFiles = (0, diff_parser_1.parseDiff)(diffText);
+        const artifact = (0, structural_understanding_1.buildStructuralUnderstanding)(repoRoot, diffFiles, {
+            session,
+            maxProgramFiles: hookAnalysisLimit('NEURCODE_CONSEQUENCE_NUDGE_MAX_PROGRAM_FILES', 2500),
+            timeBudgetMs: hookAnalysisLimit('NEURCODE_CONSEQUENCE_NUDGE_TIME_BUDGET_MS', 3500),
+        });
+        const [nudge] = (0, consequence_nudges_1.selectInFlowConsequenceNudges)(artifact, { max: 1 });
+        if (!nudge)
+            return null;
+        const latest = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId) || session;
+        if (sessionAlreadyEmittedNudge(latest, nudge.nudgeKey))
+            return null;
+        const artifactPath = (0, structural_understanding_1.writeStructuralUnderstanding)(repoRoot, session.sessionId, artifact);
+        (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+            type: 'structural_understanding',
+            ts: artifact.generatedAt,
+            message: artifact.analysis.analyzed
+                ? `Structural understanding: ${artifact.analysis.changedSymbolCount} changed symbols, ${artifact.analysis.referenceCount} references, ${artifact.analysis.testReferenceCount} test references.`
+                : `Structural understanding not analyzed: ${artifact.analysis.reason ?? 'unknown reason'}.`,
+            detail: {
+                schemaVersion: artifact.schemaVersion,
+                artifactHash: artifact.artifactHash,
+                artifactPath: artifactPath.replace(`${repoRoot}/`, ''),
+                analysis: artifact.analysis,
+                consequenceUnderstanding: {
+                    schemaVersion: artifact.consequenceUnderstanding.schemaVersion,
+                    analyzed: artifact.consequenceUnderstanding.analyzed,
+                    reason: artifact.consequenceUnderstanding.reason,
+                    summary: artifact.consequenceUnderstanding.summary,
+                    topFindings: artifact.consequenceUnderstanding.topFindings.slice(0, 8),
+                    artifactHash: artifact.consequenceUnderstanding.artifactHash,
+                },
+                privacy: artifact.privacy,
+            },
+        });
+        (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+            type: 'consequence_nudge',
+            ts: new Date().toISOString(),
+            message: nudge.headline,
+            detail: {
+                nudgeKey: nudge.nudgeKey,
+                severity: nudge.severity,
+                artifactHash: nudge.artifactHash,
+                finding: {
+                    rank: nudge.finding.rank,
+                    score: nudge.finding.score,
+                    findingType: nudge.finding.findingType,
+                    file: nudge.finding.file,
+                    symbol: nudge.finding.symbol,
+                    summary: nudge.finding.summary,
+                    externalConsumerCount: nudge.finding.externalConsumerCount,
+                    externalConsumerFiles: nudge.finding.externalConsumerFiles,
+                    reasonCodes: nudge.finding.reasonCodes,
+                },
+                provenance: nudge.provenance,
+                killSwitch: 'NEURCODE_DISABLE_CONSEQUENCE_NUDGES=1',
+            },
+        });
+        const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
+        if (refreshed)
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed);
+        return nudge;
+    }
+    catch (error) {
+        diagnostic(`consequence nudge skipped: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+    }
 }
 function denyPreToolUse(reason, extra) {
     process.stdout.write(JSON.stringify({
@@ -861,6 +960,9 @@ async function handleCheck(cmdCwd) {
     catch {
         // Recording failure must not affect the verdict
     }
+    const consequenceNudge = result.verdict === 'block'
+        ? null
+        : await maybeRecordConsequenceNudge(repoRoot, session);
     // ── Emit hook response ────────────────────────────────────────────────────
     if (result.verdict === 'block') {
         // Include machine-readable approvalContext when the block is approval-required,
@@ -868,13 +970,40 @@ async function handleCheck(cmdCwd) {
         denyPreToolUse(result.message, result.approvalContext ? { approvalContext: result.approvalContext } : undefined);
     }
     if (result.verdict === 'warn') {
+        const reason = consequenceNudge
+            ? `${result.message}\n\n${consequenceNudge.headline}`
+            : result.message;
         process.stdout.write(JSON.stringify({
             hookSpecificOutput: {
                 hookEventName: 'PreToolUse',
                 permissionDecision: 'allow',
-                reason: result.message,
+                reason,
             },
         }) + '\n');
+        process.exit(0);
+    }
+    if (consequenceNudge) {
+        process.stdout.write(JSON.stringify({
+            hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'allow',
+                reason: consequenceNudge.headline,
+                consequenceNudge: {
+                    nudgeKey: consequenceNudge.nudgeKey,
+                    severity: consequenceNudge.severity,
+                    artifactHash: consequenceNudge.artifactHash,
+                    finding: {
+                        findingType: consequenceNudge.finding.findingType,
+                        file: consequenceNudge.finding.file,
+                        symbol: consequenceNudge.finding.symbol,
+                        externalConsumerCount: consequenceNudge.finding.externalConsumerCount,
+                        externalConsumerFiles: consequenceNudge.finding.externalConsumerFiles,
+                        reasonCodes: consequenceNudge.finding.reasonCodes,
+                    },
+                },
+            },
+        }) + '\n');
+        process.exit(0);
     }
     // ok or warn-allowed → exit 0
     process.exit(0);

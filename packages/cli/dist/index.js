@@ -128,23 +128,11 @@ const CORE_WORKFLOW_STEPS = [
     },
     {
         command: 'neurcode start "<intent>"',
-        description: 'Declare governance context and bounded implementation scope',
-    },
-    {
-        command: 'neurcode verify --evidence',
-        description: 'Verify the current diff against intent, policy, and change contracts',
+        description: 'Declare governance context for a bounded implementation scope',
     },
     {
         command: 'neurcode replay --json',
-        description: 'Inspect deterministic replay and provenance receipts from the last run',
-    },
-    {
-        command: 'neurcode remediate-export --finding-index 0',
-        description: 'Export bounded remediation context for an external remediation tool',
-    },
-    {
-        command: 'neurcode verify --ci',
-        description: 'Re-verify in CI with deterministic receipts and governance artifacts',
+        description: 'Inspect deterministic replay and source-free runtime receipts',
     },
 ];
 const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
@@ -158,8 +146,6 @@ const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
     'admission',
     'start',
     'quickstart',
-    'verify',
-    'remediate-export',
     'replay',
 ]);
 const ENTERPRISE_OPERATIONS_COMMAND_NAMES = new Set([
@@ -254,7 +240,7 @@ function buildAdvancedLegacyHints(root) {
     return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['activate', 'agent', 'run', 'status', 'sessions', 'report', 'sync', 'admission', 'login', 'init', 'start', 'quickstart', 'verify', 'remediate-export', 'replay'];
+    const primaryOrder = ['activate', 'agent', 'run', 'status', 'sessions', 'report', 'sync', 'admission', 'login', 'init', 'start', 'quickstart', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
@@ -279,7 +265,7 @@ function printCoreWorkflowGuide() {
     console.log('');
     console.log(`${chalk.bold('neurcode')}${chalk.dim('  ·  operational lifecycle')}`);
     console.log('');
-    console.log(chalk.dim('  install  ->  login  ->  init  ->  start  ->  verify  ->  replay  ->  re-verify'));
+    console.log(chalk.dim('  connect repo  ->  activate agent  ->  govern session  ->  approve exact path  ->  export evidence'));
     console.log('');
     console.log(`  ${chalk.bold('Canonical commands')}`);
     CORE_WORKFLOW_STEPS.forEach((step) => console.log(chalk.dim(formatCoreWorkflowStep(step))));
@@ -962,6 +948,46 @@ sessionCmd
     .action((sessionId, options) => {
     (0, session_1.showRuntimeSessionCommand)(sessionId, {
         dir: options.dir,
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('record')
+    .description('Build the source-free AI Change Record for a governed coding session')
+    .option('--session-id <id>', 'Local governance session ID (default: active, then latest)')
+    .option('--latest', 'Use the latest local session even if another session is active')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.aiChangeRecordCommand)({
+        sessionId: options.sessionId,
+        latest: options.latest === true,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('understanding')
+    .description('Build local TypeScript structural understanding for the active governed change')
+    .option('--session-id <id>', 'Local governance session ID (default: active, then latest)')
+    .option('--latest', 'Use the latest local session even if another session is active')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--staged', 'Analyze staged changes only')
+    .option('--head', 'Analyze working tree against HEAD (default)')
+    .option('--base <ref>', 'Analyze working tree against a specific git ref')
+    .option('--max-program-files <n>', 'Maximum TypeScript/JavaScript files to analyze', (value) => Number.parseInt(value, 10))
+    .option('--time-budget-ms <n>', 'Static analysis time budget in milliseconds', (value) => Number.parseInt(value, 10))
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.structuralUnderstandingCommand)({
+        sessionId: options.sessionId,
+        latest: options.latest === true,
+        dir: options.dir,
+        staged: options.staged === true,
+        head: options.head === true,
+        base: options.base,
+        maxProgramFiles: Number.isFinite(options.maxProgramFiles) ? options.maxProgramFiles : undefined,
+        timeBudgetMs: Number.isFinite(options.timeBudgetMs) ? options.timeBudgetMs : undefined,
         json: options.json === true,
     });
 });

@@ -75,7 +75,7 @@ function listRuntimeSessions(repoRoot, options = {}) {
     if (!(0, fs_1.existsSync)(dir))
         return [];
     const records = [];
-    for (const file of (0, fs_1.readdirSync)(dir).filter((name) => name.endsWith('.json')).sort()) {
+    for (const file of (0, fs_1.readdirSync)(dir).filter((name) => name.endsWith('.json') && !name.endsWith('.change-record.json')).sort()) {
         const path = (0, path_1.join)(dir, file);
         try {
             const session = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));

@@ -302,14 +302,15 @@ async function printWelcomeBanner() {
     console.log(chalkInstance.dim('  Intent contracts        Scope guard              Evidence lifecycle'));
     console.log('');
     console.log(`  ${chalkInstance.bold('Operational onboarding')}`);
-    console.log(chalkInstance.dim('    install  ->  login  ->  init  ->  start governance lifecycle'));
+    console.log(chalkInstance.dim('    install  ->  login  ->  init  ->  activate runtime'));
     console.log('');
     console.log(`  ${chalkInstance.bold('Governance lifecycle')}`);
-    console.log(chalkInstance.dim('    start  ->  verify  ->  replay  ->  remediate-export  ->  re-verify'));
+    console.log(chalkInstance.dim('    connect repo  ->  governed session  ->  boundary block  ->  exact approval  ->  evidence export'));
     console.log('');
     console.log(`  ${chalkInstance.bold('Next steps')}`);
     console.log(chalkInstance.cyan('    neurcode login') + chalkInstance.dim('                     (connect this machine/runtime)'));
     console.log(chalkInstance.cyan('    neurcode init') + chalkInstance.dim('                      (select workspace ownership for this repo)'));
+    console.log(chalkInstance.cyan('    neurcode activate claude') + chalkInstance.dim('           (install in-flow governance hooks)'));
     console.log(chalkInstance.cyan('    neurcode whoami') + chalkInstance.dim('                    (inspect identity + boundary)'));
     console.log(chalkInstance.cyan('    neurcode start') + chalkInstance.dim(' "what you intend to change"'));
     console.log('');

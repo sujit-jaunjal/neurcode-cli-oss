@@ -48,6 +48,12 @@ interface SessionCommandOptions {
     decidedBy?: string;
     force?: boolean;
     maxAgeMinutes?: number;
+    latest?: boolean;
+    staged?: boolean;
+    head?: boolean;
+    base?: string;
+    maxProgramFiles?: number;
+    timeBudgetMs?: number;
 }
 interface MissingLocalGovernanceStatus {
     ok: false;
@@ -99,6 +105,8 @@ export declare function showGovernanceObligationsCommand(options?: SessionComman
 export declare function waiveGovernanceObligationCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function listRuntimeSessionsCommand(options?: SessionCommandOptions): void;
 export declare function showRuntimeSessionCommand(sessionId: string, options?: SessionCommandOptions): void;
+export declare function aiChangeRecordCommand(options?: SessionCommandOptions): void;
+export declare function structuralUnderstandingCommand(options?: SessionCommandOptions): void;
 /**
  * List all sessions
  */

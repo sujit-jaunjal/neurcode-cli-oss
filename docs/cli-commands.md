@@ -1,8 +1,8 @@
 # Neurcode CLI Commands
 
-This reference follows one canonical operational lifecycle:
+This reference now follows one canonical runtime lifecycle:
 
-`install -> login -> init -> start -> verify -> replay -> remediate-export -> re-verify`
+`connect repo -> activate agent -> govern session -> approve exact path -> export evidence`
 
 The lifecycle separates five identities that must not blur together:
 
@@ -12,29 +12,75 @@ The lifecycle separates five identities that must not blur together:
 - runtime/session state
 - governance ownership boundary
 
-## Core Workflow
+## Core Runtime Workflow
 
 ```bash
 npm install -g @neurcode-ai/cli@latest
 neurcode login
 neurcode init
-neurcode whoami
-neurcode start "Add JWT authentication with role checks"
-neurcode verify --ci --policy-only --json    # policy check, exits non-zero on blocking
-neurcode remediation-export --finding-index 0 --output remediation-export.json
-# fix in your AI assistant using the suggestedPromptHint from the export
-neurcode verify --ci --policy-only --json    # confirm resolved
+neurcode activate claude --connect <token>
+neurcode doctor --runtime
+neurcode status --json
+neurcode report --runtime
 ```
 
 Primary loop:
 
-`login -> init -> start -> verify -> remediation-export -> fix externally -> verify`
+`login -> init -> activate -> governed session -> exact approval -> evidence export`
 
-Neurcode detects and governs. Your AI coding assistant (Cursor, Claude, Copilot) performs remediation. Neurcode does not autonomously modify production code.
+Neurcode governs in-flow where the host exposes hooks, records source-free runtime evidence, and keeps CI/verify/remediation commands as compatibility/backstop surfaces.
 
-See also: `neurcode prompt "<intent>"` for governed AI prompts, `neurcode ship "<intent>"` for one-command delivery.
+See also: `neurcode agent guard start <agent>` for supervised non-Claude workflows, `neurcode admission export` for GitHub Action admission records, and `neurcode verify --ci` for compatibility CI checks.
 
-## Core Command Reference
+## Runtime Command Reference
+
+### `neurcode activate <agent>`
+
+Pair a repository with the Runtime Control Plane, refresh the governance profile, install supported agent hooks, and enable source-free runtime sync.
+
+```bash
+neurcode activate claude --connect <token>
+neurcode activate copilot --connect <token>
+neurcode doctor --runtime
+```
+
+### `neurcode agent guard start <agent>`
+
+Start a governed session for hosts that need the universal runtime handshake and local supervisor.
+
+```bash
+neurcode agent guard start codex --goal "Add retry with backoff to export task"
+neurcode agent guard status --json
+```
+
+### `neurcode status`
+
+Inspect active session scope, latest boundary event, approval grants, and sync health.
+
+```bash
+neurcode status
+neurcode status --json
+```
+
+### `neurcode report --runtime`
+
+Summarize runtime sessions, blocked edits, approvals, owners, and replay records.
+
+```bash
+neurcode report --runtime
+neurcode report --runtime --json
+```
+
+### `neurcode admission export`
+
+Export the latest source-free runtime admission record for the GitHub Action compatibility path.
+
+```bash
+neurcode admission export
+neurcode admission export --json
+```
+
+## Compatibility Command Reference
 
 ### `neurcode start "<intent>"`
 
@@ -50,7 +96,7 @@ Options:
 
 ### `neurcode verify`
 
-Evaluate the current git diff against policy rules and plan scope. Returns blocking violations, advisory warnings, and scope drift.
+Compatibility/backstop command: evaluate the current git diff against policy rules and plan scope. Returns blocking violations, advisory warnings, and scope drift.
 
 ```bash
 neurcode verify
