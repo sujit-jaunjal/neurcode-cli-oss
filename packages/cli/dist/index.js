@@ -75,6 +75,7 @@ const run_1 = require("./commands/run");
 const runtime_doctor_1 = require("./commands/runtime-doctor");
 const runtime_report_1 = require("./commands/runtime-report");
 const runtime_sync_1 = require("./commands/runtime-sync");
+const runtime_1 = require("./commands/runtime");
 const admission_1 = require("./commands/admission");
 const demo_1 = require("./commands/demo");
 const execution_bus_1 = require("./utils/execution-bus");
@@ -106,6 +107,10 @@ const CORE_WORKFLOW_STEPS = [
     {
         command: 'neurcode status',
         description: 'Inspect the active in-flow governance session and latest boundary block',
+    },
+    {
+        command: 'neurcode runtime cloud-status',
+        description: 'Read dashboard-visible live session, approval, transport, and ingestion state',
     },
     {
         command: 'neurcode report --runtime',
@@ -145,6 +150,7 @@ const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
     'agent',
     'run',
     'status',
+    'runtime',
     'sessions',
     'report',
     'sync',
@@ -246,7 +252,7 @@ function buildAdvancedLegacyHints(root) {
     return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['activate', 'agent', 'run', 'status', 'sessions', 'report', 'sync', 'admission', 'demo', 'login', 'init', 'start', 'quickstart', 'replay'];
+    const primaryOrder = ['activate', 'agent', 'run', 'status', 'runtime', 'sessions', 'report', 'sync', 'admission', 'demo', 'login', 'init', 'start', 'quickstart', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
@@ -440,6 +446,7 @@ program
 (0, run_1.runCommand)(program);
 (0, runtime_report_1.reportCommand)(program);
 (0, runtime_sync_1.syncCommand)(program);
+(0, runtime_1.runtimeCommand)(program);
 (0, admission_1.admissionCommand)(program);
 (0, demo_1.demoCommand)(program);
 program

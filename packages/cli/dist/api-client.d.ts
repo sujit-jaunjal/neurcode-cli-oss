@@ -146,6 +146,169 @@ export interface RuntimeLiveApproval {
     revokedAt?: string | null;
     revocationReason?: string | null;
 }
+export interface RuntimeLiveSession {
+    id: string;
+    repoId: string;
+    repoName: string;
+    repoKey: string;
+    sessionId: string;
+    status: 'active' | 'finished' | string;
+    isLive: boolean;
+    lifecycle?: {
+        phase: string;
+        severity: string;
+        label: string;
+        nextAction: string;
+        blockedPath: string | null;
+        approvalId: string | null;
+        approvalStatus: string;
+        lastTransitionAt: string | null;
+        staleSeconds: number | null;
+    };
+    goal: string | null;
+    scopeMode: string | null;
+    profileHash: string | null;
+    allowedGlobs: string[];
+    approvalRequiredGlobs: string[];
+    approvedPaths: string[];
+    okCount: number;
+    warnCount: number;
+    blockCount: number;
+    approvalCount: number;
+    eventCount: number;
+    latestEvent: {
+        type: string;
+        ts: string | null;
+        filePath: string | null;
+        verdict: string | null;
+        message: string | null;
+        owners: string[];
+        suggestedApprovalPath: string | null;
+    } | null;
+    latestBlock: {
+        filePath: string | null;
+        message: string | null;
+        owners: string[];
+        suggestedApprovalPath: string | null;
+    } | null;
+    transport?: {
+        schemaVersion: string;
+        sequence: number;
+        eventId: string | null;
+        receivedAt: string | null;
+        health?: string;
+    };
+    startedAt: string | null;
+    finishedAt: string | null;
+    lastSeenAt: string;
+    updatedAt: string;
+}
+export interface RuntimeLiveSessionsResponse {
+    generatedAt: string;
+    liveSessions: RuntimeLiveSession[];
+    privacy: {
+        sourceUploaded: false;
+        uploadedFields: string[];
+    };
+}
+export interface RuntimeControlPlaneApprovalsResponse {
+    generatedAt: string;
+    approvals: RuntimeLiveApproval[];
+    pageInfo?: {
+        limit: number;
+        offset: number;
+        returned: number;
+        hasMore: boolean;
+    };
+    privacy: {
+        sourceUploaded: false;
+        uploadedFields: string[];
+    };
+}
+export interface RuntimeEvidenceSummaryResponse {
+    generatedAt: string;
+    summary: {
+        repos: number;
+        sessions: number;
+        activeSessions: number;
+        finishedSessions: number;
+        totalChecks: number;
+        blockedEdits: number;
+        warnedSensitiveEdits: number;
+        allowedWithAdvisories?: number;
+        allowedEdits: number;
+        approvalsGranted: number;
+        ownersInvolved: number;
+    };
+    topBlockedPaths: Array<{
+        path: string;
+        count: number;
+    }>;
+    topOwners: Array<{
+        owner: string;
+        count: number;
+    }>;
+    approvalRequiredBoundariesTouched: Array<{
+        boundary: string;
+        count: number;
+    }>;
+    privacy: {
+        sourceUploaded: false;
+        uploadedFields: string[];
+    };
+}
+export interface RuntimeOperationsStatusResponse {
+    runtimeBackend: {
+        configured: boolean;
+        status: 'disabled' | 'degraded' | 'healthy' | string;
+        coordinationMode: 'memory' | 'memory-fallback' | 'redis' | string;
+        lastConnectedAt: string | null;
+        lastSuccessfulOperationAt: string | null;
+        lastFailureAt: string | null;
+        failureCount: number;
+        degradedReason: string | null;
+    };
+    retention: {
+        operationalEventsDays: number;
+        finishedLiveSessionsDays: number;
+        terminalApprovalsDays: number;
+    };
+    ingestion: {
+        status?: 'idle' | 'healthy' | 'watching' | 'degraded' | string;
+        reasons?: string[];
+        received24h: number;
+        accepted24h: number;
+        staleRejected24h: number;
+        unsequenced24h: number;
+        duplicateObservationsTotal?: number;
+        observationsTotal: number;
+        lastReceivedAt: string | null;
+        acceptanceRate24h?: number | null;
+    };
+    sessions?: {
+        status?: 'idle' | 'active' | 'waiting_for_approval' | 'stale' | string;
+        reasons?: string[];
+        active: number;
+        finished: number;
+        staleActive: number;
+        blockedWaitingApproval: number;
+        unsequencedActive: number;
+        lastLiveSeenAt: string | null;
+    };
+    approvals?: {
+        pending: number;
+        expired: number;
+        applied: number;
+        denied: number;
+        revoked: number;
+        failed: number;
+        revocationPendingAck: number;
+    };
+    privacy: {
+        sourceUploaded: false;
+        uploadedFields: string[];
+    };
+}
 export interface OrgGovernanceSettingsResponse {
     settings: {
         contextPolicy: {
@@ -380,6 +543,21 @@ export declare class ApiClient {
     getRuntimeLiveApprovals(sessionId: string, repoKey?: string): Promise<{
         approvals: RuntimeLiveApproval[];
     }>;
+    getRuntimeLiveSessions(params?: {
+        limit?: number;
+        repoKey?: string;
+    }): Promise<RuntimeLiveSessionsResponse>;
+    getRuntimeControlPlaneApprovals(params?: {
+        limit?: number;
+        offset?: number;
+        repoKey?: string;
+        sessionId?: string;
+        status?: string;
+    }): Promise<RuntimeControlPlaneApprovalsResponse>;
+    getRuntimeEvidenceSummary(params?: {
+        repoKey?: string;
+    }): Promise<RuntimeEvidenceSummaryResponse>;
+    getRuntimeOperationsStatus(): Promise<RuntimeOperationsStatusResponse>;
     acknowledgeRuntimeLiveApproval(sessionId: string, approvalId: string, body: {
         status?: 'applied' | 'failed' | 'revoked';
         appliedPath?: string;

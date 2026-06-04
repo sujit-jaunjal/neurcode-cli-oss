@@ -21,6 +21,7 @@ neurcode init
 neurcode activate claude --connect <token>
 neurcode doctor --runtime
 neurcode status --json
+neurcode runtime cloud-status --json
 neurcode report --runtime
 neurcode demo rehearse
 ```
@@ -62,6 +63,18 @@ Inspect active session scope, latest boundary event, approval grants, and sync h
 neurcode status
 neurcode status --json
 ```
+
+### `neurcode runtime cloud-status`
+
+Read the dashboard-visible runtime state for a paired repository without mutating sessions or approvals. This is the agent-safe way to prove whether the Runtime Control Plane can see the active session, blocked approval path, local live transport, and bulk evidence ingestion posture.
+
+```bash
+neurcode runtime cloud-status
+neurcode runtime cloud-status --json
+neurcode runtime cloud-status --session-id <sessionId> --json
+```
+
+This command is read-only. It does not approve, deny, retry, upload source, or change session state.
 
 ### `neurcode report --runtime`
 
