@@ -36,7 +36,10 @@ function matchSession(liveSessions, sessionId) {
     if (sessionId) {
         return liveSessions.find((item) => item.sessionId === sessionId) || null;
     }
-    return liveSessions.find((item) => item.status === 'active') || liveSessions[0] || null;
+    return liveSessions.find((item) => item.status === 'active') || null;
+}
+function isActiveRuntimeSession(session) {
+    return Boolean(session && session.status === 'active' && session.lifecycle?.phase !== 'finished');
 }
 function latestApprovalPath(liveSession, approvals) {
     return firstString(liveSession?.latestBlock?.suggestedApprovalPath)
@@ -94,14 +97,15 @@ async function fetchCloudStatus(repoRoot, connection, activeSession, options) {
         limit: 50,
     });
     const approvals = approvalsResponse.approvals || [];
-    const exactApprovalPath = latestApprovalPath(liveSession, approvals);
-    const approvalStatuses = unique(approvals
+    const approvalsForSession = sessionId ? approvals : [];
+    const exactApprovalPath = latestApprovalPath(liveSession, approvalsForSession);
+    const approvalStatuses = unique(approvalsForSession
         .filter((approval) => (!sessionId || approval.sessionId === sessionId) && (!exactApprovalPath || approval.path === exactApprovalPath))
         .map((approval) => safeStatus(approval.status)));
     const liveTransport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
     const dashboard = {
-        liveSessionVisible: Boolean(liveSession),
-        blockedApprovalVisible: approvalVisibleForPath(approvals, sessionId, exactApprovalPath),
+        liveSessionVisible: isActiveRuntimeSession(liveSession),
+        blockedApprovalVisible: Boolean(sessionId && approvalVisibleForPath(approvals, sessionId, exactApprovalPath)),
         exactApprovalPath,
         approvalStatuses,
         nextAction: '',
