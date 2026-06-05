@@ -88,6 +88,12 @@ neurcode agent report codex --session-id <sessionId>
 neurcode agent report cursor --latest --json
 ```
 
+Key statuses:
+
+- `pilot_ready`: the guarded cooperative-agent run finished cleanly with no unverified writes or open blocks.
+- `governed_review_ready`: the governed approval / denial trail completed and replay evidence exists, but a human should review the contained sensitive activity.
+- `attention_needed`: an open block, failed guard posture, or unverified write remains.
+
 ### `neurcode status`
 
 Inspect active session scope, latest boundary event, approval grants, and sync health.

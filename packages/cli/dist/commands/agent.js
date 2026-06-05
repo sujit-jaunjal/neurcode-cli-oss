@@ -197,10 +197,11 @@ function firstRunCommands(input) {
     if (input.target === 'copilot') {
         return {
             activate: 'neurcode activate copilot',
-            start: `neurcode agent start copilot --goal "${input.goal}"`,
+            start: `neurcode agent guard start copilot --goal "${input.goal}" --plan "<source-free plan>"`,
             status: 'neurcode status',
             approve: 'Approve the exact suggested path in Runtime Control Plane',
-            finish: 'Copilot Stop hook finishes the governed session',
+            finish: `neurcode agent guard finish --session-id ${session} --fail-on-unverified`,
+            report: `neurcode agent report copilot --session-id ${session}`,
         };
     }
     return {
@@ -845,6 +846,16 @@ function unresolvedBriefBlockCount(record) {
     const match = fact.match(/^(\d+)/);
     return match ? Number(match[1]) : 1;
 }
+function isGovernedReviewReady(input) {
+    return input.record.session.status === 'finished'
+        && Boolean(input.record.integrity.replayHash)
+        && input.unresolvedBlockCount === 0
+        && input.record.reviewBrief.verdict === 'needs_human_inspection'
+        && (input.containedDenials.length > 0
+            || input.record.approvals.length > 0
+            || input.record.session.counts.warn > 0
+            || !input.guardClean);
+}
 function buildAgentReportPayload(agentArg, options) {
     const repoRoot = repoRootFrom({ dir: options.dir });
     const target = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agentArg);
@@ -886,24 +897,39 @@ function buildAgentReportPayload(agentArg, options) {
     const contained = containedDenialPaths(record);
     const unresolvedBlockCount = unresolvedBriefBlockCount(record);
     const guardClean = guardPosture.status === 'finished_clean' || guardPosture.status === 'following_contract';
+    const governedReviewReady = isGovernedReviewReady({
+        record,
+        containedDenials: contained,
+        unresolvedBlockCount,
+        guardClean,
+    });
     const reportStatus = record.reviewBrief.verdict === 'blocked_unresolved' || unresolvedBlockCount > 0 || guardPosture.status === 'attention_required' || guardPosture.status === 'finished_attention'
         ? 'attention_needed'
         : !record.integrity.replayHash
             ? 'in_progress'
             : guardClean && record.session.status === 'finished'
                 ? 'pilot_ready'
-                : 'review_ready';
+                : governedReviewReady
+                    ? 'governed_review_ready'
+                    : 'review_ready';
     const nextActions = reportStatus === 'pilot_ready'
         ? [
             dashboardPairing.status === 'connected'
                 ? 'Open Runtime Evidence for human review, or export the AI Change Record.'
                 : 'Local pilot is clean; pair this repo from Runtime Control Plane and run `neurcode sync --runtime` before expecting dashboard evidence.',
         ]
-        : reportStatus === 'attention_needed'
-            ? ['Resolve open blocked paths or unverified writes before presenting this run as clean pilot evidence.']
-            : record.session.status === 'active'
-                ? [`Finish with neurcode agent guard finish --session-id ${session.sessionId} --fail-on-unverified.`]
-                : ['Open the Runtime Evidence record and review remaining warnings.'];
+        : reportStatus === 'governed_review_ready'
+            ? [
+                'Open Runtime Evidence and review the contained approval / denial trail.',
+                guardClean
+                    ? 'This governed run is complete; keep it as review evidence, not a failed run.'
+                    : `For a green cooperative-agent pilot report, start the next run with neurcode agent guard start ${target} --goal "<task>" and finish with --fail-on-unverified.`,
+            ]
+            : reportStatus === 'attention_needed'
+                ? ['Resolve open blocked paths or unverified writes before presenting this run as clean pilot evidence.']
+                : record.session.status === 'active'
+                    ? [`Finish with neurcode agent guard finish --session-id ${session.sessionId} --fail-on-unverified.`]
+                    : ['Open the Runtime Evidence record and review remaining warnings.'];
     return {
         schemaVersion: 'neurcode.agent-report.v1',
         ok: reportStatus !== 'attention_needed',
@@ -914,6 +940,9 @@ function buildAgentReportPayload(agentArg, options) {
         dashboardPairing,
         reportStatus,
         pilotReady: reportStatus === 'pilot_ready',
+        governedRunComplete: reportStatus === 'pilot_ready' || reportStatus === 'governed_review_ready',
+        humanReviewRequired: reportStatus === 'governed_review_ready'
+            || record.reviewBrief.verdict === 'needs_human_inspection',
         guarantee: {
             enforcementLevel: capability?.enforcementLevel ?? 'unknown',
             controlLevel: capability?.controlLevel ?? 'unsupported_unknown',
@@ -975,13 +1004,23 @@ function renderAgentReport(payload) {
     console.log(chalk.dim('-'.repeat(72)));
     console.log(`Repo:   ${chalk.white(payload.repoRoot)}`);
     renderDashboardPairing(payload.dashboardPairing);
-    console.log(`Status: ${payload.reportStatus === 'pilot_ready' ? chalk.green(payload.reportStatus) : payload.reportStatus === 'attention_needed' || payload.reportStatus === 'no_session' ? chalk.red(payload.reportStatus) : chalk.yellow(payload.reportStatus)}`);
+    const renderedStatus = payload.reportStatus === 'pilot_ready'
+        ? chalk.green(payload.reportStatus)
+        : payload.reportStatus === 'governed_review_ready'
+            ? chalk.cyan(payload.reportStatus)
+            : payload.reportStatus === 'attention_needed' || payload.reportStatus === 'no_session'
+                ? chalk.red(payload.reportStatus)
+                : chalk.yellow(payload.reportStatus);
+    console.log(`Status: ${renderedStatus}`);
     if (payload.reportStatus === 'no_session') {
         console.log(payload.message);
     }
     else {
         const full = payload;
         console.log(`Session: ${chalk.cyan(full.session.sessionId)} (${full.session.status})`);
+        if (full.reportStatus === 'governed_review_ready') {
+            console.log(`Outcome: ${chalk.cyan('governed approval flow complete; human review recommended')}`);
+        }
         console.log(`Verdict: ${full.reviewBrief.verdict}`);
         console.log(`Summary: ${full.reviewBrief.headline}`);
         console.log(`Counts:  ok ${full.counts.ok} · warn ${full.counts.warn} · block ${full.counts.block} · approvals ${full.counts.approvals}`);
