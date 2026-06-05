@@ -49,7 +49,8 @@ function ensureNeurcodeInGitignore(cwd = process.cwd()) {
         return;
     }
     const block = NEURCODE_HYGIENE_BLOCK.join('\n');
-    const newContent = content.trimEnd() + (content.endsWith('\n') ? '' : '\n') + block + '\n';
+    const existing = content.trimEnd();
+    const newContent = `${existing}${existing.length > 0 ? '\n\n' : ''}${block}\n`;
     (0, fs_1.writeFileSync)(gitignorePath, newContent, 'utf-8');
 }
 //# sourceMappingURL=gitignore.js.map
