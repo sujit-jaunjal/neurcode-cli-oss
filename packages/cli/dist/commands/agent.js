@@ -171,13 +171,13 @@ function firstRunCommands(input) {
         };
     }
     return {
-        setup: `neurcode agent bootstrap ${input.target}`,
-        start: `neurcode agent start ${input.target} --goal "${input.goal}"`,
+        bootstrap: `neurcode agent bootstrap ${input.target}`,
+        start: `neurcode agent guard start ${input.target} --goal "${input.goal}" --plan "<source-free plan>"`,
         handshake: `neurcode agent handshake --adapter ${input.adapter} --session-id ${session}`,
         plan: `neurcode agent plan --adapter ${input.adapter} --session-id ${session} --plan "<source-free plan>"`,
         check: `neurcode agent check <repo-relative-path> --adapter ${input.adapter} --session-id ${session}`,
         approve: `neurcode agent approve <exact-path> --adapter ${input.adapter} --session-id ${session} --reason "<reason>"`,
-        finish: `neurcode agent finish --adapter ${input.adapter} --session-id ${session}`,
+        finish: `neurcode agent guard finish --session-id ${session} --fail-on-unverified`,
         report: `neurcode agent report ${input.target} --session-id ${session}`,
     };
 }
@@ -314,6 +314,110 @@ function renderSetup(payload) {
     for (const [name, command] of Object.entries(payload.firstRun.commands)) {
         console.log(chalk.dim(`  ${name.padEnd(10)} ${command}`));
     }
+    console.log('');
+}
+function buildWalkthroughPayload(agentArg, options) {
+    const repoRoot = repoRootFrom({ dir: options.dir });
+    const target = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agentArg);
+    const adapter = AGENT_TO_ADAPTER[target] ?? 'generic-mcp';
+    const goal = options.goal || 'Modify one named file and keep protected boundaries untouched';
+    const safePath = options.safePath || '<safe-path-inside-task-scope>';
+    const blockedPath = options.blockedPath || '<approval-required-path>';
+    const session = '<session-id>';
+    const steps = [
+        {
+            id: 'connect',
+            title: 'Connect repo',
+            outcome: 'The dashboard pairs this local checkout and enables source-free runtime sync.',
+            command: 'Copy and run the Connect repo command from Runtime Control Plane.',
+        },
+        {
+            id: 'bootstrap',
+            title: 'Bootstrap agent',
+            outcome: 'MCP config, repo-native agent instructions, and governance profile are ready.',
+            command: `neurcode agent bootstrap ${target}`,
+        },
+        {
+            id: 'start',
+            title: 'Start guarded task',
+            outcome: 'Intent, plan, allowed scope, guard baseline, and live runtime transport are created.',
+            command: `neurcode agent guard start ${target} --goal "${goal}" --plan "<source-free plan>"`,
+        },
+        {
+            id: 'safe-check',
+            title: 'Check safe path',
+            outcome: 'The intended file is allowed before write and later counted as verified.',
+            command: `neurcode agent check ${safePath} --adapter ${adapter} --session-id ${session}`,
+        },
+        {
+            id: 'boundary-block',
+            title: 'See boundary block',
+            outcome: 'A protected path is denied and appears in Runtime Control Plane with owners and exact approval path.',
+            command: `neurcode agent check ${blockedPath} --adapter ${adapter} --session-id ${session}`,
+        },
+        {
+            id: 'approve',
+            title: 'Approve exact path',
+            outcome: 'Only the suggested file is granted for this session; sibling files stay blocked.',
+            command: `Approve ${blockedPath} in Runtime Control Plane, or run neurcode agent approve ${blockedPath} --session-id ${session}`,
+        },
+        {
+            id: 'finish',
+            title: 'Finish and report',
+            outcome: 'The guard closes, replay integrity is minted, and the post-run report says whether the run is pilot-ready.',
+            command: `neurcode agent guard finish --session-id ${session} --fail-on-unverified && neurcode agent report ${target} --session-id ${session}`,
+        },
+        {
+            id: 'evidence',
+            title: 'Open evidence record',
+            outcome: 'The dashboard shows source-free intent, plan, changed-path facts, approvals, contained denials, structural consequences, and receipt hashes.',
+            command: 'Open Runtime Evidence from the Control Plane, or export the AI Change Record JSON.',
+        },
+    ];
+    return {
+        schemaVersion: 'neurcode.agent-walkthrough.v1',
+        ok: true,
+        generatedAt: new Date().toISOString(),
+        repoRoot,
+        target,
+        adapter,
+        goal,
+        guarantee: {
+            mode: readinessMode(capabilityFor(adapter)?.enforcementLevel),
+            controlLabel: controlLevelLabel(capabilityFor(adapter)?.controlLevel),
+        },
+        steps,
+        acceptance: [
+            'safe path is allowed before write',
+            'approval-required path is denied before or during write',
+            'exact approval does not grant directory or sibling files',
+            'agent guard finish reports zero unverified writes',
+            'agent report shows no open blocks and includes replay/record hashes',
+            'dashboard evidence remains source-free',
+        ],
+        privacy: {
+            metadataOnly: true,
+            sourceUploaded: false,
+            sourceIncluded: false,
+        },
+    };
+}
+function renderWalkthrough(payload) {
+    console.log('');
+    console.log(chalk.bold(`Neurcode self-serve pilot walkthrough - ${payload.target}`));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Repo:      ${chalk.white(payload.repoRoot)}`);
+    console.log(`Adapter:   ${payload.adapter}`);
+    console.log(`Guarantee: ${payload.guarantee.controlLabel} · ${payload.guarantee.mode}`);
+    console.log('');
+    payload.steps.forEach((step, index) => {
+        console.log(chalk.bold(`${index + 1}. ${step.title}`));
+        console.log(chalk.dim(`   Outcome: ${step.outcome}`));
+        console.log(chalk.dim(`   ${step.command}`));
+    });
+    console.log('');
+    console.log(chalk.bold('Acceptance'));
+    payload.acceptance.forEach((item) => console.log(chalk.dim(`  - ${item}`)));
     console.log('');
 }
 function npxCheck() {
@@ -659,6 +763,8 @@ function latestLocalSession(repoRoot) {
 function resolveReportSession(repoRoot, options) {
     if (options.sessionId)
         return (0, governance_runtime_1.loadSession)(repoRoot, options.sessionId);
+    if (options.latest)
+        return latestLocalSession(repoRoot);
     return (0, governance_runtime_1.loadActiveSession)(repoRoot) ?? latestLocalSession(repoRoot);
 }
 function recordAppliedApprovalPaths(record) {
@@ -1065,6 +1171,26 @@ function agentCommand(program) {
         }
     });
     cmd
+        .command('walkthrough [agent]')
+        .description('Print the self-serve pilot loop from repo pairing to AI Change Record')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--goal <goal>', 'Task goal to render in the guided commands')
+        .option('--safe-path <path>', 'Example intended path that should be allowed')
+        .option('--blocked-path <path>', 'Example approval-required path that should be blocked')
+        .option('--json', 'Output machine-readable JSON')
+        .action((agent, options) => {
+        try {
+            const payload = buildWalkthroughPayload(agent, options);
+            if (options.json)
+                emitJson(payload);
+            else
+                renderWalkthrough(payload);
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    cmd
         .command('setup [agent]')
         .description('Prepare MCP config and first-run commands for Codex, Cursor, Claude, or generic MCP')
         .option('--dir <path>', 'Repository root (default: current directory)')
@@ -1133,6 +1259,7 @@ function agentCommand(program) {
         .description('Summarize the latest or selected governed agent run after it finishes')
         .option('--dir <path>', 'Repository root (default: current directory)')
         .option('--session-id <id>', 'Local governance session ID (default: active session, then latest local session)')
+        .option('--latest', 'Prefer the latest local session even when another session is active')
         .option('--global', 'For Cursor, check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
         .option('--no-write-record', 'Do not refresh the local AI Change Record sidecar')
         .option('--json', 'Output machine-readable JSON')

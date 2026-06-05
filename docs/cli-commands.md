@@ -52,8 +52,40 @@ neurcode doctor --runtime
 Start a governed session for hosts that need the universal runtime handshake and local supervisor.
 
 ```bash
+neurcode agent walkthrough codex
+neurcode agent bootstrap codex
 neurcode agent guard start codex --goal "Add retry with backoff to export task"
 neurcode agent guard status --json
+neurcode agent guard finish --session-id <sessionId> --fail-on-unverified
+neurcode agent report codex --session-id <sessionId>
+```
+
+### `neurcode agent bootstrap <agent>`
+
+One-command setup for supervised agent pilots. It refreshes the repo governance profile, writes supported MCP config, and installs repo-native instructions for the selected agent.
+
+```bash
+neurcode agent bootstrap codex
+neurcode agent bootstrap cursor
+neurcode agent bootstrap generic-mcp
+```
+
+### `neurcode agent walkthrough <agent>`
+
+Print the self-serve pilot loop from dashboard pairing through exact-path approval, guard finish, post-run report, and evidence record.
+
+```bash
+neurcode agent walkthrough codex
+neurcode agent walkthrough cursor --safe-path src/tasks/export_task.ts --blocked-path src/billing/charge.ts
+```
+
+### `neurcode agent report <agent>`
+
+Summarize a completed governed agent run. This is the post-run answer for a pilot evaluator: whether the guard was clean, how many boundary denials were contained, whether open blocks remain, and which source-free record hashes were produced.
+
+```bash
+neurcode agent report codex --session-id <sessionId>
+neurcode agent report cursor --latest --json
 ```
 
 ### `neurcode status`
