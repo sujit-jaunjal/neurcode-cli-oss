@@ -12,6 +12,7 @@ const agent_guard_1 = require("../utils/agent-guard");
 const admission_artifact_1 = require("../utils/admission-artifact");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
+const runtime_evidence_1 = require("../utils/runtime-evidence");
 const runtime_adapter_1 = require("./runtime-adapter");
 const session_1 = require("./session");
 let chalk;
@@ -170,13 +171,14 @@ function firstRunCommands(input) {
         };
     }
     return {
-        setup: `neurcode agent setup ${input.target} --write --write-instructions`,
+        setup: `neurcode agent bootstrap ${input.target}`,
         start: `neurcode agent start ${input.target} --goal "${input.goal}"`,
         handshake: `neurcode agent handshake --adapter ${input.adapter} --session-id ${session}`,
         plan: `neurcode agent plan --adapter ${input.adapter} --session-id ${session} --plan "<source-free plan>"`,
         check: `neurcode agent check <repo-relative-path> --adapter ${input.adapter} --session-id ${session}`,
         approve: `neurcode agent approve <exact-path> --adapter ${input.adapter} --session-id ${session} --reason "<reason>"`,
         finish: `neurcode agent finish --adapter ${input.adapter} --session-id ${session}`,
+        report: `neurcode agent report ${input.target} --session-id ${session}`,
     };
 }
 function buildSetupPayload(agentArg, options) {
@@ -347,7 +349,7 @@ function configCheck(inspection) {
             label: 'MCP config',
             status: 'warn',
             message: inspection.message,
-            recommendation: `Run neurcode agent setup ${inspection.target} --write, or paste the emitted snippet manually.`,
+            recommendation: `Run neurcode agent bootstrap ${inspection.target}, or paste the emitted snippet manually.`,
         };
     }
     return {
@@ -372,7 +374,7 @@ function instructionCheck(inspection) {
             label: 'Agent instructions',
             status: 'warn',
             message: inspection.message,
-            recommendation: `Run neurcode agent setup ${inspection.target} --write-instructions, or paste the emitted instruction block manually.`,
+            recommendation: `Run neurcode agent bootstrap ${inspection.target}, or paste the emitted instruction block manually.`,
         };
     }
     return {
@@ -412,7 +414,7 @@ function buildDoctorPayload(agentArg, options) {
             message: staleness.status === 'fresh'
                 ? `Fresh profile at ${staleness.profilePath} (${staleness.currentProfile.topology.trackedFileCount} tracked files).`
                 : `${staleness.status}: ${staleness.reasons.join('; ') || 'profile needs refresh'}.`,
-            recommendation: staleness.status === 'fresh' ? undefined : `Run neurcode agent setup ${target} --force-profile.`,
+            recommendation: staleness.status === 'fresh' ? undefined : `Run neurcode agent bootstrap ${target}.`,
         },
         {
             id: 'active_session',
@@ -443,9 +445,9 @@ function buildDoctorPayload(agentArg, options) {
         next: summary.fail > 0
             ? 'Resolve failed checks before relying on agent MCP calls.'
             : inspection.configured === false
-                ? `Run neurcode agent setup ${target} --write or paste the MCP snippet.`
+                ? `Run neurcode agent bootstrap ${target} or paste the MCP snippet.`
                 : instructionInspection.installed === false
-                    ? `Run neurcode agent setup ${target} --write-instructions or paste the agent instruction block.`
+                    ? `Run neurcode agent bootstrap ${target} or paste the agent instruction block.`
                     : `Run neurcode agent start ${target} --goal "<task>".`,
     };
 }
@@ -647,6 +649,169 @@ function renderReadiness(payload) {
     if (payload.nextActions.length > 0) {
         console.log('');
         console.log(chalk.bold('Next actions'));
+        payload.nextActions.forEach((action, index) => console.log(chalk.dim(`  ${index + 1}. ${action}`)));
+    }
+    console.log('');
+}
+function latestLocalSession(repoRoot) {
+    return (0, runtime_evidence_1.listRuntimeSessions)(repoRoot)[0]?.session ?? null;
+}
+function resolveReportSession(repoRoot, options) {
+    if (options.sessionId)
+        return (0, governance_runtime_1.loadSession)(repoRoot, options.sessionId);
+    return (0, governance_runtime_1.loadActiveSession)(repoRoot) ?? latestLocalSession(repoRoot);
+}
+function recordAppliedApprovalPaths(record) {
+    return new Set(record.approvals
+        .filter((approval) => approval.status === 'active')
+        .map((approval) => approval.path));
+}
+function containedDenialPaths(record) {
+    if (record.session.status !== 'finished')
+        return [];
+    const approved = recordAppliedApprovalPaths(record);
+    return record.trajectory
+        .filter((entry) => entry.verdicts.includes('block') &&
+        !entry.verdicts.some((verdict) => verdict === 'ok' || verdict === 'warn'))
+        .map((entry) => entry.suggestedApprovalPath || entry.filePath)
+        .filter((path, index, paths) => !approved.has(path) && paths.indexOf(path) === index);
+}
+function unresolvedBriefBlockCount(record) {
+    const section = record.reviewBrief.sections.find((item) => item.id === 'governance_events');
+    const fact = section?.facts.find((item) => item.includes('without active approval') || item.includes('without applied approval'));
+    if (!fact || fact.startsWith('no '))
+        return 0;
+    const match = fact.match(/^(\d+)/);
+    return match ? Number(match[1]) : 1;
+}
+function buildAgentReportPayload(agentArg, options) {
+    const repoRoot = repoRootFrom({ dir: options.dir });
+    const target = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agentArg);
+    const adapter = AGENT_TO_ADAPTER[target] ?? 'generic-mcp';
+    const capability = capabilityFor(adapter);
+    const session = resolveReportSession(repoRoot, options);
+    if (!session) {
+        return {
+            schemaVersion: 'neurcode.agent-report.v1',
+            ok: false,
+            generatedAt: new Date().toISOString(),
+            repoRoot,
+            target,
+            adapter,
+            reportStatus: 'no_session',
+            pilotReady: false,
+            message: 'No active or completed governed session was found in this repository.',
+            nextActions: [`Run neurcode agent guard start ${target} --goal "<task>".`],
+            privacy: {
+                metadataOnly: true,
+                sourceUploaded: false,
+                sourceIncluded: false,
+            },
+        };
+    }
+    const { record, path } = options.writeRecord === false
+        ? { record: (0, governance_runtime_1.buildAIChangeRecord)(session), path: '<not-written>' }
+        : (0, governance_runtime_1.writeAIChangeRecord)(repoRoot, session);
+    const invocation = (0, governance_runtime_1.buildAgentInvocationSummary)(session);
+    const guardPosture = (0, governance_runtime_1.buildAgentGuardPostureSummary)(session);
+    const supervisor = (0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, session.sessionId);
+    const contained = containedDenialPaths(record);
+    const unresolvedBlockCount = unresolvedBriefBlockCount(record);
+    const guardClean = guardPosture.status === 'finished_clean' || guardPosture.status === 'following_contract';
+    const reportStatus = record.reviewBrief.verdict === 'blocked_unresolved' || unresolvedBlockCount > 0 || guardPosture.status === 'attention_required' || guardPosture.status === 'finished_attention'
+        ? 'attention_needed'
+        : !record.integrity.replayHash
+            ? 'in_progress'
+            : guardClean && record.session.status === 'finished'
+                ? 'pilot_ready'
+                : 'review_ready';
+    const nextActions = reportStatus === 'pilot_ready'
+        ? ['Export the AI Change Record or open Runtime Evidence for human review.']
+        : reportStatus === 'attention_needed'
+            ? ['Resolve open blocked paths or unverified writes before presenting this run as clean pilot evidence.']
+            : record.session.status === 'active'
+                ? [`Finish with neurcode agent guard finish --session-id ${session.sessionId} --fail-on-unverified.`]
+                : ['Open the Runtime Evidence record and review remaining warnings.'];
+    return {
+        schemaVersion: 'neurcode.agent-report.v1',
+        ok: reportStatus !== 'attention_needed',
+        generatedAt: new Date().toISOString(),
+        repoRoot,
+        target,
+        adapter,
+        reportStatus,
+        pilotReady: reportStatus === 'pilot_ready',
+        guarantee: {
+            enforcementLevel: capability?.enforcementLevel ?? 'unknown',
+            controlLevel: capability?.controlLevel ?? 'unsupported_unknown',
+            controlLabel: controlLevelLabel(capability?.controlLevel),
+            mode: readinessMode(capability?.enforcementLevel),
+        },
+        session: {
+            sessionId: session.sessionId,
+            status: session.status,
+            goal: session.contract.goal,
+            scopeMode: session.contract.scopeMode,
+            startedAt: session.events[0]?.ts ?? null,
+            finishedAt: session.finishedAt ?? null,
+        },
+        reviewBrief: record.reviewBrief,
+        counts: {
+            ok: record.session.counts.ok,
+            warn: record.session.counts.warn,
+            block: record.session.counts.block,
+            events: record.session.counts.events,
+            approvals: record.approvals.length,
+            activeApprovals: record.approvals.filter((approval) => approval.status === 'active').length,
+            containedBoundaryDenials: contained.length,
+            unresolvedBlocks: unresolvedBlockCount,
+        },
+        invocation,
+        guardPosture,
+        supervisor: {
+            exists: supervisor.exists,
+            alive: supervisor.alive,
+            effectiveStatus: supervisor.effectiveStatus,
+        },
+        integrity: {
+            replayHash: record.integrity.replayHash,
+            recordHash: record.integrity.recordHash,
+            recordPath: path === '<not-written>' ? path : path.replace(`${repoRoot}/`, ''),
+        },
+        containedBoundaryDenials: contained,
+        nextActions,
+        privacy: {
+            metadataOnly: true,
+            sourceUploaded: false,
+            sourceIncluded: false,
+            localContentDigestsOnly: true,
+        },
+    };
+}
+function renderAgentReport(payload) {
+    console.log('');
+    console.log(chalk.bold(`Neurcode agent report - ${payload.target}`));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Repo:   ${chalk.white(payload.repoRoot)}`);
+    console.log(`Status: ${payload.reportStatus === 'pilot_ready' ? chalk.green(payload.reportStatus) : payload.reportStatus === 'attention_needed' || payload.reportStatus === 'no_session' ? chalk.red(payload.reportStatus) : chalk.yellow(payload.reportStatus)}`);
+    if (payload.reportStatus === 'no_session') {
+        console.log(payload.message);
+    }
+    else {
+        const full = payload;
+        console.log(`Session: ${chalk.cyan(full.session.sessionId)} (${full.session.status})`);
+        console.log(`Verdict: ${full.reviewBrief.verdict}`);
+        console.log(`Summary: ${full.reviewBrief.headline}`);
+        console.log(`Counts:  ok ${full.counts.ok} · warn ${full.counts.warn} · block ${full.counts.block} · approvals ${full.counts.approvals}`);
+        console.log(`Control: contained ${full.counts.containedBoundaryDenials} · open blocks ${full.counts.unresolvedBlocks}`);
+        console.log(`Guard:   ${full.guardPosture.status.replace(/_/g, ' ')} · ${full.guardPosture.nextAction}`);
+        console.log(`Record:  ${full.integrity.recordPath}`);
+        if (full.integrity.replayHash)
+            console.log(`Replay:  ${full.integrity.replayHash}`);
+    }
+    if (payload.nextActions.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Next'));
         payload.nextActions.forEach((action, index) => console.log(chalk.dim(`  ${index + 1}. ${action}`)));
     }
     console.log('');
@@ -876,6 +1041,30 @@ function agentCommand(program) {
         }
     });
     cmd
+        .command('bootstrap [agent]')
+        .description('One-command self-serve setup: refresh profile, write MCP config, and install agent instructions')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--goal <goal>', 'Example first governed task for generated commands')
+        .option('--global', 'For Cursor, write/check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
+        .option('--json', 'Output machine-readable JSON')
+        .action((agent, options) => {
+        try {
+            const payload = buildSetupPayload(agent, {
+                ...options,
+                write: true,
+                writeInstructions: true,
+                forceProfile: true,
+            });
+            if (options.json)
+                emitJson(payload);
+            else
+                renderSetup(payload);
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    cmd
         .command('setup [agent]')
         .description('Prepare MCP config and first-run commands for Codex, Cursor, Claude, or generic MCP')
         .option('--dir <path>', 'Repository root (default: current directory)')
@@ -934,6 +1123,28 @@ function agentCommand(program) {
                 renderReadiness(payload);
             if (!payload.ok)
                 process.exitCode = payload.summary.fail > 0 ? 2 : 1;
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    cmd
+        .command('report [agent]')
+        .description('Summarize the latest or selected governed agent run after it finishes')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--session-id <id>', 'Local governance session ID (default: active session, then latest local session)')
+        .option('--global', 'For Cursor, check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
+        .option('--no-write-record', 'Do not refresh the local AI Change Record sidecar')
+        .option('--json', 'Output machine-readable JSON')
+        .action((agent, options) => {
+        try {
+            const payload = buildAgentReportPayload(agent, options);
+            if (options.json)
+                emitJson(payload);
+            else
+                renderAgentReport(payload);
+            if (!payload.ok)
+                process.exitCode = payload.reportStatus === 'no_session' ? 1 : 2;
         }
         catch (error) {
             emitError(error, options.json);
@@ -1396,6 +1607,9 @@ function agentCommand(program) {
                 console.log(chalk.dim(closedSession
                     ? `Session finished with replayHash ${closedSession.replayHash}.`
                     : 'Guard archived; governed session left active.'));
+                if (closedSession) {
+                    console.log(chalk.dim(`Next: neurcode agent report --session-id ${closedSession.sessionId}`));
+                }
                 console.log('');
             }
             if (options.failOnUnverified && !evaluation.pass)
