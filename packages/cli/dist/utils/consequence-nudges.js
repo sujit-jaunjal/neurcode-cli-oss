@@ -183,6 +183,8 @@ function impactConsequenceClass(impact) {
         return 'escapes-diff';
     if (impact.runtimeGovernanceConsumerCount > 0 || impact.approvalRequiredConsumerCount > 0 || impact.sensitiveConsumerCount > 0)
         return 'runtime-sensitive';
+    if (unchangedProductionConsumerCount(impact) > 0)
+        return 'unchanged-consumers';
     if (impact.changedProductionConsumerCount > 0)
         return 'changed-consumers';
     if (impact.testConsumerCount > 0 && impact.reachableProductionConsumerCount === 0)
@@ -198,6 +200,9 @@ function impactOperatorAction(impact) {
     }
     if (impact.runtimeGovernanceConsumerCount > 0 || impact.sensitiveConsumerCount > 0) {
         return 'Review runtime or sensitive consumers, not only compile/test status';
+    }
+    if (unchangedProductionConsumerCount(impact) > 0) {
+        return 'Review unchanged production consumers before accepting the change';
     }
     if (impact.changedProductionConsumerCount > 0) {
         return 'Confirm the changed consumers were intentionally updated with the symbol';
@@ -220,6 +225,8 @@ function findingConsequenceClass(finding) {
         return 'external-callers';
     if ((summary?.runtimeGovernanceConsumerCount ?? 0) > 0 || (summary?.approvalRequiredConsumerCount ?? 0) > 0 || (summary?.sensitiveConsumerCount ?? 0) > 0)
         return 'runtime-sensitive';
+    if (summary && summary.reachableProductionConsumerCount > summary.changedProductionConsumerCount)
+        return 'unchanged-consumers';
     if ((summary?.changedProductionConsumerCount ?? 0) > 0)
         return 'changed-consumers';
     if ((summary?.testConsumerCount ?? finding.testConsumerCount) > 0)
@@ -236,6 +243,9 @@ function findingOperatorAction(finding) {
     }
     if ((summary?.runtimeGovernanceConsumerCount ?? 0) > 0 || (summary?.sensitiveConsumerCount ?? 0) > 0) {
         return 'Review runtime or sensitive consumers, not only compile/test status';
+    }
+    if (summary && summary.reachableProductionConsumerCount > summary.changedProductionConsumerCount) {
+        return 'Review unchanged production consumers before accepting the change';
     }
     return 'Use this deterministic graph fact as review direction';
 }
@@ -295,5 +305,9 @@ function uniqueStrings(values) {
         out.push(trimmed);
     }
     return out;
+}
+function unchangedProductionConsumerCount(impact) {
+    const changed = new Set(impact.changedProductionFiles || []);
+    return (impact.productionFiles || []).filter((file) => !changed.has(file)).length;
 }
 //# sourceMappingURL=consequence-nudges.js.map

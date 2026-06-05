@@ -4,7 +4,7 @@ export interface InFlowConsequenceNudge {
     nudgeKey: string;
     severity: 'high' | 'medium';
     headline: string;
-    consequenceClass: 'escapes-diff' | 'changed-consumers' | 'runtime-sensitive' | 'test-only' | 'external-callers';
+    consequenceClass: 'escapes-diff' | 'unchanged-consumers' | 'changed-consumers' | 'runtime-sensitive' | 'test-only' | 'external-callers';
     operatorAction: string;
     reviewFocus: string[];
     impact: ConsequenceImpactGroup | null;
