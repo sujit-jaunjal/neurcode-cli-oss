@@ -6,6 +6,9 @@ exports.isHighTrustInFlowFinding = isHighTrustInFlowFinding;
 exports.isHighTrustInFlowImpact = isHighTrustInFlowImpact;
 exports.formatInFlowImpactNudge = formatInFlowImpactNudge;
 exports.formatInFlowConsequenceNudge = formatInFlowConsequenceNudge;
+exports.impactConsequenceClass = impactConsequenceClass;
+exports.impactOperatorAction = impactOperatorAction;
+exports.impactReviewFocus = impactReviewFocus;
 exports.impactNudgeKey = impactNudgeKey;
 exports.nudgeKey = nudgeKey;
 const node_crypto_1 = require("node:crypto");
@@ -48,10 +51,13 @@ function selectInFlowConsequenceNudges(artifact, options = {}) {
             if (!finding)
                 continue;
             nudges.push({
-                nudgeVersion: 'v2',
+                nudgeVersion: 'v3',
                 nudgeKey: impactNudgeKey(artifact.artifactHash, impact),
                 severity: impactNudgeSeverity(impact),
                 headline: formatInFlowImpactNudge(impact),
+                consequenceClass: impactConsequenceClass(impact),
+                operatorAction: impactOperatorAction(impact),
+                reviewFocus: impactReviewFocus(impact),
                 impact,
                 finding,
                 surfacedImpacts: selectedImpacts,
@@ -71,6 +77,9 @@ function selectInFlowConsequenceNudges(artifact, options = {}) {
         nudgeKey: nudgeKey(artifact.artifactHash, finding),
         severity: finding.findingType === 'effect-delta' ? 'high' : 'medium',
         headline: formatInFlowConsequenceNudge(finding),
+        consequenceClass: findingConsequenceClass(finding),
+        operatorAction: findingOperatorAction(finding),
+        reviewFocus: findingReviewFocus(finding),
         impact: null,
         finding,
         surfacedImpacts: [],
@@ -113,9 +122,10 @@ function isHighTrustInFlowImpact(impact) {
         impact.reachableProductionConsumerCount >= 2);
 }
 function formatInFlowImpactNudge(impact) {
-    const production = impact.productionFiles.slice(0, 3).join(', ');
-    const hidden = impact.productionFiles.length > 3
-        ? `, +${impact.productionFiles.length - 3} more`
+    const focus = impactReviewFocus(impact);
+    const production = focus.slice(0, 3).join(', ');
+    const hidden = focus.length > 3
+        ? `, +${focus.length - 3} more`
         : '';
     const kinds = impact.findingTypes.includes('effect-delta') && impact.findingTypes.includes('contract-delta')
         ? 'runtime effect and externally consumed contract'
@@ -123,7 +133,7 @@ function formatInFlowImpactNudge(impact) {
             ? 'runtime effect'
             : 'externally consumed contract';
     const reachText = impact.externalProductionConsumerCount > 0
-        ? `${impact.externalProductionConsumerCount} external production consumer file${impact.externalProductionConsumerCount === 1 ? '' : 's'}`
+        ? `${impact.externalProductionConsumerCount} external production consumer file${impact.externalProductionConsumerCount === 1 ? '' : 's'} outside this diff`
         : `${impact.reachableProductionConsumerCount} production consumer file${impact.reachableProductionConsumerCount === 1 ? '' : 's'} inside this change`;
     const changed = impact.changedProductionConsumerCount > 0
         ? ` ${impact.changedProductionConsumerCount} consumer file${impact.changedProductionConsumerCount === 1 ? '' : 's'} also changed.`
@@ -140,7 +150,8 @@ function formatInFlowImpactNudge(impact) {
             ? ' Architecture-relevant.'
             : '';
     return (`Neurcode impact: ${impact.file}#${impact.symbol} changed a ${kinds} ` +
-        `and reaches ${reachText}: ${production}${hidden}.${changed}${tests}.${sensitive}${architecture}`);
+        `and reaches ${reachText}: ${production || 'none'}${hidden}. ` +
+        `${impactOperatorAction(impact)}.${changed}${tests}.${sensitive}${architecture}`);
 }
 function formatInFlowConsequenceNudge(finding) {
     const summary = finding.consumerSummary;
@@ -164,7 +175,79 @@ function formatInFlowConsequenceNudge(finding) {
         : 'externally consumed contract';
     return (`Neurcode consequence: ${finding.file}#${finding.symbol} changed a ${kind} ` +
         `and reaches ${finding.externalConsumerCount} external non-test caller` +
-        `${finding.externalConsumerCount === 1 ? '' : 's'}: ${production}${hidden}.${tests}.${sensitive}${architecture}`);
+        `${finding.externalConsumerCount === 1 ? '' : 's'}: ${production}${hidden}. ` +
+        `${findingOperatorAction(finding)}.${tests}.${sensitive}${architecture}`);
+}
+function impactConsequenceClass(impact) {
+    if (impact.externalProductionConsumerCount > 0)
+        return 'escapes-diff';
+    if (impact.runtimeGovernanceConsumerCount > 0 || impact.approvalRequiredConsumerCount > 0 || impact.sensitiveConsumerCount > 0)
+        return 'runtime-sensitive';
+    if (impact.changedProductionConsumerCount > 0)
+        return 'changed-consumers';
+    if (impact.testConsumerCount > 0 && impact.reachableProductionConsumerCount === 0)
+        return 'test-only';
+    return 'changed-consumers';
+}
+function impactOperatorAction(impact) {
+    if (impact.externalProductionConsumerCount > 0) {
+        return 'Review the outside-diff production consumers before accepting the change';
+    }
+    if (impact.approvalRequiredConsumerCount > 0) {
+        return 'Review approval-required consumers and confirm owner intent';
+    }
+    if (impact.runtimeGovernanceConsumerCount > 0 || impact.sensitiveConsumerCount > 0) {
+        return 'Review runtime or sensitive consumers, not only compile/test status';
+    }
+    if (impact.changedProductionConsumerCount > 0) {
+        return 'Confirm the changed consumers were intentionally updated with the symbol';
+    }
+    return 'Use this deterministic graph fact as review direction';
+}
+function impactReviewFocus(impact) {
+    return uniqueStrings([
+        ...impact.productionFiles.filter((file) => !(impact.changedProductionFiles || []).includes(file)),
+        ...impact.approvalRequiredFiles,
+        ...impact.runtimeGovernanceFiles,
+        ...impact.sensitiveFiles,
+        ...impact.changedProductionFiles,
+        ...impact.testFiles.slice(0, 2),
+    ]).slice(0, 8);
+}
+function findingConsequenceClass(finding) {
+    const summary = finding.consumerSummary;
+    if ((summary?.externalProductionConsumerCount ?? finding.externalConsumerCount) > 0)
+        return 'external-callers';
+    if ((summary?.runtimeGovernanceConsumerCount ?? 0) > 0 || (summary?.approvalRequiredConsumerCount ?? 0) > 0 || (summary?.sensitiveConsumerCount ?? 0) > 0)
+        return 'runtime-sensitive';
+    if ((summary?.changedProductionConsumerCount ?? 0) > 0)
+        return 'changed-consumers';
+    if ((summary?.testConsumerCount ?? finding.testConsumerCount) > 0)
+        return 'test-only';
+    return 'external-callers';
+}
+function findingOperatorAction(finding) {
+    const summary = finding.consumerSummary;
+    if ((summary?.externalProductionConsumerCount ?? finding.externalConsumerCount) > 0) {
+        return 'Review the external non-test callers before accepting the change';
+    }
+    if ((summary?.approvalRequiredConsumerCount ?? 0) > 0) {
+        return 'Review approval-required consumers and confirm owner intent';
+    }
+    if ((summary?.runtimeGovernanceConsumerCount ?? 0) > 0 || (summary?.sensitiveConsumerCount ?? 0) > 0) {
+        return 'Review runtime or sensitive consumers, not only compile/test status';
+    }
+    return 'Use this deterministic graph fact as review direction';
+}
+function findingReviewFocus(finding) {
+    const summary = finding.consumerSummary;
+    return uniqueStrings([
+        ...(summary?.productionFiles ?? finding.externalConsumerFiles),
+        ...(summary?.approvalRequiredFiles ?? []),
+        ...(summary?.runtimeGovernanceFiles ?? []),
+        ...(summary?.sensitiveFiles ?? []),
+        ...(summary?.testFiles ?? []).slice(0, 2),
+    ]).slice(0, 8);
 }
 function impactNudgeSeverity(impact) {
     if (impact.findingTypes.includes('effect-delta') ||
@@ -200,5 +283,17 @@ function nudgeKey(artifactHash, finding) {
         reasonCodes: finding.reasonCodes,
     });
     return (0, node_crypto_1.createHash)('sha256').update(payload).digest('hex').slice(0, 24);
+}
+function uniqueStrings(values) {
+    const out = [];
+    const seen = new Set();
+    for (const value of values) {
+        const trimmed = value.trim();
+        if (!trimmed || seen.has(trimmed))
+            continue;
+        seen.add(trimmed);
+        out.push(trimmed);
+    }
+    return out;
 }
 //# sourceMappingURL=consequence-nudges.js.map

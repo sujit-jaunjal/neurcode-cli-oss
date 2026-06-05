@@ -203,6 +203,9 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
                 nudgeVersion: nudge.nudgeVersion,
                 nudgeKey: nudge.nudgeKey,
                 severity: nudge.severity,
+                consequenceClass: nudge.consequenceClass,
+                operatorAction: nudge.operatorAction,
+                reviewFocus: nudge.reviewFocus,
                 artifactHash: nudge.artifactHash,
                 impact: nudge.impact ? {
                     rank: nudge.impact.rank,
@@ -273,6 +276,9 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
                 topFindings: nudges.map((item) => ({
                     nudgeKey: item.nudgeKey,
                     severity: item.severity,
+                    consequenceClass: item.consequenceClass,
+                    operatorAction: item.operatorAction,
+                    reviewFocus: item.reviewFocus,
                     findingType: item.finding.findingType,
                     file: item.finding.file,
                     symbol: item.finding.symbol,
@@ -1060,6 +1066,9 @@ async function handleCheck(cmdCwd) {
                     nudgeVersion: consequenceNudge.nudgeVersion,
                     nudgeKey: consequenceNudge.nudgeKey,
                     severity: consequenceNudge.severity,
+                    consequenceClass: consequenceNudge.consequenceClass,
+                    operatorAction: consequenceNudge.operatorAction,
+                    reviewFocus: consequenceNudge.reviewFocus,
                     artifactHash: consequenceNudge.artifactHash,
                     impact: consequenceNudge.impact ? {
                         rank: consequenceNudge.impact.rank,
