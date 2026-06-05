@@ -522,6 +522,128 @@ function buildWorkspacePaths(workspace) {
     }
     return paths;
 }
+function resolveModuleRepoFile(projectRoot, containingFile, moduleSpecifier, compilerOptions) {
+    const resolved = ts.resolveModuleName(moduleSpecifier, containingFile.fileName, compilerOptions, ts.sys).resolvedModule?.resolvedFileName;
+    if (!resolved || /\.d\.ts$/i.test(resolved))
+        return null;
+    const normalized = normalizeRepoPath(repoRel(projectRoot, resolved));
+    return normalized.startsWith('..') ? null : normalized;
+}
+function hasDefaultExportModifier(node) {
+    return Boolean(ts.canHaveModifiers(node) && ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword));
+}
+function buildImportExportTargetGraph(input) {
+    const sourceFilesByRel = new Map();
+    for (const sourceFile of input.program.getSourceFiles()) {
+        if (sourceFile.isDeclarationFile || sourceFile.fileName.includes('node_modules'))
+            continue;
+        sourceFilesByRel.set(repoRel(input.projectRoot, sourceFile.fileName), sourceFile);
+    }
+    const targetByFileAndName = new Map();
+    const localExportsByFile = new Map();
+    for (const target of input.targets) {
+        targetByFileAndName.set(`${target.file}\0${target.name}`, target);
+        if (!target.declaration || !isExportedDeclaration(target.declaration))
+            continue;
+        const bucket = localExportsByFile.get(target.file) ?? new Map();
+        bucket.set(target.name, target);
+        if (hasDefaultExportModifier(target.declaration))
+            bucket.set('default', target);
+        localExportsByFile.set(target.file, bucket);
+    }
+    const exportTargetsByFile = new Map();
+    const resolveExportsForFile = (file, visiting = new Set()) => {
+        const cached = exportTargetsByFile.get(file);
+        if (cached)
+            return cached;
+        if (visiting.has(file))
+            return new Map();
+        visiting.add(file);
+        const out = new Map(localExportsByFile.get(file) ?? []);
+        const sourceFile = sourceFilesByRel.get(file);
+        if (sourceFile) {
+            for (const statement of sourceFile.statements) {
+                if (!ts.isExportDeclaration(statement))
+                    continue;
+                const moduleFile = statement.moduleSpecifier && ts.isStringLiteralLike(statement.moduleSpecifier)
+                    ? resolveModuleRepoFile(input.projectRoot, sourceFile, statement.moduleSpecifier.text, input.compilerOptions)
+                    : file;
+                const moduleExports = moduleFile ? resolveExportsForFile(moduleFile, new Set(visiting)) : out;
+                if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+                    for (const specifier of statement.exportClause.elements) {
+                        const importedName = (specifier.propertyName ?? specifier.name).text;
+                        const exportedName = specifier.name.text;
+                        const target = moduleExports.get(importedName) ?? targetByFileAndName.get(`${moduleFile ?? file}\0${importedName}`);
+                        if (target)
+                            out.set(exportedName, target);
+                    }
+                }
+                else if (!statement.exportClause && moduleFile) {
+                    for (const [name, target] of moduleExports) {
+                        if (name !== 'default')
+                            out.set(name, target);
+                    }
+                }
+            }
+        }
+        exportTargetsByFile.set(file, out);
+        visiting.delete(file);
+        return out;
+    };
+    for (const file of sourceFilesByRel.keys())
+        resolveExportsForFile(file);
+    const importsByFile = new Map();
+    const namespaceImportsByFile = new Map();
+    for (const [file, sourceFile] of sourceFilesByRel) {
+        const imports = new Map();
+        const namespaces = new Map();
+        for (const statement of sourceFile.statements) {
+            if (!ts.isImportDeclaration(statement) || !statement.importClause)
+                continue;
+            if (!ts.isStringLiteralLike(statement.moduleSpecifier))
+                continue;
+            const moduleFile = resolveModuleRepoFile(input.projectRoot, sourceFile, statement.moduleSpecifier.text, input.compilerOptions);
+            if (!moduleFile)
+                continue;
+            const moduleExports = resolveExportsForFile(moduleFile);
+            const importClause = statement.importClause;
+            if (importClause.name) {
+                const target = moduleExports.get('default') ?? moduleExports.get(importClause.name.text);
+                if (target)
+                    imports.set(importClause.name.text, target);
+            }
+            const namedBindings = importClause.namedBindings;
+            if (namedBindings && ts.isNamedImports(namedBindings)) {
+                for (const specifier of namedBindings.elements) {
+                    const importedName = (specifier.propertyName ?? specifier.name).text;
+                    const target = moduleExports.get(importedName);
+                    if (target)
+                        imports.set(specifier.name.text, target);
+                }
+            }
+            else if (namedBindings && ts.isNamespaceImport(namedBindings)) {
+                namespaces.set(namedBindings.name.text, moduleExports);
+            }
+        }
+        if (imports.size > 0)
+            importsByFile.set(file, imports);
+        if (namespaces.size > 0)
+            namespaceImportsByFile.set(file, namespaces);
+    }
+    return { importsByFile, namespaceImportsByFile, exportTargetsByFile };
+}
+function importExportGraphTargetForIdentifier(node, sourceRel, graph) {
+    if (ts.isPropertyAccessExpression(node.parent) &&
+        node.parent.name === node &&
+        ts.isIdentifier(node.parent.expression)) {
+        const namespaces = graph.namespaceImportsByFile.get(sourceRel);
+        const namespaceExports = namespaces?.get(node.parent.expression.text);
+        const target = namespaceExports?.get(node.text);
+        if (target)
+            return target;
+    }
+    return graph.importsByFile.get(sourceRel)?.get(node.text);
+}
 function normalizedHunkLines(hunk) {
     const out = [];
     let oldCursor = hunk.oldStart ?? 1;
@@ -1446,6 +1568,10 @@ function contractReasonCodes(delta) {
 }
 function consumerSummaryReasonCodes(summary) {
     const out = [];
+    if (summary.reachableProductionConsumerCount > 0)
+        out.push('reachable_production_consumers');
+    if (summary.changedProductionConsumerCount > 0)
+        out.push('changed_production_consumers');
     if (summary.sensitiveConsumerCount > 0)
         out.push('sensitive_consumers');
     if (summary.approvalRequiredConsumerCount > 0)
@@ -1464,23 +1590,30 @@ function orderedConsequenceReasonCodes(values) {
 function buildConsumerSummary(input) {
     const production = input.consumers.filter((consumer) => !consumer.isTestFile);
     const tests = input.consumers.filter((consumer) => consumer.isTestFile);
+    const reachableProduction = production.filter((consumer) => consumer.file !== input.targetFile &&
+        !isPackageEntrypointFile(consumer.file));
     const externalProduction = input.externalConsumers.filter((consumer) => !consumer.isTestFile);
+    const changedProduction = reachableProduction.filter((consumer) => consumer.inChangedFile);
     const sensitive = input.consumers.filter((consumer) => sensitiveForReference(input.profile, consumer.file));
     const approvalRequired = input.consumers.filter((consumer) => approvalRequiredForReference(input.profile, consumer.file));
     const runtimeGovernance = input.consumers.filter(runtimeGovernanceConsumer);
-    const highFanout = externalProduction.length >= 3 || production.length >= 5;
+    const highFanout = externalProduction.length >= 3 || reachableProduction.length >= 5 || production.length >= 5;
     const architectureRelevant = highFanout ||
+        reachableProduction.length >= 2 ||
         sensitive.length > 0 ||
         approvalRequired.length > 0 ||
         runtimeGovernance.length > 0;
     return {
         productionConsumerCount: production.length,
         testConsumerCount: tests.length,
+        reachableProductionConsumerCount: reachableProduction.length,
         externalProductionConsumerCount: externalProduction.length,
+        changedProductionConsumerCount: changedProduction.length,
         sensitiveConsumerCount: sensitive.length,
         approvalRequiredConsumerCount: approvalRequired.length,
         runtimeGovernanceConsumerCount: runtimeGovernance.length,
-        productionFiles: uniqueSorted(externalProduction.map((consumer) => consumer.file)).slice(0, 12),
+        productionFiles: uniqueSorted(reachableProduction.map((consumer) => consumer.file)).slice(0, 12),
+        changedProductionFiles: uniqueSorted(changedProduction.map((consumer) => consumer.file)).slice(0, 12),
         testFiles: uniqueSorted(tests.map((consumer) => consumer.file)).slice(0, 12),
         sensitiveFiles: uniqueSorted(sensitive.map((consumer) => consumer.file)).slice(0, 12),
         approvalRequiredFiles: uniqueSorted(approvalRequired.map((consumer) => consumer.file)).slice(0, 12),
@@ -1521,6 +1654,7 @@ function buildTopFindings(input) {
     const rows = [];
     for (const effect of input.effectDeltas) {
         const consumerSummary = buildConsumerSummary({
+            targetFile: effect.file,
             consumers: effect.consumers,
             externalConsumers: effect.externalConsumers,
             profile: input.profile,
@@ -1549,6 +1683,7 @@ function buildTopFindings(input) {
         const tests = delta.consumers.filter((consumer) => consumer.isTestFile);
         const escapingConsumers = contractEscapingConsumers(delta);
         const consumerSummary = buildConsumerSummary({
+            targetFile: delta.file,
             consumers: delta.consumers,
             externalConsumers: escapingConsumers,
             profile: input.profile,
@@ -1584,6 +1719,7 @@ function buildTopFindings(input) {
             provenance: 'typescript-compiler',
         };
         const consumerSummary = buildConsumerSummary({
+            targetFile: projection.baseFile,
             consumers: [consumer],
             externalConsumers: projection.isTestFile ? [] : [consumer],
             profile: input.profile,
@@ -1622,6 +1758,9 @@ function impactSummary(input) {
     if (input.productionFiles.length > 0) {
         parts.push(`${input.productionFiles.length} production consumer file${input.productionFiles.length === 1 ? '' : 's'}`);
     }
+    if (input.changedProductionFiles.length > 0) {
+        parts.push(`${input.changedProductionFiles.length} consumer file${input.changedProductionFiles.length === 1 ? '' : 's'} also changed`);
+    }
     if (input.testFiles.length > 0) {
         parts.push(`${input.testFiles.length} test consumer file${input.testFiles.length === 1 ? '' : 's'}`);
     }
@@ -1653,12 +1792,15 @@ function buildTopImpacts(topFindings) {
             a.rank - b.rank)[0];
         const findingTypes = uniqueSorted(findings.map((finding) => finding.findingType));
         const productionFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.productionFiles));
+        const changedProductionFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.changedProductionFiles));
         const testFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.testFiles));
         const sensitiveFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.sensitiveFiles));
         const approvalRequiredFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.approvalRequiredFiles));
         const runtimeGovernanceFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.runtimeGovernanceFiles));
         const reasonCodes = orderedConsequenceReasonCodes(findings.flatMap((finding) => finding.reasonCodes));
-        const externalProductionConsumerCount = productionFiles.length;
+        const reachableProductionConsumerCount = productionFiles.length;
+        const externalProductionConsumerCount = Math.max(0, ...findings.map((finding) => finding.consumerSummary.externalProductionConsumerCount));
+        const changedProductionConsumerCount = changedProductionFiles.length;
         const sensitiveConsumerCount = sensitiveFiles.length;
         const approvalRequiredConsumerCount = approvalRequiredFiles.length;
         const runtimeGovernanceConsumerCount = runtimeGovernanceFiles.length;
@@ -1689,6 +1831,7 @@ function buildTopImpacts(topFindings) {
                 symbol: first.symbol,
                 findingTypes,
                 productionFiles,
+                changedProductionFiles,
                 testFiles,
                 sensitiveFiles,
                 approvalRequiredFiles,
@@ -1699,11 +1842,14 @@ function buildTopImpacts(topFindings) {
             findingCount: findings.length,
             productionConsumerCount,
             testConsumerCount,
+            reachableProductionConsumerCount,
             externalProductionConsumerCount,
+            changedProductionConsumerCount,
             sensitiveConsumerCount,
             approvalRequiredConsumerCount,
             runtimeGovernanceConsumerCount,
             productionFiles: productionFiles.slice(0, 12),
+            changedProductionFiles: changedProductionFiles.slice(0, 12),
             testFiles: testFiles.slice(0, 12),
             sensitiveFiles: sensitiveFiles.slice(0, 12),
             approvalRequiredFiles: approvalRequiredFiles.slice(0, 12),
@@ -1925,17 +2071,23 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
     const workspace = loadWorkspacePackages(projectRoot);
     const changedPackages = changedWorkspacePackages(workspace, tsChanged);
     const changedPackageNames = changedPackages.map((pkg) => pkg.name);
-    const consumerPackages = changedPackageNames.length
-        ? reverseDepConsumers(workspace, new Set(changedPackageNames))
-        : [];
+    const reverseDepConsumerNames = new Set(changedPackageNames.length
+        ? reverseDepConsumers(workspace, new Set(changedPackageNames)).map((pkg) => pkg.name)
+        : []);
+    const consumerPackages = [];
     let directImporterFilesAdded = 0;
-    for (const consumer of consumerPackages) {
+    for (const consumer of changedPackageNames.length
+        ? workspace.filter((pkg) => !changedPackageNames.includes(pkg.name))
+        : []) {
         const before = sourceFiles.size;
         const gathered = [];
         gatherDirectImporterFiles(consumer, changedPackageNames, gathered, maxFiles + 1);
         for (const file of gathered)
             sourceFiles.add(file);
-        directImporterFilesAdded += sourceFiles.size - before;
+        const added = sourceFiles.size - before;
+        directImporterFilesAdded += added;
+        if (added > 0 || reverseDepConsumerNames.has(consumer.name))
+            consumerPackages.push(consumer);
         if (sourceFiles.size > maxFiles)
             break;
     }
@@ -1944,7 +2096,7 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
     const files = [...sourceFiles];
     if (files.length === 0)
         return none(projectRoot, diffFiles, 'no TypeScript source files gathered', generatedAt, suppressedArtifacts);
-    const program = ts.createProgram(files, {
+    const compilerOptions = {
         target: ts.ScriptTarget.ES2020,
         module: ts.ModuleKind.CommonJS,
         moduleResolution: ts.ModuleResolutionKind.Node10,
@@ -1953,7 +2105,8 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
         skipLibCheck: true,
         noResolve: false,
         ...(crossPackageResolved ? { baseUrl: projectRoot, paths: workspacePaths } : {}),
-    });
+    };
+    const program = ts.createProgram(files, compilerOptions);
     const checker = program.getTypeChecker();
     if (Date.now() - started > timeBudgetMs)
         return none(projectRoot, diffFiles, 'time budget exceeded during program build', generatedAt);
@@ -2014,6 +2167,12 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
         .sort((a, b) => a.file.localeCompare(b.file) || a.lineStart - b.lineStart || a.name.localeCompare(b.name));
     const referenceMap = new Map();
     const changedFileSet = new Set(tsChanged);
+    const importExportGraph = buildImportExportTargetGraph({
+        program,
+        projectRoot,
+        compilerOptions,
+        targets: [...targets.values()],
+    });
     let budgetExceeded = false;
     for (const sourceFile of program.getSourceFiles()) {
         if (sourceFile.isDeclarationFile || sourceFile.fileName.includes('node_modules'))
@@ -2027,7 +2186,9 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
         const visit = (node) => {
             if (ts.isIdentifier(node)) {
                 const symbol = resolveAlias(checker, checker.getSymbolAtLocation(node));
-                const target = symbol ? targetBySymbol.get(symbol) : undefined;
+                const checkerTarget = symbol ? targetBySymbol.get(symbol) : undefined;
+                const graphTarget = importExportGraphTargetForIdentifier(node, sourceRel, importExportGraph);
+                const target = checkerTarget ?? graphTarget;
                 if (target && node !== target.declaration && node.parent !== target.declaration) {
                     const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
                     const enclosing = smallestContaining(sourceDeclarations, line);
@@ -2041,7 +2202,7 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
                         line,
                         isTestFile: isTestFile(sourceRel),
                         inChangedFile: changedFileSet.has(sourceRel),
-                        provenance: 'typescript-compiler',
+                        provenance: checkerTarget ? 'typescript-compiler' : 'import-export-graph',
                     };
                     referenceMap.set(`${ref.targetFile}#${ref.targetKind}#${ref.targetSymbol}:${ref.referencingFile}:${ref.line}:${ref.referencingSymbol ?? ''}`, ref);
                 }

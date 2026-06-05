@@ -1136,8 +1136,10 @@ function renderStructuralUnderstanding(artifact, artifactPath, repoRoot) {
         }
         if (consequence.topImpacts.length > 0) {
             for (const impact of consequence.topImpacts.slice(0, 6)) {
-                const consumers = impact.productionConsumerCount > 0 || impact.testConsumerCount > 0
-                    ? ` · ${impact.productionConsumerCount} prod file(s), ${impact.testConsumerCount} test file(s)`
+                const reachable = impact.reachableProductionConsumerCount ?? impact.productionConsumerCount;
+                const external = impact.externalProductionConsumerCount ?? 0;
+                const consumers = reachable > 0 || impact.testConsumerCount > 0
+                    ? ` · ${reachable} reachable prod file(s), ${external} external, ${impact.testConsumerCount} test file(s)`
                     : '';
                 const flags = [
                     impact.highFanout ? 'high-fanout' : null,

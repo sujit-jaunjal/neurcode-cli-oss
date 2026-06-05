@@ -23,7 +23,7 @@ export interface StructuralReference {
     line: number;
     isTestFile: boolean;
     inChangedFile: boolean;
-    provenance: 'typescript-compiler';
+    provenance: 'typescript-compiler' | 'import-export-graph';
 }
 export interface StructuralImportEdge {
     sourceFile: string;
@@ -153,16 +153,19 @@ export interface ConsequenceConsumerReference {
     line: number;
     isTestFile: boolean;
     inChangedFile: boolean;
-    provenance: 'typescript-compiler';
+    provenance: 'typescript-compiler' | 'import-export-graph';
 }
 export interface ConsequenceConsumerSummary {
     productionConsumerCount: number;
     testConsumerCount: number;
+    reachableProductionConsumerCount: number;
     externalProductionConsumerCount: number;
+    changedProductionConsumerCount: number;
     sensitiveConsumerCount: number;
     approvalRequiredConsumerCount: number;
     runtimeGovernanceConsumerCount: number;
     productionFiles: string[];
+    changedProductionFiles: string[];
     testFiles: string[];
     sensitiveFiles: string[];
     approvalRequiredFiles: string[];
@@ -203,7 +206,7 @@ export interface ConsequenceTopFinding {
     externalConsumerCount: number;
     externalConsumerFiles: string[];
     consumerSummary: ConsequenceConsumerSummary;
-    reasonCodes: Array<'effect_added' | 'effect_removed' | 'filesystem_write' | 'session_evidence_write' | 'network_send' | 'contract_changed' | 'breaking_contract_shape' | 'has_consumers' | 'non_test_consumers' | 'external_consumers' | 'changed_file_only' | 'test_only_consumers' | 'test_file_effect' | 'inheritor_affected' | 'sensitive_consumers' | 'approval_required_consumers' | 'runtime_governance_consumers' | 'high_fanout' | 'architecture_relevant'>;
+    reasonCodes: Array<'effect_added' | 'effect_removed' | 'filesystem_write' | 'session_evidence_write' | 'network_send' | 'contract_changed' | 'breaking_contract_shape' | 'has_consumers' | 'non_test_consumers' | 'external_consumers' | 'reachable_production_consumers' | 'changed_production_consumers' | 'changed_file_only' | 'test_only_consumers' | 'test_file_effect' | 'inheritor_affected' | 'sensitive_consumers' | 'approval_required_consumers' | 'runtime_governance_consumers' | 'high_fanout' | 'architecture_relevant'>;
     provenance: 'deterministic-ranking';
 }
 export interface ConsequenceImpactGroup {
@@ -217,11 +220,14 @@ export interface ConsequenceImpactGroup {
     findingCount: number;
     productionConsumerCount: number;
     testConsumerCount: number;
+    reachableProductionConsumerCount: number;
     externalProductionConsumerCount: number;
+    changedProductionConsumerCount: number;
     sensitiveConsumerCount: number;
     approvalRequiredConsumerCount: number;
     runtimeGovernanceConsumerCount: number;
     productionFiles: string[];
+    changedProductionFiles: string[];
     testFiles: string[];
     sensitiveFiles: string[];
     approvalRequiredFiles: string[];
