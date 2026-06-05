@@ -1,0 +1,159 @@
+/**
+ * Repo Governance Profile — V0 composer.
+ *
+ * Derives a deterministic, metadata-only profile from:
+ *   - the repo file tree (paths only, no content)
+ *   - CODEOWNERS content (optional)
+ *   - manifest content snippets (package.json / pyproject.toml / etc.)
+ *
+ * No source files are read. No network calls. Same inputs → same profileHash.
+ */
+import { type ArchitectureObligationPolicy } from './architecture-obligations';
+import { type ModuleImportRecord, type RepoArchitectureGraph } from './architecture-graph';
+export interface SensitiveBoundary {
+    glob: string;
+    tag: 'auth' | 'crypto' | 'secrets' | 'payments' | 'migrations' | 'security' | 'custom';
+}
+export interface OwnershipBoundary {
+    glob: string;
+    owners: string[];
+}
+export type ReadinessStatus = 'READY' | 'PARTIAL' | 'LOW';
+export interface RepoGovernanceProfile {
+    schemaVersion: 1;
+    repo: {
+        name: string;
+        source: 'local' | 'github';
+    };
+    topology: {
+        hash: string;
+        trackedFileCount: number;
+        codeownersHash: string | null;
+        manifestHash: string | null;
+        governanceConfigHash: string | null;
+        /** Present only when a dependency graph was derived (imports supplied). */
+        architectureHash?: string | null;
+    };
+    runtimeConfig: RuntimeGovernanceConfig;
+    stack: {
+        primaryLanguage: string;
+        frameworkEcosystem: string;
+        confidence: number;
+    };
+    sensitiveBoundaries: SensitiveBoundary[];
+    ownershipBoundaries: OwnershipBoundary[];
+    /** sensitive paths that are also CODEOWNERS-owned — always need approval in V0 */
+    approvalRequiredPaths: string[];
+    /** percentage of detected module paths with no CODEOWNERS entry */
+    unownedPercent: number;
+    agentCompatibility: {
+        claudeCode: 'supported' | 'best-effort' | 'unsupported';
+    };
+    /**
+     * V2 repository architecture graph (module boundaries + dependency edges +
+     * surfaces). Present only when import metadata was supplied to the builder.
+     * Source-free: holds module ids, owners, surface tags, and module→module
+     * edges — never source, diffs, or file contents.
+     */
+    architecture?: RepoArchitectureGraph;
+    profileHash: string;
+    readiness: {
+        status: ReadinessStatus;
+        score: number;
+        reasons: string[];
+    };
+    generatedAt: string;
+}
+export interface ProfileInput {
+    /** Result of `git ls-files` split into lines — paths relative to repo root. */
+    paths: string[];
+    /** Raw CODEOWNERS file content, or null if absent. */
+    codeownersContent: string | null;
+    /** Raw content of the primary manifest (package.json/pyproject.toml/go.mod), or null. */
+    manifestContent: string | null;
+    /** Repo name for display. */
+    repoName: string;
+    source: 'local' | 'github';
+    runtimeConfig?: Partial<RuntimeGovernanceConfig> | null;
+    /**
+     * Per-file import specifiers, read locally by the caller. When supplied, the
+     * builder derives the architecture dependency graph. Source-free: only module
+     * specifiers are passed; raw source is never transmitted or stored.
+     */
+    imports?: ModuleImportRecord[] | null;
+}
+export interface RuntimeGovernanceConfig {
+    /** Additional approval-required globs. Additive only; never removes detected/CODEOWNERS boundaries. */
+    approvalRequiredGlobs: string[];
+    /** Additional sensitive globs. Additive only. */
+    sensitiveGlobs: string[];
+    /** Additional low-risk support globs that may be included in inferred task scopes. */
+    safeSupportGlobs: string[];
+    /** Stored for deterministic policy evidence. V0.2 does not use this to weaken enforcement. */
+    ignoredGlobs: string[];
+    /** How strictly to enforce edits that are not justified by the agent's captured plan. */
+    planCoherence?: PlanCoherenceMode;
+    /** How strictly live architecture obligations are enforced while the agent edits. */
+    architectureObligations?: ArchitectureObligationPolicy;
+}
+export type PlanCoherenceMode = 'off' | 'warn' | 'block';
+export declare const DEFAULT_PLAN_COHERENCE_MODE: PlanCoherenceMode;
+/** Return the owners for a path, applying GitHub CODEOWNERS semantics (last rule wins). */
+export declare function ownersForPath(path: string, rules: OwnershipBoundary[]): string[];
+export declare function buildRepoGovernanceProfile(input: ProfileInput): RepoGovernanceProfile;
+export interface BoundaryCheckInput {
+    filePath: string;
+    /** Glob patterns the session contract allows. Empty = session is ambiguous (block sensitive). */
+    allowedGlobs: string[];
+    ownershipRules: OwnershipBoundary[];
+    sensitiveGlobs: string[];
+    approvalRequiredGlobs: string[];
+    /**
+     * Paths/globs for which the human has granted explicit approval in this session.
+     * Only paths listed here are exempt from the approval-required block.
+     * Absent or empty = no approvals on record.
+     */
+    approvedPaths?: string[];
+    /**
+     * Structured approval grants. When present, only non-expired grants are
+     * considered authoritative; approvedPaths remains for legacy sessions.
+     */
+    approvalGrants?: {
+        path: string;
+        expiresAt?: string | null;
+        revokedAt?: string | null;
+    }[];
+    /** Test hook / replay hook for deterministic expiry checks. Defaults to now. */
+    checkedAt?: string;
+    /**
+     * Whether the scope was inferred from the goal (not explicitly declared).
+     * When 'ambiguous', any approval-required path blocks even if it would otherwise
+     * appear in-scope due to a broad glob.
+     */
+    scopeMode?: 'explicit' | 'inferred' | 'ambiguous';
+}
+export type BoundaryVerdict = 'ok' | 'warn' | 'block';
+export interface BoundaryCheckResult {
+    verdict: BoundaryVerdict;
+    inScope: boolean;
+    isSensitive: boolean;
+    isApprovalRequired: boolean;
+    owners: string[];
+    message: string;
+    /** Actions available to the agent/human at this decision point. */
+    options: ('continue' | 'narrow' | 'replan')[];
+    /**
+     * Machine-readable fields populated only when verdict === 'block' due to an
+     * approval-required boundary. The agent/hook uses these to surface a
+     * structured approval request to the human without parsing the message string.
+     */
+    approvalContext?: {
+        blockedPath: string;
+        approvalRequired: true;
+        owners: string[];
+        /** The exact path/glob the human should approve to unblock this specific file. */
+        suggestedApprovalPath: string;
+    };
+}
+export declare function checkFileBoundary(input: BoundaryCheckInput): BoundaryCheckResult;
+//# sourceMappingURL=profile.d.ts.map

@@ -21,7 +21,7 @@ Additional checks (if relevant):
 
 ```bash
 # example
-node packages/cli/dist/index.js verify --help
+node packages/cli/dist/index.js agent walkthrough codex --json
 ```
 
 ## Risk and rollback

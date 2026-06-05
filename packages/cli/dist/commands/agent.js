@@ -13,6 +13,7 @@ const admission_artifact_1 = require("../utils/admission-artifact");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
 const runtime_evidence_1 = require("../utils/runtime-evidence");
+const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_adapter_1 = require("./runtime-adapter");
 const session_1 = require("./session");
 let chalk;
@@ -79,6 +80,38 @@ function adapterFromOptions(options, fallbackAgent) {
 }
 function repoRootFrom(options) {
     return (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+}
+function dashboardPairingSummary(repoRoot) {
+    const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+    if (!connection) {
+        return {
+            status: 'local_only',
+            autoSyncEnabled: false,
+            message: 'Local-only: this repo is not paired with Runtime Control Plane, so runs will not appear in the dashboard yet.',
+            nextAction: 'Open Runtime Control Plane, choose Connect repo, then run the short-lived pairing command from this repository before the pilot.',
+        };
+    }
+    return {
+        status: 'connected',
+        repoName: connection.repo.name,
+        apiUrl: connection.apiUrl,
+        autoSyncEnabled: Boolean(connection.autoSync?.enabled),
+        lastStatus: connection.autoSync?.lastStatus ?? null,
+        message: `Dashboard-connected: runtime evidence can sync to ${connection.repo.name}.`,
+        nextAction: connection.autoSync?.enabled
+            ? undefined
+            : 'Enable runtime auto-sync or run `neurcode sync --runtime` after the governed session.',
+    };
+}
+function renderDashboardPairing(pairing) {
+    const label = pairing.status === 'connected' ? chalk.green('connected') : chalk.yellow('local-only');
+    console.log(`Dashboard: ${label} ${chalk.dim(pairing.message)}`);
+    if (pairing.status === 'connected') {
+        console.log(`Sync:      ${pairing.autoSyncEnabled ? chalk.green('enabled') : chalk.yellow('manual')} ${chalk.dim(pairing.lastStatus ? `last: ${pairing.lastStatus}` : 'no prior sync status')}`);
+    }
+    if (pairing.nextAction) {
+        console.log(chalk.dim(`Next:      ${pairing.nextAction}`));
+    }
 }
 async function submitAgentEvent(input) {
     const repoRoot = repoRootFrom({ dir: input.dir });
@@ -184,6 +217,7 @@ function firstRunCommands(input) {
 function buildSetupPayload(agentArg, options) {
     const repoRoot = repoRootFrom({ dir: options.dir });
     const target = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agentArg);
+    const dashboardPairing = dashboardPairingSummary(repoRoot);
     const snippet = (0, agent_adapter_setup_1.buildAgentSetupSnippet)({
         target,
         repoRoot,
@@ -235,6 +269,7 @@ function buildSetupPayload(agentArg, options) {
         },
         target,
         adapter: snippet.adapter,
+        dashboardPairing,
         enforcement: {
             level: capability?.enforcementLevel ?? 'cooperative',
             controlLevel: capability?.controlLevel ?? 'unsupported_unknown',
@@ -265,6 +300,9 @@ function buildSetupPayload(agentArg, options) {
             goal,
             commands: firstRunCommands({ target, adapter: snippet.adapter, goal }),
             expectedFlow: [
+                dashboardPairing.status === 'connected'
+                    ? 'dashboard receives source-free live session/evidence updates'
+                    : 'local-only until the repo is paired from Runtime Control Plane',
                 'start governed session',
                 'agent handshakes into session',
                 'agent captures source-free plan',
@@ -292,6 +330,7 @@ function renderSetup(payload) {
     console.log(`Adapter:  ${payload.adapter} ${chalk.dim(`(${payload.enforcement.level}${payload.enforcement.automatic ? ', automatic' : ', explicit'})`)}`);
     console.log(`Control:  ${controlLevelLabel(payload.enforcement.controlLevel)}`);
     console.log(`Profile:  ${payload.profile.refreshed ? chalk.green('refreshed') : chalk.green(payload.profile.status)} ${chalk.dim(payload.profile.profileHash)}`);
+    renderDashboardPairing(payload.dashboardPairing);
     console.log(`MCP:      ${payload.mcp.after.configured === true ? chalk.green('configured') : payload.mcp.after.configured === false ? chalk.yellow('not configured') : chalk.dim('manual')}`);
     console.log(`Rules:    ${payload.instructions.after.installed === true ? chalk.green('installed') : payload.instructions.after.installed === false ? chalk.yellow('missing') : chalk.dim('optional')}`);
     if (payload.mcp.snippet.configPath) {
@@ -320,6 +359,7 @@ function buildWalkthroughPayload(agentArg, options) {
     const repoRoot = repoRootFrom({ dir: options.dir });
     const target = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agentArg);
     const adapter = AGENT_TO_ADAPTER[target] ?? 'generic-mcp';
+    const dashboardPairing = dashboardPairingSummary(repoRoot);
     const goal = options.goal || 'Modify one named file and keep protected boundaries untouched';
     const safePath = options.safePath || '<safe-path-inside-task-scope>';
     const blockedPath = options.blockedPath || '<approval-required-path>';
@@ -328,8 +368,12 @@ function buildWalkthroughPayload(agentArg, options) {
         {
             id: 'connect',
             title: 'Connect repo',
-            outcome: 'The dashboard pairs this local checkout and enables source-free runtime sync.',
-            command: 'Copy and run the Connect repo command from Runtime Control Plane.',
+            outcome: dashboardPairing.status === 'connected'
+                ? `Already paired to Runtime Control Plane as ${dashboardPairing.repoName}; source-free runtime sync is available.`
+                : 'Pair this checkout before the pilot if you want live sessions, approval requests, and evidence to appear in Runtime Control Plane.',
+            command: dashboardPairing.status === 'connected'
+                ? 'Already connected. Continue to bootstrap.'
+                : 'Open Runtime Control Plane -> Connect repo, then run the copied short-lived pairing command from this repository.',
         },
         {
             id: 'bootstrap',
@@ -352,7 +396,9 @@ function buildWalkthroughPayload(agentArg, options) {
         {
             id: 'boundary-block',
             title: 'See boundary block',
-            outcome: 'A protected path is denied and appears in Runtime Control Plane with owners and exact approval path.',
+            outcome: dashboardPairing.status === 'connected'
+                ? 'A protected path is denied and appears in Runtime Control Plane with owners and exact approval path.'
+                : 'A protected path is denied locally. It will not appear in Runtime Control Plane until this repo is paired.',
             command: `neurcode agent check ${blockedPath} --adapter ${adapter} --session-id ${session}`,
         },
         {
@@ -370,8 +416,12 @@ function buildWalkthroughPayload(agentArg, options) {
         {
             id: 'evidence',
             title: 'Open evidence record',
-            outcome: 'The dashboard shows source-free intent, plan, changed-path facts, approvals, contained denials, structural consequences, and receipt hashes.',
-            command: 'Open Runtime Evidence from the Control Plane, or export the AI Change Record JSON.',
+            outcome: dashboardPairing.status === 'connected'
+                ? 'The dashboard shows source-free intent, plan, changed-path facts, approvals, contained denials, structural consequences, and receipt hashes.'
+                : 'Local AI Change Record JSON is written; pair and sync the repo before expecting dashboard evidence.',
+            command: dashboardPairing.status === 'connected'
+                ? 'Open Runtime Evidence from the Control Plane, or export the AI Change Record JSON.'
+                : 'Run the dashboard pairing command, then `neurcode sync --runtime` for finished local evidence.',
         },
     ];
     return {
@@ -381,6 +431,7 @@ function buildWalkthroughPayload(agentArg, options) {
         repoRoot,
         target,
         adapter,
+        dashboardPairing,
         goal,
         guarantee: {
             mode: readinessMode(capabilityFor(adapter)?.enforcementLevel),
@@ -388,6 +439,9 @@ function buildWalkthroughPayload(agentArg, options) {
         },
         steps,
         acceptance: [
+            dashboardPairing.status === 'connected'
+                ? 'Runtime Control Plane shows the live session and evidence'
+                : 'local-only status is explicit before the run starts',
             'safe path is allowed before write',
             'approval-required path is denied before or during write',
             'exact approval does not grant directory or sibling files',
@@ -409,6 +463,7 @@ function renderWalkthrough(payload) {
     console.log(`Repo:      ${chalk.white(payload.repoRoot)}`);
     console.log(`Adapter:   ${payload.adapter}`);
     console.log(`Guarantee: ${payload.guarantee.controlLabel} · ${payload.guarantee.mode}`);
+    renderDashboardPairing(payload.dashboardPairing);
     console.log('');
     payload.steps.forEach((step, index) => {
         console.log(chalk.bold(`${index + 1}. ${step.title}`));
@@ -795,6 +850,7 @@ function buildAgentReportPayload(agentArg, options) {
     const target = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agentArg);
     const adapter = AGENT_TO_ADAPTER[target] ?? 'generic-mcp';
     const capability = capabilityFor(adapter);
+    const dashboardPairing = dashboardPairingSummary(repoRoot);
     const session = resolveReportSession(repoRoot, options);
     if (!session) {
         return {
@@ -804,10 +860,16 @@ function buildAgentReportPayload(agentArg, options) {
             repoRoot,
             target,
             adapter,
+            dashboardPairing,
             reportStatus: 'no_session',
             pilotReady: false,
             message: 'No active or completed governed session was found in this repository.',
-            nextActions: [`Run neurcode agent guard start ${target} --goal "<task>".`],
+            nextActions: [
+                dashboardPairing.status === 'connected'
+                    ? `Run neurcode agent guard start ${target} --goal "<task>".`
+                    : 'Pair this repo from Runtime Control Plane if you want the pilot to appear in the dashboard.',
+                `Run neurcode agent guard start ${target} --goal "<task>".`,
+            ],
             privacy: {
                 metadataOnly: true,
                 sourceUploaded: false,
@@ -832,7 +894,11 @@ function buildAgentReportPayload(agentArg, options) {
                 ? 'pilot_ready'
                 : 'review_ready';
     const nextActions = reportStatus === 'pilot_ready'
-        ? ['Export the AI Change Record or open Runtime Evidence for human review.']
+        ? [
+            dashboardPairing.status === 'connected'
+                ? 'Open Runtime Evidence for human review, or export the AI Change Record.'
+                : 'Local pilot is clean; pair this repo from Runtime Control Plane and run `neurcode sync --runtime` before expecting dashboard evidence.',
+        ]
         : reportStatus === 'attention_needed'
             ? ['Resolve open blocked paths or unverified writes before presenting this run as clean pilot evidence.']
             : record.session.status === 'active'
@@ -845,6 +911,7 @@ function buildAgentReportPayload(agentArg, options) {
         repoRoot,
         target,
         adapter,
+        dashboardPairing,
         reportStatus,
         pilotReady: reportStatus === 'pilot_ready',
         guarantee: {
@@ -884,6 +951,14 @@ function buildAgentReportPayload(agentArg, options) {
             recordHash: record.integrity.recordHash,
             recordPath: path === '<not-written>' ? path : path.replace(`${repoRoot}/`, ''),
         },
+        dashboardEvidence: {
+            status: dashboardPairing.status === 'connected' ? 'sync_available' : 'local_only',
+            autoSyncEnabled: dashboardPairing.autoSyncEnabled,
+            lastStatus: dashboardPairing.lastStatus ?? null,
+            message: dashboardPairing.status === 'connected'
+                ? 'Runtime Evidence should receive this source-free record through auto-sync or manual sync.'
+                : 'This record is local-only until the repository is paired with Runtime Control Plane.',
+        },
         containedBoundaryDenials: contained,
         nextActions,
         privacy: {
@@ -899,6 +974,7 @@ function renderAgentReport(payload) {
     console.log(chalk.bold(`Neurcode agent report - ${payload.target}`));
     console.log(chalk.dim('-'.repeat(72)));
     console.log(`Repo:   ${chalk.white(payload.repoRoot)}`);
+    renderDashboardPairing(payload.dashboardPairing);
     console.log(`Status: ${payload.reportStatus === 'pilot_ready' ? chalk.green(payload.reportStatus) : payload.reportStatus === 'attention_needed' || payload.reportStatus === 'no_session' ? chalk.red(payload.reportStatus) : chalk.yellow(payload.reportStatus)}`);
     if (payload.reportStatus === 'no_session') {
         console.log(payload.message);
@@ -912,6 +988,7 @@ function renderAgentReport(payload) {
         console.log(`Control: contained ${full.counts.containedBoundaryDenials} · open blocks ${full.counts.unresolvedBlocks}`);
         console.log(`Guard:   ${full.guardPosture.status.replace(/_/g, ' ')} · ${full.guardPosture.nextAction}`);
         console.log(`Record:  ${full.integrity.recordPath}`);
+        console.log(`Evidence:${full.dashboardEvidence.status === 'sync_available' ? chalk.green(' dashboard sync available') : chalk.yellow(' local-only')} ${chalk.dim(full.dashboardEvidence.message)}`);
         if (full.integrity.replayHash)
             console.log(`Replay:  ${full.integrity.replayHash}`);
     }

@@ -52,14 +52,13 @@ node packages/cli/dist/index.js --help
 
 ## CLI workflow modes
 
-### 1) Login + policy-first governance (recommended)
+### 1) Runtime governance pilot loop (recommended)
 
 ```bash
-neurcode login
-neurcode init
-neurcode policy install soc2
-neurcode policy compile --intent "Do not use console.log; Do not use TODO"
-neurcode verify --policy-only
+neurcode agent walkthrough codex
+neurcode agent bootstrap codex --dir .
+neurcode agent start codex --goal "Make a bounded change"
+neurcode agent report codex --latest
 ```
 
 Run these commands inside a git repository. If you are in a new folder:
@@ -70,13 +69,13 @@ git add .
 git commit -m "chore: baseline"
 ```
 
-### 2) Plan-enforced delivery (requires login/API access)
+### 2) Dashboard-connected runtime evidence (requires login/API access)
 
 ```bash
-neurcode plan "Implement org-level RBAC"
-neurcode prompt
-neurcode verify --record --compiled-policy neurcode.policy.compiled.json --enforce-change-contract
-neurcode ship "Implement org-level RBAC" --max-fix-attempts 2
+neurcode login
+neurcode activate claude --connect <short-lived-token>
+neurcode runtime cloud-status
+neurcode sync --runtime
 ```
 
 ## External plan import (Codex/Claude/Cursor/ChatGPT)

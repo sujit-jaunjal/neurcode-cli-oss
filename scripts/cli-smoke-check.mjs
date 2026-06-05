@@ -38,12 +38,20 @@ function assert(condition, message) {
 
 function run() {
   const rootHelp = runCli(['--help']);
-  // Root help lists primary commands in Commander form and legacy commands as
-  // curated bullets (`* neurcode <cmd>`). Match both shapes so smoke stays stable.
+  // Root help lists first-run runtime commands in Commander form and older
+  // compatibility commands as curated bullets (`* neurcode <cmd>`). Match the
+  // current public surface, not retired verify-first flows.
   const requiredCommands = [
+    'activate [options] [agent]',
+    'agent',
+    'run [options] [agent]',
+    'runtime',
+    'sync [options]',
+    'admission',
+    'demo',
     'start [options] [intent...]',
+    'replay [options]',
     'neurcode generate',
-    'verify [options]',
     'neurcode fix',
     'neurcode patch',
     'neurcode export',
@@ -51,6 +59,29 @@ function run() {
   ];
   for (const command of requiredCommands) {
     assertContains(rootHelp, command, 'root help output');
+  }
+
+  const agentHelp = runCli(['agent', '--help']);
+  const requiredAgentCommands = [
+    'bootstrap [options] [agent]',
+    'walkthrough [options] [agent]',
+    'start [options] [agent]',
+    'check [options] <filePath>',
+    'approve [options] <path>',
+    'guard',
+  ];
+  for (const command of requiredAgentCommands) {
+    assertContains(agentHelp, command, 'agent help output');
+  }
+
+  const runtimeHelp = runCli(['runtime', '--help']);
+  for (const command of ['cloud-status [options]', 'reset-stale-cloud [options]']) {
+    assertContains(runtimeHelp, command, 'runtime help output');
+  }
+
+  const admissionHelp = runCli(['admission', '--help']);
+  for (const command of ['export [options] [sessionId]', 'latest [options]']) {
+    assertContains(admissionHelp, command, 'admission help output');
   }
 
   const verifyHelp = runCli(['verify', '--help']);
@@ -62,7 +93,7 @@ function run() {
     '--require-runtime-guard',
   ];
   for (const flag of requiredVerifyFlags) {
-    assertContains(verifyHelp, flag, 'verify help output');
+    assertContains(verifyHelp, flag, 'verify compatibility help output');
   }
 
   const policyList = runCli(['policy', 'list']);
@@ -72,6 +103,23 @@ function run() {
 
   const tmpRoot = mkdtempSync(join(os.tmpdir(), 'neurcode-cli-smoke-'));
   try {
+    execFileSync('git', ['init', '-q'], { cwd: tmpRoot, encoding: 'utf-8' });
+
+    const walkthroughRaw = runCli(['agent', 'walkthrough', 'codex', '--json'], { cwd: tmpRoot });
+    const walkthrough = JSON.parse(walkthroughRaw);
+    assert(
+      walkthrough.dashboardPairing?.status === 'local_only' || walkthrough.dashboardPairing?.status === 'connected',
+      'agent walkthrough should report dashboard pairing status',
+    );
+    assert(
+      Array.isArray(walkthrough.steps) && walkthrough.steps.some((step) => step.id === 'connect'),
+      'agent walkthrough should include the repo connect step',
+    );
+    assert(
+      Array.isArray(walkthrough.acceptance) && walkthrough.acceptance.length > 0,
+      'agent walkthrough should include acceptance criteria',
+    );
+
     mkdirSync(join(tmpRoot, '.codex/plans'), { recursive: true });
     writeFileSync(
       join(tmpRoot, '.codex/plans/sample-plan.md'),
@@ -91,7 +139,7 @@ function run() {
     rmSync(tmpRoot, { recursive: true, force: true });
   }
 
-  console.log('✅ CLI smoke check passed: command surface and local auto-detect behavior validated.');
+  console.log('✅ CLI smoke check passed: runtime command surface, walkthrough, and local auto-detect behavior validated.');
 }
 
 try {

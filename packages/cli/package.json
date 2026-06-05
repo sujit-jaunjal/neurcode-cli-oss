@@ -41,7 +41,7 @@
     "@neurcode-ai/contracts": "^0.1.1",
     "@neurcode-ai/core": "^0.1.0",
     "@neurcode-ai/diff-parser": "^0.1.0",
-    "@neurcode-ai/governance-runtime": "^0.1.3",
+    "@neurcode-ai/governance-runtime": "file:../governance-runtime",
     "@neurcode-ai/policy": "^0.1.0",
     "@neurcode-ai/policy-engine": "^0.1.0",
     "@neurcode-ai/telemetry": "file:../telemetry",
