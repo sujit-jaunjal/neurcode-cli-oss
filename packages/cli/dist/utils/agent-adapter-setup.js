@@ -12,6 +12,7 @@ exports.writeAgentInstructions = writeAgentInstructions;
 const node_fs_1 = require("node:fs");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
+const v0_governance_1 = require("./v0-governance");
 exports.AGENT_ADAPTER_SETUP_SCHEMA_VERSION = 'neurcode.agent-adapter-setup.v1';
 exports.AGENT_ADAPTER_DOCTOR_SCHEMA_VERSION = 'neurcode.agent-adapter-doctor.v1';
 const MCP_PACKAGE = '@neurcode-ai/mcp-server';
@@ -41,6 +42,8 @@ function normalizeAgentSetupTarget(value) {
     const normalized = (value || 'codex').trim().toLowerCase();
     if (['claude', 'claude-code', 'claude_code'].includes(normalized))
         return 'claude';
+    if (['copilot', 'github-copilot', 'github_copilot', 'copilot-hooks'].includes(normalized))
+        return 'copilot';
     if (['codex', 'codex-mcp'].includes(normalized))
         return 'codex';
     if (['cursor', 'cursor-mcp'].includes(normalized))
@@ -49,11 +52,13 @@ function normalizeAgentSetupTarget(value) {
         return 'generic-mcp';
     if (['vscode', 'vs-code', 'vscode-extension'].includes(normalized))
         return 'vscode';
-    throw new Error(`Unsupported agent setup target "${value}". Supported: claude, codex, cursor, generic-mcp, vscode.`);
+    throw new Error(`Unsupported agent setup target "${value}". Supported: claude, copilot, codex, cursor, generic-mcp, vscode.`);
 }
 function adapterForSetupTarget(target) {
     if (target === 'claude')
         return 'claude-code-hooks';
+    if (target === 'copilot')
+        return 'copilot-hooks';
     if (target === 'codex')
         return 'codex-mcp';
     if (target === 'cursor')
@@ -78,6 +83,8 @@ function instructionPath(target, repoRoot) {
         return (0, node_path_1.join)(repoRoot, 'AGENTS.md');
     if (target === 'cursor')
         return (0, node_path_1.join)(repoRoot, '.cursor', 'rules', 'neurcode-governance.mdc');
+    if (target === 'copilot')
+        return (0, node_path_1.join)(repoRoot, '.github', 'copilot-instructions.md');
     if (target === 'vscode')
         return (0, node_path_1.join)(repoRoot, '.vscode', 'neurcode-runtime.md');
     if (target === 'generic-mcp')
@@ -89,6 +96,8 @@ function instructionDestination(target) {
         return 'AGENTS.md';
     if (target === 'cursor')
         return '.cursor/rules/neurcode-governance.mdc';
+    if (target === 'copilot')
+        return '.github/copilot-instructions.md';
     if (target === 'vscode')
         return '.vscode/neurcode-runtime.md';
     if (target === 'generic-mcp')
@@ -140,6 +149,26 @@ function instructionBody(input) {
             '',
         ].join('\n');
     }
+    if (input.target === 'copilot') {
+        return [
+            '<!-- neurcode-agent-runtime-v1 -->',
+            '# Neurcode Runtime Governance for GitHub Copilot',
+            '',
+            'This repository uses Neurcode Copilot hooks as the hard-deny runtime path for Copilot Agent Mode.',
+            '',
+            'Follow this contract during coding tasks:',
+            '',
+            '1. Work inside a governed repository where `.github/hooks/neurcode.json` was written by `neurcode activate copilot` or `neurcode agent setup copilot --write`.',
+            '2. Keep UserPromptSubmit, PreToolUse, and Stop hooks enabled in the Copilot host.',
+            '3. Treat a Neurcode deny as authoritative. Do not create, edit, or overwrite the denied file.',
+            '4. If a protected boundary must change, ask the human operator to approve only the exact suggested path in the Runtime Control Plane.',
+            '5. Do not broaden approval to a directory or glob unless the human explicitly changes the task scope.',
+            '6. Finish the governed session so source-free runtime evidence and replay records are written.',
+            '',
+            'Never send source code, diffs, patches, file contents, or before/after text to Neurcode runtime payloads. Runtime evidence is paths, owners, decisions, plan metadata, guard posture, and integrity hashes.',
+            '',
+        ].join('\n');
+    }
     const adapter = cliAdapterName(input.adapter);
     return [
         ...instructionHeader(input.target),
@@ -185,6 +214,23 @@ function buildAgentSetupSnippet(input) {
                 format: 'text',
                 body: 'Run: neurcode activate claude',
                 instruction: 'Claude Code is the hard-deny adapter. Use neurcode activate claude to install hooks and MCP approval tools.',
+            };
+        case 'copilot':
+            return {
+                target: input.target,
+                adapter,
+                destination: '.github/hooks/neurcode.json',
+                configPath: (0, v0_governance_1.copilotHooksPath)(input.repoRoot),
+                format: 'json',
+                body: JSON.stringify({
+                    version: 1,
+                    hooks: {
+                        UserPromptSubmit: [{ type: 'command', command: 'neurcode session-hook start' }],
+                        PreToolUse: [{ type: 'command', command: 'neurcode session-hook check' }],
+                        Stop: [{ type: 'command', command: 'neurcode session-hook finish' }],
+                    },
+                }, null, 2),
+                instruction: 'GitHub Copilot Agent Mode is hook-backed. Use neurcode activate copilot or --write to install local hard-deny hooks.',
             };
         case 'codex':
             return {
@@ -298,6 +344,21 @@ function inspectAgentSetup(input) {
             configured: null,
             configPath: null,
             message: 'Generic MCP clients require manual registration using the emitted snippet.',
+        };
+    }
+    if (input.target === 'copilot') {
+        const hooks = (0, v0_governance_1.inspectCopilotActivation)(input.repoRoot).hooks;
+        return {
+            target: input.target,
+            adapter,
+            supported: true,
+            configured: hooks.installed,
+            configPath: hooks.hooksPath,
+            message: hooks.installed
+                ? `Neurcode Copilot hooks are installed in ${hooks.hooksPath}.`
+                : hooks.error
+                    ? `Could not inspect ${hooks.hooksPath}: ${hooks.error}.`
+                    : `Neurcode Copilot hooks are missing or stale in ${hooks.hooksPath}.`,
         };
     }
     if (input.target === 'vscode') {
@@ -447,6 +508,16 @@ function writeVscodeRecommendations(path) {
     };
 }
 function writeAgentSetup(input) {
+    if (input.target === 'copilot') {
+        const result = (0, v0_governance_1.installCopilotGovernanceHooks)(input.repoRoot);
+        return {
+            status: result.added.length + result.repaired.length > 0 ? 'written' : 'already_configured',
+            configPath: result.hooksPath,
+            message: result.added.length + result.repaired.length > 0
+                ? `Installed Neurcode Copilot hooks in ${result.hooksPath}.`
+                : `Copilot hooks already contain current Neurcode runtime entries at ${result.hooksPath}.`,
+        };
+    }
     if (input.target === 'codex')
         return writeCodexConfig(codexConfigPath());
     if (input.target === 'cursor')

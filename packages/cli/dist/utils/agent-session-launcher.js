@@ -14,6 +14,8 @@ function normalizeAgent(input) {
     const raw = (input || 'claude').trim().toLowerCase();
     if (['claude', 'claude-code', 'claude_code', 'claude-code-hooks'].includes(raw))
         return 'claude';
+    if (['copilot', 'github-copilot', 'copilot-hooks'].includes(raw))
+        return 'copilot';
     if (['codex', 'codex-mcp'].includes(raw))
         return 'codex';
     if (['cursor', 'cursor-mcp'].includes(raw))
@@ -22,11 +24,13 @@ function normalizeAgent(input) {
         return raw === 'gemini' || raw === 'gemini-cli' ? 'gemini' : 'generic-mcp';
     if (['vscode', 'vs-code', 'vscode-extension'].includes(raw))
         return 'vscode';
-    throw new Error(`Unsupported agent "${input}". Supported agents: claude, codex, cursor, gemini, generic-mcp, vscode.`);
+    throw new Error(`Unsupported agent "${input}". Supported agents: claude, copilot, codex, cursor, gemini, generic-mcp, vscode.`);
 }
 function adapterForLauncherAgent(agent) {
     if (agent === 'claude')
         return 'claude-code-hooks';
+    if (agent === 'copilot')
+        return 'copilot-hooks';
     if (agent === 'codex')
         return 'codex-mcp';
     if (agent === 'cursor')
@@ -37,6 +41,8 @@ function adapterForLauncherAgent(agent) {
 }
 function handshakeStatusFor(adapter) {
     if (adapter === 'claude-code-hooks')
+        return 'awaiting_agent_prompt';
+    if (adapter === 'copilot-hooks')
         return 'awaiting_agent_prompt';
     if (adapter === 'vscode-extension')
         return 'observe_only';
@@ -59,6 +65,9 @@ function starterPrompt(input) {
     if (input.adapter === 'claude-code-hooks') {
         base.push('Claude Code hooks are installed; Neurcode will check Edit/Write/MultiEdit before the write lands.');
     }
+    else if (input.adapter === 'copilot-hooks') {
+        base.push('GitHub Copilot hooks are installed; Neurcode will check agent tool use before writes when Copilot hook discovery is active.');
+    }
     else if (input.adapter === 'vscode-extension') {
         base.push('VS Code is observe-only; use the CLI/MCP runtime adapter before edits when the agent host supports it.');
     }
@@ -74,6 +83,14 @@ function instructionsFor(input) {
             'Paste the starter prompt shown by this command.',
             'Claude Code UserPromptSubmit will handshake into the existing session instead of creating a duplicate.',
             'PreToolUse hooks will hard-deny approval-required writes before they land.',
+        ];
+    }
+    if (input.adapter === 'copilot-hooks') {
+        return [
+            'Open VS Code in this repository and use GitHub Copilot Agent Mode.',
+            'Ensure .github/hooks/neurcode.json is present from `neurcode activate copilot`.',
+            'Paste the starter prompt shown by this command.',
+            'Copilot hooks will run UserPromptSubmit, PreToolUse, and Stop through the local runtime where hook discovery is active.',
         ];
     }
     if (input.adapter === 'vscode-extension') {
@@ -181,6 +198,14 @@ async function launchAgentSession(options) {
             mcpConfigured: true,
         };
     }
+    if (normalized === 'copilot' && options.activate !== false) {
+        (0, v0_governance_1.installCopilotGovernanceHooks)(repoRoot, { force: options.forceProfile === true });
+        activation = {
+            attempted: true,
+            hooksInstalled: true,
+            mcpConfigured: false,
+        };
+    }
     let session = (0, governance_runtime_1.createSession)(repoRoot, profileResult.profile, goal);
     session = maybeCaptureInitialPlan(repoRoot, session, options.plan);
     const status = handshakeStatusFor(adapter);
@@ -220,7 +245,7 @@ async function launchAgentSession(options) {
             status,
             required: status !== 'observe_only',
             nextEvent: status === 'awaiting_agent_prompt'
-                ? 'Claude Code UserPromptSubmit'
+                ? (adapter === 'copilot-hooks' ? 'Copilot UserPromptSubmit' : 'Claude Code UserPromptSubmit')
                 : status === 'awaiting_plan_capture'
                     ? 'plan.capture'
                     : null,

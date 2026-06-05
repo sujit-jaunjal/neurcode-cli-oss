@@ -32,6 +32,9 @@ catch {
 const AGENT_TO_ADAPTER = {
     claude: 'claude-code-hooks',
     'claude-code': 'claude-code-hooks',
+    copilot: 'copilot-hooks',
+    'github-copilot': 'copilot-hooks',
+    'copilot-hooks': 'copilot-hooks',
     codex: 'codex-mcp',
     cursor: 'cursor-mcp',
     gemini: 'generic-mcp',
@@ -71,7 +74,7 @@ function adapterFromOptions(options, fallbackAgent) {
     const agent = normalizeAdapter(options.agent || fallbackAgent);
     if (agent)
         return agent;
-    throw new Error(`Unsupported agent/adapter. Use one of: claude, codex, cursor, generic-mcp, vscode.`);
+    throw new Error(`Unsupported agent/adapter. Use one of: claude, copilot, codex, cursor, generic-mcp, vscode.`);
 }
 function repoRootFrom(options) {
     return (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
@@ -155,6 +158,15 @@ function firstRunCommands(input) {
             approve: 'neurcode session approve --path <exact-path> --reason "<reason>"',
         };
     }
+    if (input.target === 'copilot') {
+        return {
+            activate: 'neurcode activate copilot',
+            start: `neurcode agent start copilot --goal "${input.goal}"`,
+            status: 'neurcode status',
+            approve: 'Approve the exact suggested path in Runtime Control Plane',
+            finish: 'Copilot Stop hook finishes the governed session',
+        };
+    }
     return {
         setup: `neurcode agent setup ${input.target} --write --write-instructions`,
         start: `neurcode agent start ${input.target} --goal "${input.goal}"`,
@@ -191,7 +203,7 @@ function buildSetupPayload(agentArg, options) {
         : {
             status: 'not_requested',
             configPath: snippet.configPath,
-            message: 'Run with --write to update known Codex/Cursor MCP config automatically.',
+            message: 'Run with --write to update the known adapter config automatically.',
         };
     const instructionWrite = options.writeInstructions
         ? (0, agent_adapter_setup_1.writeAgentInstructions)({ target, repoRoot })
@@ -380,6 +392,7 @@ function buildDoctorPayload(agentArg, options) {
     const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
     const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
     const capability = capabilityFor(inspection.adapter);
+    const needsNpx = target === 'codex' || target === 'cursor' || target === 'generic-mcp';
     const checks = [
         {
             id: 'adapter',
@@ -389,7 +402,7 @@ function buildDoctorPayload(agentArg, options) {
         },
         configCheck(inspection),
         instructionCheck(instructionInspection),
-        npxCheck(),
+        ...(needsNpx ? [npxCheck()] : []),
         {
             id: 'profile',
             label: 'Governance profile',

@@ -206,6 +206,31 @@ export interface ConsequenceTopFinding {
     reasonCodes: Array<'effect_added' | 'effect_removed' | 'filesystem_write' | 'session_evidence_write' | 'network_send' | 'contract_changed' | 'breaking_contract_shape' | 'has_consumers' | 'non_test_consumers' | 'external_consumers' | 'changed_file_only' | 'test_only_consumers' | 'test_file_effect' | 'inheritor_affected' | 'sensitive_consumers' | 'approval_required_consumers' | 'runtime_governance_consumers' | 'high_fanout' | 'architecture_relevant'>;
     provenance: 'deterministic-ranking';
 }
+export interface ConsequenceImpactGroup {
+    rank: number;
+    score: number;
+    file: string;
+    symbol: string;
+    summary: string;
+    findingTypes: ConsequenceTopFinding['findingType'][];
+    findingRanks: number[];
+    findingCount: number;
+    productionConsumerCount: number;
+    testConsumerCount: number;
+    externalProductionConsumerCount: number;
+    sensitiveConsumerCount: number;
+    approvalRequiredConsumerCount: number;
+    runtimeGovernanceConsumerCount: number;
+    productionFiles: string[];
+    testFiles: string[];
+    sensitiveFiles: string[];
+    approvalRequiredFiles: string[];
+    runtimeGovernanceFiles: string[];
+    highFanout: boolean;
+    architectureRelevant: boolean;
+    reasonCodes: ConsequenceTopFinding['reasonCodes'];
+    provenance: 'deterministic-impact-grouping';
+}
 export interface ConsequenceUnderstandingArtifact {
     schemaVersion: typeof CONSEQUENCE_UNDERSTANDING_SCHEMA_VERSION;
     generatedAt: string;
@@ -218,11 +243,13 @@ export interface ConsequenceUnderstandingArtifact {
     contractDeltas: ConsequenceContractDelta[];
     inheritorProjections: ConsequenceInheritorProjection[];
     topFindings: ConsequenceTopFinding[];
+    topImpacts: ConsequenceImpactGroup[];
     summary: {
         effectDeltaCount: number;
         contractDeltaCount: number;
         inheritorProjectionCount: number;
         topFindingCount: number;
+        topImpactCount: number;
         escapingConsequenceCount: number;
         highestExternalConsumerCount: number;
         headline: string;
@@ -233,6 +260,7 @@ export interface ConsequenceUnderstandingArtifact {
         contractDeltas: 'typescript-checker';
         inheritorProjections: 'inheritance-projection';
         topFindings: 'deterministic-ranking';
+        topImpacts: 'deterministic-impact-grouping';
     };
 }
 export interface StructuralUnderstandingArtifact {

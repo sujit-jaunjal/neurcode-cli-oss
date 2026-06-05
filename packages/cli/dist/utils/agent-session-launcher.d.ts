@@ -1,7 +1,7 @@
 import { type AgentRuntimeAdapterId, type AgentRuntimeEnforcementLevel, type GovernanceSession } from '@neurcode-ai/governance-runtime';
 export declare const AGENT_SESSION_LAUNCH_SCHEMA_VERSION: "neurcode.agent-session-launch.v1";
 export declare const AGENT_SESSION_HANDSHAKE_SCHEMA_VERSION: "neurcode.agent-session-handshake.v1";
-export type AgentSessionLauncherAgent = 'claude' | 'codex' | 'cursor' | 'gemini' | 'generic-mcp' | 'vscode';
+export type AgentSessionLauncherAgent = 'claude' | 'copilot' | 'codex' | 'cursor' | 'gemini' | 'generic-mcp' | 'vscode';
 export type AgentHandshakeStatus = 'awaiting_agent_prompt' | 'awaiting_plan_capture' | 'observe_only' | 'mcp_connected' | 'prompt_seen' | 'plan_captured';
 export interface AgentSessionLaunchOptions {
     agent?: string;

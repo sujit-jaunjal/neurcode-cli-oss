@@ -188,6 +188,7 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
                     analyzed: artifact.consequenceUnderstanding.analyzed,
                     reason: artifact.consequenceUnderstanding.reason,
                     summary: artifact.consequenceUnderstanding.summary,
+                    topImpacts: artifact.consequenceUnderstanding.topImpacts.slice(0, 8),
                     topFindings: artifact.consequenceUnderstanding.topFindings.slice(0, 8),
                     artifactHash: artifact.consequenceUnderstanding.artifactHash,
                 },

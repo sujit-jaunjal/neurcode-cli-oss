@@ -170,11 +170,13 @@ function emptyConsequenceUnderstanding(generatedAt, reason = null) {
         contractDeltas: [],
         inheritorProjections: [],
         topFindings: [],
+        topImpacts: [],
         summary: {
             effectDeltaCount: 0,
             contractDeltaCount: 0,
             inheritorProjectionCount: 0,
             topFindingCount: 0,
+            topImpactCount: 0,
             escapingConsequenceCount: 0,
             highestExternalConsumerCount: 0,
             headline: '0 symbols changed; 0 escaping TypeScript-static consequences found (effects checked: allowlisted filesystem/network/session evidence; SQL, dependency injection, dynamic dispatch, route wiring, and cross-language behavior not analyzed).',
@@ -190,6 +192,7 @@ function emptyConsequenceUnderstanding(generatedAt, reason = null) {
             contractDeltas: 'typescript-checker',
             inheritorProjections: 'inheritance-projection',
             topFindings: 'deterministic-ranking',
+            topImpacts: 'deterministic-impact-grouping',
         },
     };
     return { ...core, artifactHash: hash(consequenceHashInput(core)) };
@@ -1614,6 +1617,111 @@ function buildTopFindings(input) {
         a.symbol.localeCompare(b.symbol) ||
         a.summary.localeCompare(b.summary)).map((row, index) => ({ ...row, rank: index + 1 }));
 }
+function impactSummary(input) {
+    const parts = [];
+    if (input.productionFiles.length > 0) {
+        parts.push(`${input.productionFiles.length} production consumer file${input.productionFiles.length === 1 ? '' : 's'}`);
+    }
+    if (input.testFiles.length > 0) {
+        parts.push(`${input.testFiles.length} test consumer file${input.testFiles.length === 1 ? '' : 's'}`);
+    }
+    if (input.sensitiveFiles.length > 0) {
+        parts.push(`${input.sensitiveFiles.length} sensitive consumer${input.sensitiveFiles.length === 1 ? '' : 's'}`);
+    }
+    if (input.approvalRequiredFiles.length > 0) {
+        parts.push(`${input.approvalRequiredFiles.length} approval-required consumer${input.approvalRequiredFiles.length === 1 ? '' : 's'}`);
+    }
+    if (input.runtimeGovernanceFiles.length > 0) {
+        parts.push(`${input.runtimeGovernanceFiles.length} runtime/governance consumer${input.runtimeGovernanceFiles.length === 1 ? '' : 's'}`);
+    }
+    const typeText = input.findingTypes.join('+');
+    return `${input.file}#${input.symbol} has ${parts.length > 0 ? parts.join(', ') : 'no external consumer files'} (${typeText})`;
+}
+function buildTopImpacts(topFindings) {
+    const bySymbol = new Map();
+    for (const finding of topFindings) {
+        const key = `${finding.file}\0${finding.symbol}`;
+        const bucket = bySymbol.get(key) ?? [];
+        bucket.push(finding);
+        bySymbol.set(key, bucket);
+    }
+    const groups = [...bySymbol.values()].map((findings) => {
+        const first = findings
+            .slice()
+            .sort((a, b) => a.file.localeCompare(b.file) ||
+            a.symbol.localeCompare(b.symbol) ||
+            a.rank - b.rank)[0];
+        const findingTypes = uniqueSorted(findings.map((finding) => finding.findingType));
+        const productionFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.productionFiles));
+        const testFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.testFiles));
+        const sensitiveFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.sensitiveFiles));
+        const approvalRequiredFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.approvalRequiredFiles));
+        const runtimeGovernanceFiles = uniqueSorted(findings.flatMap((finding) => finding.consumerSummary.runtimeGovernanceFiles));
+        const reasonCodes = orderedConsequenceReasonCodes(findings.flatMap((finding) => finding.reasonCodes));
+        const externalProductionConsumerCount = productionFiles.length;
+        const sensitiveConsumerCount = sensitiveFiles.length;
+        const approvalRequiredConsumerCount = approvalRequiredFiles.length;
+        const runtimeGovernanceConsumerCount = runtimeGovernanceFiles.length;
+        const productionConsumerCount = Math.max(productionFiles.length, ...findings.map((finding) => finding.consumerSummary.productionConsumerCount));
+        const testConsumerCount = Math.max(testFiles.length, ...findings.map((finding) => finding.consumerSummary.testConsumerCount));
+        const highFanout = findings.some((finding) => finding.consumerSummary.highFanout) || productionFiles.length >= 5 || externalProductionConsumerCount >= 3;
+        const architectureRelevant = highFanout ||
+            sensitiveConsumerCount > 0 ||
+            approvalRequiredConsumerCount > 0 ||
+            runtimeGovernanceConsumerCount > 0 ||
+            findings.some((finding) => finding.consumerSummary.architectureRelevant);
+        const baseScore = Math.max(...findings.map((finding) => finding.score));
+        const score = baseScore +
+            Math.min(60, externalProductionConsumerCount * 12) +
+            Math.min(40, sensitiveConsumerCount * 14) +
+            Math.min(40, approvalRequiredConsumerCount * 16) +
+            Math.min(40, runtimeGovernanceConsumerCount * 14) +
+            (highFanout ? 18 : 0) +
+            (architectureRelevant ? 10 : 0) +
+            (findingTypes.length > 1 ? 8 : 0);
+        return {
+            rank: 0,
+            score,
+            file: first.file,
+            symbol: first.symbol,
+            summary: impactSummary({
+                file: first.file,
+                symbol: first.symbol,
+                findingTypes,
+                productionFiles,
+                testFiles,
+                sensitiveFiles,
+                approvalRequiredFiles,
+                runtimeGovernanceFiles,
+            }),
+            findingTypes,
+            findingRanks: findings.map((finding) => finding.rank).sort((a, b) => a - b),
+            findingCount: findings.length,
+            productionConsumerCount,
+            testConsumerCount,
+            externalProductionConsumerCount,
+            sensitiveConsumerCount,
+            approvalRequiredConsumerCount,
+            runtimeGovernanceConsumerCount,
+            productionFiles: productionFiles.slice(0, 12),
+            testFiles: testFiles.slice(0, 12),
+            sensitiveFiles: sensitiveFiles.slice(0, 12),
+            approvalRequiredFiles: approvalRequiredFiles.slice(0, 12),
+            runtimeGovernanceFiles: runtimeGovernanceFiles.slice(0, 12),
+            highFanout,
+            architectureRelevant,
+            reasonCodes,
+            provenance: 'deterministic-impact-grouping',
+        };
+    });
+    return groups.sort((a, b) => b.score - a.score ||
+        b.externalProductionConsumerCount - a.externalProductionConsumerCount ||
+        b.runtimeGovernanceConsumerCount - a.runtimeGovernanceConsumerCount ||
+        b.sensitiveConsumerCount - a.sensitiveConsumerCount ||
+        b.approvalRequiredConsumerCount - a.approvalRequiredConsumerCount ||
+        a.file.localeCompare(b.file) ||
+        a.symbol.localeCompare(b.symbol)).map((group, index) => ({ ...group, rank: index + 1 }));
+}
 function consequenceHeadline(changedSymbolCount, topFindings) {
     const escaping = topFindings.filter((finding) => finding.externalConsumerCount > 0);
     const highest = escaping
@@ -1723,6 +1831,7 @@ function buildConsequenceUnderstanding(input) {
         inheritorProjections,
         profile: input.profile,
     });
+    const topImpacts = buildTopImpacts(topFindings);
     const headline = consequenceHeadline(input.targets.length, topFindings);
     const core = {
         schemaVersion: exports.CONSEQUENCE_UNDERSTANDING_SCHEMA_VERSION,
@@ -1735,11 +1844,13 @@ function buildConsequenceUnderstanding(input) {
         contractDeltas,
         inheritorProjections,
         topFindings,
+        topImpacts,
         summary: {
             effectDeltaCount: effectDeltas.length,
             contractDeltaCount: contractDeltas.length,
             inheritorProjectionCount: inheritorProjections.length,
             topFindingCount: topFindings.length,
+            topImpactCount: topImpacts.length,
             escapingConsequenceCount: headline.escapingConsequenceCount,
             highestExternalConsumerCount: headline.highestExternalConsumerCount,
             headline: headline.headline,
@@ -1758,6 +1869,7 @@ function buildConsequenceUnderstanding(input) {
             contractDeltas: 'typescript-checker',
             inheritorProjections: 'inheritance-projection',
             topFindings: 'deterministic-ranking',
+            topImpacts: 'deterministic-impact-grouping',
         },
     };
     return { ...core, artifactHash: hash(consequenceHashInput(core)) };

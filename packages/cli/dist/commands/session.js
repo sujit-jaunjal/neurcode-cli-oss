@@ -892,6 +892,7 @@ function renderAIChangeRecord(record, recordPath) {
     const warned = record.trajectory.filter((path) => path.verdicts.includes('warn'));
     const activeApprovals = record.approvals.filter((approval) => approval.status === 'active');
     const pendingAmendments = record.plan.pendingAmendments.length;
+    const consequenceImpacts = topConsequenceImpactsFromRecord(record.understanding.latest?.consequenceUnderstanding);
     const consequenceFindings = topConsequenceFindingsFromRecord(record.understanding.latest?.consequenceUnderstanding);
     console.log('');
     console.log(chalk.bold(`AI Change Record ${record.session.sessionId}`));
@@ -921,7 +922,23 @@ function renderAIChangeRecord(record, recordPath) {
             const hiddenTests = typeof hidden.testReferences === 'number' ? hidden.testReferences : 0;
             console.log(`Digest:    ${topConsequences.length} consequences · hidden ${hiddenRefs} refs / ${hiddenTests} tests`);
         }
-        if (consequenceFindings.length > 0) {
+        if (consequenceImpacts.length > 0) {
+            const headline = consequenceHeadlineFromRecord(record.understanding.latest?.consequenceUnderstanding);
+            if (headline)
+                console.log(`Reach:     ${headline}`);
+            console.log(`Impacts:   ${consequenceImpacts.length} grouped impact${consequenceImpacts.length === 1 ? '' : 's'}`);
+            for (const impact of consequenceImpacts.slice(0, 5)) {
+                const consumers = impact.productionConsumerCount > 0 || impact.testConsumerCount > 0
+                    ? ` · ${impact.productionConsumerCount} prod file(s), ${impact.testConsumerCount} test file(s)`
+                    : '';
+                const flags = [
+                    impact.highFanout ? 'high-fanout' : null,
+                    impact.architectureRelevant ? 'architecture-relevant' : null,
+                ].filter(Boolean).join(', ');
+                console.log(chalk.dim(`  ${impact.rank}. ${truncate(impact.summary, 140)}${consumers}${flags ? ` · ${flags}` : ''}`));
+            }
+        }
+        else if (consequenceFindings.length > 0) {
             const headline = consequenceHeadlineFromRecord(record.understanding.latest?.consequenceUnderstanding);
             if (headline)
                 console.log(`Reach:     ${headline}`);
@@ -970,6 +987,30 @@ function consequenceHeadlineFromRecord(value) {
         return null;
     const headline = summary.headline;
     return typeof headline === 'string' && headline.trim() ? headline.trim() : null;
+}
+function topConsequenceImpactsFromRecord(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return [];
+    const record = value;
+    if (!Array.isArray(record.topImpacts))
+        return [];
+    return record.topImpacts.flatMap((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item))
+            return [];
+        const row = item;
+        const summary = typeof row.summary === 'string' ? row.summary.trim() : '';
+        if (!summary)
+            return [];
+        const rank = typeof row.rank === 'number' && Number.isFinite(row.rank) ? row.rank : 0;
+        const productionConsumerCount = typeof row.productionConsumerCount === 'number' && Number.isFinite(row.productionConsumerCount) ? row.productionConsumerCount : 0;
+        const testConsumerCount = typeof row.testConsumerCount === 'number' && Number.isFinite(row.testConsumerCount) ? row.testConsumerCount : 0;
+        const highFanout = row.highFanout === true;
+        const architectureRelevant = row.architectureRelevant === true;
+        const reasonCodes = Array.isArray(row.reasonCodes)
+            ? row.reasonCodes.filter((reason) => typeof reason === 'string').slice(0, 6)
+            : [];
+        return [{ rank, summary, productionConsumerCount, testConsumerCount, highFanout, architectureRelevant, reasonCodes }];
+    }).sort((a, b) => a.rank - b.rank || a.summary.localeCompare(b.summary));
 }
 function topConsequenceFindingsFromRecord(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -1083,7 +1124,8 @@ function renderStructuralUnderstanding(artifact, artifactPath, repoRoot) {
     }
     const consequence = artifact.consequenceUnderstanding;
     if (consequence?.analyzed &&
-        (consequence.topFindings.length > 0 ||
+        (consequence.topImpacts.length > 0 ||
+            consequence.topFindings.length > 0 ||
             consequence.effectDeltas.length > 0 ||
             consequence.contractDeltas.length > 0 ||
             consequence.inheritorProjections.length > 0)) {
@@ -1092,7 +1134,23 @@ function renderStructuralUnderstanding(artifact, artifactPath, repoRoot) {
         if (consequence.summary.headline) {
             console.log(chalk.dim(`  ${consequence.summary.headline}`));
         }
-        if (consequence.topFindings.length > 0) {
+        if (consequence.topImpacts.length > 0) {
+            for (const impact of consequence.topImpacts.slice(0, 6)) {
+                const consumers = impact.productionConsumerCount > 0 || impact.testConsumerCount > 0
+                    ? ` · ${impact.productionConsumerCount} prod file(s), ${impact.testConsumerCount} test file(s)`
+                    : '';
+                const flags = [
+                    impact.highFanout ? 'high-fanout' : null,
+                    impact.architectureRelevant ? 'architecture-relevant' : null,
+                ].filter(Boolean).join(', ');
+                const reasons = impact.reasonCodes.slice(0, 3).join(', ');
+                console.log(chalk.dim(`  ${impact.rank}. ${impact.summary}${consumers}${flags ? ` · ${flags}` : ''}${reasons ? ` · ${reasons}` : ''}`));
+            }
+            if (consequence.topFindings.length > consequence.topImpacts.length) {
+                console.log(chalk.dim(`  Raw findings: ${consequence.topFindings.length} deterministic finding(s) collapsed into ${consequence.topImpacts.length} impact(s).`));
+            }
+        }
+        else if (consequence.topFindings.length > 0) {
             for (const finding of consequence.topFindings.slice(0, 8)) {
                 const consumers = finding.consumerCount > 0
                     ? ` · ${finding.nonTestConsumerCount} non-test consumer(s), ${finding.testConsumerCount} test`
