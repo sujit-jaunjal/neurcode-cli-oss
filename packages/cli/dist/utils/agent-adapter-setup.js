@@ -154,7 +154,7 @@ function instructionBody(input) {
             '<!-- neurcode-agent-runtime-v1 -->',
             '# Neurcode Runtime Governance for GitHub Copilot',
             '',
-            'This repository uses Neurcode Copilot hooks as the hard-deny runtime path for Copilot Agent Mode.',
+            'This repository uses Neurcode Copilot hooks for hook-backed runtime checks where Copilot Agent Mode exposes lifecycle hooks.',
             '',
             'Follow this contract during coding tasks:',
             '',
@@ -230,7 +230,7 @@ function buildAgentSetupSnippet(input) {
                         Stop: [{ type: 'command', command: 'neurcode session-hook finish' }],
                     },
                 }, null, 2),
-                instruction: 'GitHub Copilot Agent Mode is hook-backed. Use neurcode activate copilot or --write to install local hard-deny hooks.',
+                instruction: 'GitHub Copilot Agent Mode is hook-backed where host lifecycle hooks are available. Use neurcode activate copilot or --write to install local checks.',
             };
         case 'codex':
             return {

@@ -110,10 +110,12 @@ function renderLaunch(result) {
     console.log(chalk.dim('-'.repeat(72)));
     console.log(`Repo:     ${chalk.white(result.repoRoot)}`);
     console.log(`Session:  ${chalk.cyan(result.session.sessionId)}`);
-    console.log(`Agent:    ${result.agent.normalized} -> ${result.agent.adapter} ${chalk.dim(`(${result.agent.enforcementLevel})`)}`);
+    console.log(`Agent:    ${result.agent.normalized} -> ${result.agent.adapter} ${chalk.dim(`(${result.agent.compatibilityMode.replace(/_/g, ' ')})`)}`);
     console.log(`Goal:     ${result.session.goal}`);
     console.log(`Scope:    ${result.session.scopeMode} · ${compact(result.session.allowedGlobs)}`);
     console.log(`Gates:    ${compact(result.session.approvalRequiredGlobs)}`);
+    console.log(`Enforce:  ${compact(result.agent.enforceable, 3)}`);
+    console.log(`Advisory: ${compact(result.agent.advisoryOnly, 3)}`);
     console.log(`Next:     ${result.handshake.nextEvent ?? 'status'} · ${result.handshake.status}`);
     console.log('');
     console.log(chalk.bold('Starter prompt'));

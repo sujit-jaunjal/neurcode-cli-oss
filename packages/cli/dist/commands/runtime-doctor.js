@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runtimeDoctorCommand = runtimeDoctorCommand;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
+const agent_session_launcher_1 = require("../utils/agent-session-launcher");
+const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
@@ -42,6 +44,9 @@ function printCheck(check) {
     }
     console.log('');
 }
+function compatibilityModeLabel(value) {
+    return value.replace(/_/g, ' ');
+}
 function runtimeDoctorCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
@@ -52,6 +57,13 @@ function runtimeDoctorCommand(options = {}) {
     const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
     const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
     const heartbeat = (0, hook_heartbeat_1.readHookHeartbeat)(repoRoot);
+    const h = activation.hooks;
+    const ch = copilotActivation.hooks;
+    const launcherState = activeSession ? (0, agent_session_launcher_1.latestAgentLauncherState)(activeSession) : null;
+    const activeAdapter = launcherState?.agent.adapter
+        || (activeSession && h.installed ? 'claude-code-hooks' : activeSession && ch.installed ? 'copilot-hooks' : null);
+    const activeCapability = activeAdapter ? (0, governance_runtime_1.getAgentRuntimeAdapterCapability)(activeAdapter) : null;
+    const supervisor = activeSession ? (0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, activeSession.sessionId) : null;
     const checks = [];
     const dashboardSyncFailed = Boolean(connection?.autoSync.enabled && connection.autoSync.lastStatus === 'failed');
     const dashboardSyncRecovered = dashboardSyncFailed && transport.health === 'healthy' && Boolean(transport.lastDeliveredAt);
@@ -66,7 +78,6 @@ function runtimeDoctorCommand(options = {}) {
     });
     // ── Claude Code hooks (on-disk correctness) ────────────────────────────────
     // Priority: parse error > stale bare hooks > missing pinned entrypoint > installed > missing.
-    const h = activation.hooks;
     const entrypointMissing = h.entrypoint !== null && h.entrypointExists === false;
     let hooksStatus;
     let hooksMessage;
@@ -106,7 +117,6 @@ function runtimeDoctorCommand(options = {}) {
         message: hooksMessage,
         recommendation: hooksRec,
     });
-    const ch = copilotActivation.hooks;
     const copilotEntrypointMissing = ch.entrypoint !== null && ch.entrypointExists === false;
     let copilotHooksStatus;
     let copilotHooksMessage;
@@ -224,7 +234,7 @@ function runtimeDoctorCommand(options = {}) {
         label: 'Active governance session',
         status: !sessionActive ? 'skip' : overBroadScope ? 'warn' : 'pass',
         message: !sessionActive
-            ? 'No active in-flow session. This is normal until Claude Code receives a prompt.'
+            ? 'No active governed agent session. This is normal until an agent session starts.'
             : overBroadScope
                 ? `Session ${activeSession.sessionId} is active but its scope is over-broad: approvalRequiredGlobs includes "**", so every file needs approval. This usually means the goal/prompt was very long or path-heavy.`
                 : `Session ${activeSession.sessionId} is active (${activeSession.contract.scopeMode} scope).`,
@@ -233,6 +243,29 @@ function runtimeDoctorCommand(options = {}) {
             : overBroadScope
                 ? 'For demos, start sessions with a short, crisp goal (e.g. "Add retry with backoff to the export task") so scope stays tight.'
                 : 'Run `neurcode status` for live session details.',
+    });
+    checks.push({
+        id: 'agent_compatibility',
+        label: 'Agent compatibility / enforcement truth',
+        status: activeCapability
+            ? activeCapability.enforcementLevel === 'hard_deny'
+                ? 'pass'
+                : supervisor?.effectiveStatus === 'running'
+                    ? 'pass'
+                    : activeCapability.supervisorSupported
+                        ? 'warn'
+                        : 'warn'
+            : 'skip',
+        message: activeCapability
+            ? `${launcherState?.agent.normalized || activeCapability.adapter} uses ${compatibilityModeLabel(activeCapability.compatibilityMode)}. Actually enforceable: ${activeCapability.enforceable.join('; ')}. Advisory only: ${activeCapability.advisoryOnly.join('; ')}.`
+            : 'No active agent adapter was detected. Claude Code hard hooks can be checked above; Codex/Cursor need cooperative runtime calls or supervisor mode.',
+        recommendation: activeCapability && activeCapability.enforcementLevel !== 'hard_deny'
+            ? supervisor?.effectiveStatus === 'running'
+                ? `Supervisor/diff-watch is running for session ${activeSession?.sessionId}; last pass: ${supervisor.state?.lastPass === null ? 'pending' : supervisor.state?.lastPass ? 'yes' : 'no'}.`
+                : activeCapability.supervisorSupported && activeSession
+                    ? 'For Codex/Cursor, run `neurcode agent guard start --supervise --goal "<task>"` or `neurcode agent guard supervise run` before finalizing/committing.'
+                    : 'Use cooperative `neurcode runtime-adapter event` calls before edits; this host is not a hard pre-write blocker.'
+            : undefined,
     });
     checks.push({
         id: 'governance_config',
@@ -350,6 +383,36 @@ function runtimeDoctorCommand(options = {}) {
                 matchesInstalled: installedFingerprint
                     ? heartbeat.entrypointFingerprint === installedFingerprint
                     : null,
+            }
+            : null,
+        agentCompatibility: activeCapability
+            ? {
+                currentAgent: launcherState?.agent.normalized || null,
+                adapter: activeCapability.adapter,
+                enforcementLevel: activeCapability.enforcementLevel,
+                compatibilityMode: activeCapability.compatibilityMode,
+                enforceable: activeCapability.enforceable,
+                advisoryOnly: activeCapability.advisoryOnly,
+                supervisorSupported: activeCapability.supervisorSupported,
+                supervisor: supervisor
+                    ? {
+                        effectiveStatus: supervisor.effectiveStatus,
+                        alive: supervisor.alive,
+                        statePath: supervisor.statePath,
+                        lastPass: supervisor.state?.lastPass ?? null,
+                        lastEvaluatedAt: supervisor.state?.lastEvaluatedAt ?? null,
+                        lastChangedFiles: supervisor.state?.lastChangedFiles ?? 0,
+                    }
+                    : null,
+            }
+            : null,
+        dashboardPairing: connection
+            ? {
+                repoName: connection.repo.name,
+                autoSyncEnabled: connection.autoSync.enabled,
+                lastStatus: connection.autoSync.lastStatus || null,
+                lastDeliveredAt: transport.lastDeliveredAt || null,
+                outboxHealth: transport.health,
             }
             : null,
         checks,

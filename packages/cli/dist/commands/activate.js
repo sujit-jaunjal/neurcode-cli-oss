@@ -311,7 +311,7 @@ function renderActivation(result, mcpSkipped) {
                     : chalk.red('not configured')} ${chalk.dim(result.claude.mcpConfigPath)}`);
     }
     else {
-        console.log(chalk.dim('MCP:     Copilot can use MCP tools separately; hard governance is provided by hooks.'));
+        console.log(chalk.dim('MCP:     Copilot can use MCP tools separately; hook-backed governance depends on host lifecycle hook support.'));
     }
     if (result.connection?.connected) {
         console.log(`Cloud:   ${chalk.green('connected')} ${chalk.dim(result.connection.repoName)} ` +

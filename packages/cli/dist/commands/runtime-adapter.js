@@ -340,8 +340,10 @@ function runtimeAdapterCommand(program) {
             return;
         }
         for (const capability of capabilities) {
-            console.log(`${capability.adapter}: ${capability.enforcementLevel}`
-                + ` (${capability.automatic ? 'automatic' : 'explicit events'})`);
+            console.log(`${capability.adapter}: ${capability.compatibilityMode.replace(/_/g, ' ')}`
+                + ` (${capability.enforcementLevel}; ${capability.automatic ? 'automatic' : 'explicit events'})`);
+            console.log(`  enforceable: ${capability.enforceable.join('; ')}`);
+            console.log(`  advisory only: ${capability.advisoryOnly.join('; ')}`);
         }
     });
     runtimeAdapter

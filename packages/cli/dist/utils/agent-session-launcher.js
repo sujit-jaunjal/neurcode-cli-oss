@@ -216,8 +216,12 @@ async function launchAgentSession(options) {
         normalized,
         adapter,
         enforcementLevel: capability.enforcementLevel,
+        compatibilityMode: capability.compatibilityMode,
         automatic: capability.automatic,
         hardDeny: capability.enforcementLevel === 'hard_deny',
+        enforceable: capability.enforceable,
+        advisoryOnly: capability.advisoryOnly,
+        supervisorSupported: capability.supervisorSupported,
         description: capability.description,
     };
     const handoffPrompt = starterPrompt({ sessionId, goal, adapter });

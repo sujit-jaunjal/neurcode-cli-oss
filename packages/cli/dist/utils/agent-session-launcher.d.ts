@@ -43,8 +43,12 @@ export interface AgentSessionLaunchResult {
         normalized: AgentSessionLauncherAgent;
         adapter: AgentRuntimeAdapterId;
         enforcementLevel: AgentRuntimeEnforcementLevel;
+        compatibilityMode: string;
         automatic: boolean;
         hardDeny: boolean;
+        enforceable: string[];
+        advisoryOnly: string[];
+        supervisorSupported: boolean;
         description: string;
     };
     activation: {
