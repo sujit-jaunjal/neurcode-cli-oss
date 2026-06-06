@@ -27,6 +27,7 @@ const crypto_1 = require("crypto");
 const child_process_1 = require("child_process");
 const runtime_state_1 = require("../utils/runtime-state");
 const cli_json_1 = require("../utils/cli-json");
+const plan_cache_1 = require("../utils/plan-cache");
 const chalk = (0, cli_json_1.loadChalk)();
 // ── Trust boundary statement — fixed, never changes ──────────────────────────
 const TRUST_BOUNDARY_STATEMENT = 'Neurcode deterministically detects and governs. ' +
@@ -312,7 +313,7 @@ function buildPayload(finding, verifyOutput, projectRoot, replayChecksum, replay
     const payload = {
         exportId,
         exportedAt: new Date().toISOString(),
-        neurcodeVersion: '0.14.0',
+        neurcodeVersion: (0, plan_cache_1.getNeurcodeVersion)(),
         schemaVersion: '2026-05-14',
         findingId,
         ruleId,
