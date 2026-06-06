@@ -192,10 +192,10 @@ function buildAgentInvocationSummary(session) {
                     ? 'Have the agent call neurcode_agent_edit_before before its first write.'
                     : pendingPlanAmendments > 0
                         ? 'Review and accept or reject the pending re-plan proposal.'
-                        : blockEvents.length > approvalEvents.length
-                            ? 'Approve or deny the blocked exact path.'
-                            : status === 'finished'
-                                ? 'Review the replayable source-free evidence.'
+                        : status === 'finished'
+                            ? 'Review the replayable source-free evidence.'
+                            : blockEvents.length > approvalEvents.length
+                                ? 'Approve or deny the blocked exact path.'
                                 : 'Continue enforcing pre-write checks for every edit.';
     return {
         schemaVersion: exports.AGENT_INVOCATION_OBSERVABILITY_SCHEMA_VERSION,

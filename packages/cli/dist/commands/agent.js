@@ -257,7 +257,7 @@ function buildSetupPayload(agentArg, options) {
         global: options.global === true,
     });
     const instructionsAfter = (0, agent_adapter_setup_1.inspectAgentInstructions)({ target, repoRoot });
-    const goal = options.goal || 'modify src/tasks/export.py';
+    const goal = options.goal || 'modify one named safe file and keep protected boundaries untouched';
     return {
         schemaVersion: agent_adapter_setup_1.AGENT_ADAPTER_SETUP_SCHEMA_VERSION,
         ok: true,

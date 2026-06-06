@@ -79,6 +79,10 @@ neurcode agent walkthrough codex
 neurcode agent walkthrough cursor --safe-path src/tasks/export_task.ts --blocked-path src/billing/charge.ts
 ```
 
+Use this command before a friendly pilot to confirm whether the checkout is dashboard-connected or local-only. Runtime Control Plane has the matching **Pilot readiness** checklist; both surfaces should agree on the same acceptance gates before an external walkthrough.
+
+For a fresh repo without obvious `billing`, `auth`, `db`, `migrations`, or security-sensitive directories, CODEOWNERS may produce ownership facts without producing an approval-required boundary. Add `.neurcode/governance.json` with `approvalRequiredGlobs` and `sensitiveGlobs`, then rerun `neurcode agent bootstrap <agent>` or start with `--force-profile` before testing exact-path approvals.
+
 ### `neurcode agent report <agent>`
 
 Summarize a completed governed agent run. This is the post-run answer for a pilot evaluator: whether the guard was clean, how many boundary denials were contained, whether open blocks remain, and which source-free record hashes were produced.
