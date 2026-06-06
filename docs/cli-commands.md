@@ -147,7 +147,10 @@ Export the latest source-free runtime admission record for the GitHub Action com
 ```bash
 neurcode admission export
 neurcode admission export --json
+neurcode admission export <session-id> --receipt receipt.json
 ```
+
+`--receipt` attaches a bounded backend receipt summary when you have already exported or downloaded a Neurcode runtime receipt. The admission artifact still stays source-free and includes receipt ID, key ID, replay hash, signature status, verification status, signed timestamp, and verifier hint only. Tampered receipt metadata is rejected instead of upgrading trust.
 
 ### `neurcode demo rehearse`
 

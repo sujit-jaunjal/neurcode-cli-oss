@@ -1034,6 +1034,60 @@ sessionCmd
     });
 });
 sessionCmd
+    .command('export-admission [sessionId]')
+    .description('Export a source-free runtime admission record into .neurcode-admission/')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--receipt <path>', 'Attach source-free backend receipt summary from a receipt/control-plane JSON file')
+    .option('--explain', 'Explain what the record contains, excludes, and how the GitHub Action consumes it')
+    .option('--json', 'Output machine-readable JSON')
+    .action((sessionId, options) => {
+    try {
+        const summary = (0, admission_1.exportAdmissionRecordForCli)({
+            dir: options.dir,
+            sessionId,
+            receiptPath: options.receipt,
+            explain: options.explain === true,
+            json: options.json === true,
+        });
+        if (options.json) {
+            console.log(JSON.stringify(summary, null, 2));
+            return;
+        }
+        console.log('Admission record exported');
+        console.log(`  Session:     ${summary.sessionId}`);
+        console.log(`  PR artifact: ${summary.publicRelativePath}`);
+        console.log(`  Trust:       ${summary.trustLevel}`);
+        if (summary.receipt.present) {
+            console.log(`  Receipt:     ${summary.receipt.receiptId || 'attached'} (${summary.receipt.verificationStatus || 'unknown'})`);
+        }
+        console.log(`  Note:        ${summary.trustLevel === 'backend_signed' ? 'backend-signed metadata is attached; verify the receipt before treating it as enterprise evidence.' : 'self-attested local records are claims, not cryptographic proof.'}`);
+        if (options.explain) {
+            console.log('');
+            console.log('What it contains:');
+            for (const item of summary.contains)
+                console.log(`  - ${item}`);
+            console.log('');
+            console.log('What it intentionally excludes:');
+            for (const item of summary.excludes)
+                console.log(`  - ${item}`);
+            console.log('');
+            console.log('How the GitHub Action consumes it:');
+            for (const item of summary.actionConsumption)
+                console.log(`  - ${item}`);
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+        }
+        else {
+            console.error(`Admission export failed: ${message}`);
+        }
+        process.exitCode = 1;
+    }
+});
+sessionCmd
     .command('approve')
     .description('Approve a file path or glob for the active in-flow governance session')
     .requiredOption('--path <path>', 'File path or glob to approve')

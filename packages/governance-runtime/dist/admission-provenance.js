@@ -492,6 +492,139 @@ function validateSessionRef(value) {
         return false;
     return true;
 }
+function validateBoundedStringArray(value, maxItems, maxLength) {
+    return Array.isArray(value)
+        && value.length <= maxItems
+        && value.every((entry) => isBoundedString(entry, maxLength));
+}
+function validateNonNegativeInteger(value) {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+function validateRuntimeAdmissionTrustLevel(value) {
+    return value === 'unsigned_local' || value === 'self_attested' || value === 'backend_signed';
+}
+function validateRuntimeAdmissionReceiptSummary(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return false;
+    const r = value;
+    if (typeof r.present !== 'boolean')
+        return false;
+    if (!validateRuntimeAdmissionTrustLevel(r.trustLevel))
+        return false;
+    if (r.receiptId !== undefined && !isBoundedString(r.receiptId, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (r.keyId !== undefined && r.keyId !== null && !isBoundedString(r.keyId, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (r.replayHash !== undefined && r.replayHash !== null && !isBoundedString(r.replayHash, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (r.signatureStatus !== undefined && r.signatureStatus !== null && !isBoundedString(r.signatureStatus, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (r.verificationStatus !== undefined && r.verificationStatus !== null && !isBoundedString(r.verificationStatus, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (r.signedAt !== undefined && r.signedAt !== null && !(isBoundedString(r.signedAt, 64) && Number.isFinite(Date.parse(r.signedAt))))
+        return false;
+    if (r.verifier !== undefined && r.verifier !== null && !isBoundedString(r.verifier, 512))
+        return false;
+    return true;
+}
+function validateRuntimeAdmissionContext(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return false;
+    const ctx = value;
+    if (ctx.schemaVersion !== 'neurcode.runtime-admission-context.v1')
+        return false;
+    if (!validateRuntimeAdmissionTrustLevel(ctx.trustLevel))
+        return false;
+    if (!(isBoundedString(ctx.createdAt, 64) && Number.isFinite(Date.parse(ctx.createdAt))))
+        return false;
+    if (!(isBoundedString(ctx.sessionId, exports.MAX_ADMISSION_ID_LENGTH) && ctx.sessionId.length > 0))
+        return false;
+    if (!(isBoundedString(ctx.sessionStatus, exports.MAX_ADMISSION_ID_LENGTH) && ctx.sessionStatus.length > 0))
+        return false;
+    if (ctx.intentSummary !== null && ctx.intentSummary !== undefined && !isBoundedString(ctx.intentSummary, 512))
+        return false;
+    if (ctx.scopeMode !== null && ctx.scopeMode !== undefined && !isBoundedString(ctx.scopeMode, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    const agentHost = ctx.agentHost;
+    if (!agentHost || typeof agentHost !== 'object' || Array.isArray(agentHost))
+        return false;
+    const host = agentHost;
+    if (host.adapter !== null && host.adapter !== undefined && !isBoundedString(host.adapter, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (host.enforcementLevel !== null && host.enforcementLevel !== undefined && !isBoundedString(host.enforcementLevel, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (host.controlLevel !== null && host.controlLevel !== undefined && !isBoundedString(host.controlLevel, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (host.automatic !== undefined && typeof host.automatic !== 'boolean')
+        return false;
+    const counts = ctx.counts;
+    if (!counts || typeof counts !== 'object' || Array.isArray(counts))
+        return false;
+    for (const key of [
+        'changedPaths',
+        'blockedPaths',
+        'suggestedApprovalPaths',
+        'approvedExactPaths',
+        'deniedPaths',
+        'approvalRequiredSurfaces',
+        'owners',
+        'preWriteChecks',
+        'allowedChecks',
+        'warningChecks',
+    ]) {
+        if (!validateNonNegativeInteger(counts[key]))
+            return false;
+    }
+    const paths = ctx.paths;
+    if (!paths || typeof paths !== 'object' || Array.isArray(paths))
+        return false;
+    for (const key of ['changed', 'blocked', 'suggestedApproval', 'approvedExact', 'denied', 'approvalRequiredSurfaces']) {
+        if (!validateBoundedStringArray(paths[key], exports.MAX_ADMISSION_COVERAGE_ENTRIES, exports.MAX_ADMISSION_PATH_LENGTH))
+            return false;
+    }
+    if (!Array.isArray(ctx.owners) || ctx.owners.length > exports.MAX_ADMISSION_SESSION_REFS)
+        return false;
+    for (const owner of ctx.owners) {
+        if (!owner || typeof owner !== 'object' || Array.isArray(owner))
+            return false;
+        const item = owner;
+        if (!(isBoundedString(item.owner, exports.MAX_ADMISSION_ID_LENGTH) && item.owner.length > 0))
+            return false;
+        if (!validateNonNegativeInteger(item.count))
+            return false;
+    }
+    const guard = ctx.guard;
+    if (!guard || typeof guard !== 'object' || Array.isArray(guard))
+        return false;
+    const g = guard;
+    if (!(isBoundedString(g.status, exports.MAX_ADMISSION_ID_LENGTH) && g.status.length > 0))
+        return false;
+    for (const key of ['verifiedPrewrite', 'deniedButChanged', 'unverifiedWrites', 'observedAfterOnly']) {
+        if (!validateNonNegativeInteger(g[key]))
+            return false;
+    }
+    const integrity = ctx.integrity;
+    if (!integrity || typeof integrity !== 'object' || Array.isArray(integrity))
+        return false;
+    const i = integrity;
+    if (i.sourceFree !== true)
+        return false;
+    if (i.replayHash !== null && i.replayHash !== undefined && !isBoundedString(i.replayHash, exports.MAX_ADMISSION_ID_LENGTH))
+        return false;
+    if (i.replayHashStatus !== 'present' && i.replayHashStatus !== 'missing')
+        return false;
+    if (!(typeof i.deltaHash === 'string' && HEX_64.test(i.deltaHash)))
+        return false;
+    if (!(typeof i.coverageSetHash === 'string' && HEX_64.test(i.coverageSetHash)))
+        return false;
+    if (i.evidenceIntegrityStatus !== 'local_self_attested' &&
+        i.evidenceIntegrityStatus !== 'backend_signed' &&
+        i.evidenceIntegrityStatus !== 'unsigned_local')
+        return false;
+    if (!validateRuntimeAdmissionReceiptSummary(i.receipt))
+        return false;
+    return true;
+}
 /**
  * Strict, bounded structural validation of an untrusted, already-parsed value.
  * Returns a typed record only when every field, enum, hash, mode, array, and
@@ -568,6 +701,8 @@ function readSelfAttestedAdmissionRecord(value) {
     if (!m.delta.every((entry) => validateDeltaEntry(entry, m.objectFormat)))
         return null;
     if (!m.coverage.every((entry) => validateCoverageEntry(entry, m.objectFormat)))
+        return null;
+    if (record.runtimeContext !== undefined && !validateRuntimeAdmissionContext(record.runtimeContext))
         return null;
     return value;
 }

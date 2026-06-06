@@ -8,9 +8,10 @@ interface ActivateOptions {
     apiUrl?: string;
     autoSync?: boolean;
 }
+type ActivateAgent = 'claude' | 'copilot' | 'codex' | 'cursor' | 'vscode' | 'action';
 export interface ActivateResult {
     ok: boolean;
-    agent: 'claude' | 'copilot';
+    agent: ActivateAgent;
     repoRoot: string;
     profile: {
         status: string;
@@ -53,6 +54,13 @@ export interface ActivateResult {
     restartRequired: boolean;
     /** The exact command an operator should run next to confirm live governance. */
     nextCheck: string;
+    compatibility?: {
+        label: string;
+        controlLevel: string;
+        enforced: string[];
+        advisory: string[];
+        commands: string[];
+    };
     connection?: {
         connected: boolean;
         apiUrl: string;
@@ -68,6 +76,7 @@ export interface ActivateResult {
 }
 export declare function activateClaudeCommand(options?: ActivateOptions): Promise<ActivateResult>;
 export declare function activateCopilotCommand(options?: ActivateOptions): Promise<ActivateResult>;
+export declare function activateCompatibilityCommand(agent: Exclude<ActivateAgent, 'claude' | 'copilot'>, options?: ActivateOptions): Promise<ActivateResult>;
 export declare function activateCommand(program: Command): void;
 export {};
 //# sourceMappingURL=activate.d.ts.map

@@ -267,6 +267,45 @@ function runtimeDoctorCommand(options = {}) {
                     : 'Use cooperative `neurcode runtime-adapter event` calls before edits; this host is not a hard pre-write blocker.'
             : undefined,
     });
+    const codexCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('codex-mcp');
+    const cursorCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('cursor-mcp');
+    const vscodeCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('vscode-extension');
+    const actionCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('github-action');
+    checks.push({
+        id: 'codex_cursor_supervisor_workflow',
+        label: 'Codex / Cursor supervised workflow',
+        status: activeAdapter === 'codex-mcp' || activeAdapter === 'cursor-mcp'
+            ? supervisor?.effectiveStatus === 'running'
+                ? 'pass'
+                : 'warn'
+            : 'skip',
+        message: activeAdapter === 'codex-mcp' || activeAdapter === 'cursor-mcp'
+            ? `${activeAdapter} is active. Control level: ${compatibilityModeLabel((activeAdapter === 'codex-mcp' ? codexCapability : cursorCapability).compatibilityMode)}; enforceable: ${(activeAdapter === 'codex-mcp' ? codexCapability : cursorCapability).enforceable.join('; ')}.`
+            : 'Codex and Cursor are compatibility modes: supervised CLI/MCP workflow plus admission/evidence path, not Claude-style host hooks.',
+        recommendation: activeAdapter === 'codex-mcp' || activeAdapter === 'cursor-mcp'
+            ? supervisor?.effectiveStatus === 'running'
+                ? 'Keep the supervisor running until finish, then export runtime admission.'
+                : 'Start with `neurcode agent guard start codex --goal "<task>"` or `neurcode agent guard start cursor --goal "<task>"`.'
+            : 'Run `neurcode activate codex` or `neurcode activate cursor` to print the workflow commands.',
+    });
+    checks.push({
+        id: 'vscode_companion_workflow',
+        label: 'VS Code / Copilot companion workflow',
+        status: activeAdapter === 'vscode-extension' ? 'pass' : 'skip',
+        message: activeAdapter === 'vscode-extension'
+            ? `${vscodeCapability.adapter} is active as ${compatibilityModeLabel(vscodeCapability.compatibilityMode)}.`
+            : 'VS Code is an observe-only Runtime Companion; Copilot hooks require `neurcode activate copilot` and host hook discovery.',
+        recommendation: activeAdapter === 'vscode-extension'
+            ? 'Use the extension for visibility and exact-path approval UX; pair it with a hooked or supervised agent for write accountability.'
+            : 'Run `neurcode activate vscode` for companion guidance or `neurcode activate copilot` when using Copilot Agent Mode hooks.',
+    });
+    checks.push({
+        id: 'github_action_admission_workflow',
+        label: 'GitHub Action / runtime admission',
+        status: 'skip',
+        message: `${actionCapability.adapter} is ${compatibilityModeLabel(actionCapability.compatibilityMode)}: PR-time advisory routing plus admission display when .neurcode-admission records are committed.`,
+        recommendation: 'Run `neurcode admission doctor`, then `neurcode session export-admission <session-id> --explain` before opening a PR with the public Action.',
+    });
     checks.push({
         id: 'governance_config',
         label: 'Runtime governance config',

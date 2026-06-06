@@ -39,9 +39,10 @@ Current adapter guarantees:
 | Agent | Current guarantee |
 |---|---|
 | Claude Code hooks | Automatic pre-write `hard_deny` for Edit/Write/MultiEdit |
-| GitHub Copilot Agent Mode hooks | Automatic pre-tool `hard_deny` through `.github/hooks/neurcode.json` |
-| Codex/Cursor/Gemini MCP | Cooperative `plan.capture` and `edit.before` events |
+| GitHub Copilot Agent Mode hooks | Host-dependent hook-backed checks through `.github/hooks/neurcode.json` when VS Code/Copilot discovers repo hooks |
+| Codex/Cursor/Gemini MCP | Cooperative `plan.capture` and `edit.before` events plus local guard supervision |
 | VS Code extension | `observe_only` companion and exact approval UI |
+| GitHub Action | Post-PR advisory routing and runtime admission display |
 
 For Claude Code, paste the generated starter prompt into Claude in the same
 repo. The UserPromptSubmit hook handshakes into the existing launcher-created
@@ -57,6 +58,19 @@ The command writes `.github/hooks/neurcode.json` with `UserPromptSubmit`,
 `PreToolUse`, and `Stop` hooks that call the same local session-hook runtime.
 Copilot should be reloaded after activation so the workspace hooks are
 rediscovered.
+
+For compatibility modes, run:
+
+```bash
+neurcode activate codex
+neurcode activate cursor
+neurcode activate vscode
+neurcode activate action
+```
+
+These commands refresh the repository profile and print the control level,
+enforced/recorded facts, advisory limits, and next commands. They do not install
+Claude-style hard hooks.
 
 ## Secondary Verification Loop
 

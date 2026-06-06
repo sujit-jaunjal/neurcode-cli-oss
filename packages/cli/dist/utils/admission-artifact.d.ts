@@ -37,11 +37,14 @@ export interface EmitAdmissionResult {
  * Throws on capture/serialization failure; finish-path callers wrap in try/catch.
  */
 export declare function emitSelfAttestedAdmissionRecord(options: EmitAdmissionOptions): EmitAdmissionResult;
+export interface ExportAdmissionRecordOptions {
+    receiptPath?: string;
+}
 /**
  * Explicitly export one selected local record into a source-controlled support
  * directory. Normal session completion never writes here.
  */
-export declare function exportSelfAttestedAdmissionRecord(repoRoot: string, sessionId: string): EmitAdmissionResult;
+export declare function exportSelfAttestedAdmissionRecord(repoRoot: string, sessionId: string, options?: ExportAdmissionRecordOptions): EmitAdmissionResult;
 /**
  * Best-effort wrapper for finish paths: emits the artifact, swallows and returns
  * any error so session finish is never disrupted.

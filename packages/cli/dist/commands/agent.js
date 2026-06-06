@@ -600,6 +600,13 @@ function buildDoctorPayload(agentArg, options) {
         adapter: inspection.adapter,
         controlLevel: capability?.controlLevel ?? 'unsupported_unknown',
         controlLabel: controlLevelLabel(capability?.controlLevel),
+        enforcement: {
+            level: capability?.enforcementLevel ?? 'unknown',
+            automatic: capability?.automatic ?? false,
+            compatibilityMode: capability?.compatibilityMode ?? 'unknown',
+            enforceable: capability?.enforceable ?? [],
+            advisoryOnly: capability?.advisoryOnly ?? [],
+        },
         checks,
         summary,
         next: summary.fail > 0
@@ -618,6 +625,20 @@ function renderDoctor(payload) {
     console.log(`Repo:    ${chalk.white(payload.repoRoot)}`);
     console.log(`Adapter: ${payload.adapter}`);
     console.log(`Control: ${payload.controlLabel}`);
+    console.log(`Mode:    ${payload.enforcement.compatibilityMode.replace(/_/g, ' ')} · ${payload.enforcement.automatic ? 'automatic' : 'explicit/cooperative'}`);
+    console.log('');
+    console.log(chalk.bold('Enforced / recorded'));
+    for (const item of payload.enforcement.enforceable) {
+        console.log(chalk.dim(`  - ${item}`));
+    }
+    if (payload.enforcement.enforceable.length === 0)
+        console.log(chalk.dim('  - none reported by this adapter'));
+    console.log(chalk.bold('Advisory / not claimed'));
+    for (const item of payload.enforcement.advisoryOnly) {
+        console.log(chalk.dim(`  - ${item}`));
+    }
+    if (payload.enforcement.advisoryOnly.length === 0)
+        console.log(chalk.dim('  - none reported by this adapter'));
     console.log('');
     for (const check of payload.checks) {
         console.log(`${statusLabel(check.status)} ${chalk.bold(check.label)}`);

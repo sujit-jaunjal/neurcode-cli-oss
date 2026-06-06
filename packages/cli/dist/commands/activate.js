@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activateClaudeCommand = activateClaudeCommand;
 exports.activateCopilotCommand = activateCopilotCommand;
+exports.activateCompatibilityCommand = activateCompatibilityCommand;
 exports.activateCommand = activateCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
@@ -24,6 +25,115 @@ catch {
         white: (s) => s,
     };
 }
+const COMPATIBILITY_ACTIVATIONS = {
+    codex: {
+        label: 'Codex supervised workflow',
+        controlLevel: 'supervised CLI workflow + admission/evidence path',
+        enforced: [
+            'cooperative pre-write checks when Codex calls the Neurcode runtime',
+            'local guard supervisor detects unverified or denied writes before handoff',
+            'source-free admission export can travel with the PR',
+        ],
+        advisory: [
+            'no Claude-like host hook is installed by activate codex',
+            'bypassed filesystem writes are detected and reported, not prevented by the host',
+            'the GitHub Action remains post-PR advisory unless admission records are committed',
+        ],
+        commands: [
+            'neurcode agent walkthrough codex',
+            'neurcode agent bootstrap codex',
+            'neurcode agent doctor codex',
+            'neurcode agent guard start codex --goal "<task>" --plan "<source-free plan>"',
+            'neurcode session export-admission <session-id> --explain',
+        ],
+        next: [
+            'Run `neurcode agent bootstrap codex` to write repo-native instructions and MCP config where available.',
+            'Start with `neurcode agent guard start codex --goal "<task>" --plan "<source-free plan>"`.',
+            'Finish with `neurcode agent guard finish --session-id <session-id> --fail-on-unverified`, then export admission for the PR.',
+        ],
+        nextCheck: 'neurcode agent doctor codex',
+    },
+    cursor: {
+        label: 'Cursor supervised workflow',
+        controlLevel: 'supervised CLI workflow + admission/evidence path',
+        enforced: [
+            'cooperative pre-write checks when Cursor calls the Neurcode runtime',
+            'local guard supervisor detects unverified or denied writes before handoff',
+            'source-free admission export can travel with the PR',
+        ],
+        advisory: [
+            'no Claude-like host hook is installed by activate cursor',
+            'repo-local or global Cursor MCP config depends on local Cursor configuration',
+            'bypassed filesystem writes are detected and reported, not prevented by the host',
+        ],
+        commands: [
+            'neurcode agent walkthrough cursor',
+            'neurcode agent bootstrap cursor',
+            'neurcode agent doctor cursor',
+            'neurcode agent guard start cursor --goal "<task>" --plan "<source-free plan>"',
+            'neurcode session export-admission <session-id> --explain',
+        ],
+        next: [
+            'Run `neurcode agent bootstrap cursor` to write Cursor rules and MCP config.',
+            'Start with `neurcode agent guard start cursor --goal "<task>" --plan "<source-free plan>"`.',
+            'Finish with `neurcode agent guard finish --session-id <session-id> --fail-on-unverified`, then export admission for the PR.',
+        ],
+        nextCheck: 'neurcode agent doctor cursor',
+    },
+    vscode: {
+        label: 'VS Code / Copilot companion workflow',
+        controlLevel: 'operator companion + host-dependent Copilot hooks',
+        enforced: [
+            'VS Code extension shows live runtime state and exact-path approval UX',
+            'Copilot hooks are available through `neurcode activate copilot` when the host discovers repo hooks',
+            'CLI guard supervisor can detect unverified writes for non-hooked work',
+        ],
+        advisory: [
+            'the VS Code extension itself is observe-only and does not hard-deny editor writes',
+            'Copilot hook behavior depends on host lifecycle hook support and reload state',
+            'use admission export and the Action for PR-time runtime context',
+        ],
+        commands: [
+            'neurcode daemon',
+            'neurcode doctor --runtime',
+            'neurcode activate copilot --connect <token>',
+            'neurcode agent start vscode --goal "<task>"',
+            'neurcode session export-admission <session-id> --explain',
+        ],
+        next: [
+            'Open VS Code in this repository and run the Neurcode Runtime Companion.',
+            'For Copilot Agent Mode hooks, run `neurcode activate copilot --connect <token>` and reload VS Code.',
+            'For observe-only companion mode, start the daemon and pair it with a supervised agent workflow.',
+        ],
+        nextCheck: 'neurcode doctor --runtime',
+    },
+    action: {
+        label: 'GitHub Action advisory workflow',
+        controlLevel: 'post-PR advisory routing + admission display',
+        enforced: [
+            'the Action deterministically routes review from PR metadata',
+            'when committed, .neurcode-admission records add source-free governed runtime context',
+            'workflow outputs expose admission trust level, session count, counts, and receipt posture',
+        ],
+        advisory: [
+            'the Action cannot govern work before the pull request exists',
+            'Action-only runs do not prove a governed local runtime session occurred',
+            'self-attested admission records are review context unless backend receipt metadata is attached and verified',
+        ],
+        commands: [
+            'uses: sujit-jaunjal/neurcode-actions@v0.3.0-rc.3',
+            'neurcode admission doctor',
+            'neurcode session export-admission <session-id> --explain',
+            'git add .neurcode-admission/*.json',
+        ],
+        next: [
+            'Install the public Action workflow at `sujit-jaunjal/neurcode-actions@v0.3.0-rc.3` until RC4 is rehearsed.',
+            'For runtime context, export `.neurcode-admission/<session-id>.json` after a governed local session.',
+            'Read the Action report as advisory routing plus explicit admission trust boundary.',
+        ],
+        nextCheck: 'neurcode admission doctor',
+    },
+};
 function readCliVersion() {
     try {
         const pkg = JSON.parse((0, fs_1.readFileSync)((0, path_1.join)(__dirname, '..', '..', 'package.json'), 'utf8'));
@@ -90,6 +200,50 @@ async function completeRuntimeRepoActivation(input) {
     }
     return body;
 }
+async function connectRuntimeIfRequested(options, repoRoot, profile) {
+    if (!options.connect)
+        return undefined;
+    const parsed = parseConnectToken(options.connect, options.apiUrl);
+    const activation = await completeRuntimeRepoActivation({
+        token: parsed.token,
+        apiUrl: parsed.apiUrl,
+        repoRoot,
+        profileFreshness: (0, v0_governance_1.buildProfileFreshnessSignal)(profile, profile.refreshed ? 'auto_refreshed' : 'none'),
+    });
+    const autoSyncEnabled = options.autoSync !== false && activation.autoSync?.enabled !== false;
+    (0, config_1.saveGlobalAuth)(activation.apiKey, parsed.apiUrl, activation.organizationId);
+    (0, state_1.setWorkspaceContext)({
+        orgId: activation.organizationId,
+        ...(activation.projectId ? { projectId: activation.projectId } : {}),
+    });
+    const localConnection = {
+        schemaVersion: 1,
+        apiUrl: parsed.apiUrl,
+        organizationId: activation.organizationId,
+        projectId: activation.projectId || null,
+        repo: activation.repo,
+        profileHash: profile.profile.profileHash,
+        topologyHash: profile.profile.topology.hash,
+        keyPrefix: activation.keyPrefix,
+        connectedAt: new Date().toISOString(),
+        autoSync: {
+            enabled: autoSyncEnabled,
+            lastStatus: 'skipped',
+        },
+    };
+    (0, runtime_connection_1.saveRuntimeConnection)(repoRoot, localConnection);
+    return {
+        connected: true,
+        apiUrl: parsed.apiUrl,
+        organizationId: activation.organizationId,
+        projectId: activation.projectId || null,
+        repoId: activation.repo.id,
+        repoName: activation.repo.name,
+        repoKey: activation.repo.repoKey,
+        autoSyncEnabled,
+        keyPrefix: activation.keyPrefix,
+    };
+}
 async function activateClaudeCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: options.force === true });
@@ -101,49 +255,7 @@ async function activateClaudeCommand(options = {}) {
     const ok = inspection.hooks.installed &&
         (options.mcp === false || inspection.mcp.configured) &&
         profile.profile.topology.trackedFileCount > 0;
-    let connection;
-    if (options.connect) {
-        const parsed = parseConnectToken(options.connect, options.apiUrl);
-        const activation = await completeRuntimeRepoActivation({
-            token: parsed.token,
-            apiUrl: parsed.apiUrl,
-            repoRoot,
-            profileFreshness: (0, v0_governance_1.buildProfileFreshnessSignal)(profile, profile.refreshed ? 'auto_refreshed' : 'none'),
-        });
-        const autoSyncEnabled = options.autoSync !== false && activation.autoSync?.enabled !== false;
-        (0, config_1.saveGlobalAuth)(activation.apiKey, parsed.apiUrl, activation.organizationId);
-        (0, state_1.setWorkspaceContext)({
-            orgId: activation.organizationId,
-            ...(activation.projectId ? { projectId: activation.projectId } : {}),
-        });
-        const localConnection = {
-            schemaVersion: 1,
-            apiUrl: parsed.apiUrl,
-            organizationId: activation.organizationId,
-            projectId: activation.projectId || null,
-            repo: activation.repo,
-            profileHash: profile.profile.profileHash,
-            topologyHash: profile.profile.topology.hash,
-            keyPrefix: activation.keyPrefix,
-            connectedAt: new Date().toISOString(),
-            autoSync: {
-                enabled: autoSyncEnabled,
-                lastStatus: 'skipped',
-            },
-        };
-        (0, runtime_connection_1.saveRuntimeConnection)(repoRoot, localConnection);
-        connection = {
-            connected: true,
-            apiUrl: parsed.apiUrl,
-            organizationId: activation.organizationId,
-            projectId: activation.projectId || null,
-            repoId: activation.repo.id,
-            repoName: activation.repo.name,
-            repoKey: activation.repo.repoKey,
-            autoSyncEnabled,
-            keyPrefix: activation.keyPrefix,
-        };
-    }
+    const connection = await connectRuntimeIfRequested(options, repoRoot, profile);
     return {
         ok,
         agent: 'claude',
@@ -196,49 +308,7 @@ async function activateCopilotCommand(options = {}) {
     const hookResult = (0, v0_governance_1.installCopilotGovernanceHooks)(repoRoot, { force: options.force === true });
     const inspection = (0, v0_governance_1.inspectCopilotActivation)(repoRoot);
     const ok = inspection.hooks.installed && profile.profile.topology.trackedFileCount > 0;
-    let connection;
-    if (options.connect) {
-        const parsed = parseConnectToken(options.connect, options.apiUrl);
-        const activation = await completeRuntimeRepoActivation({
-            token: parsed.token,
-            apiUrl: parsed.apiUrl,
-            repoRoot,
-            profileFreshness: (0, v0_governance_1.buildProfileFreshnessSignal)(profile, profile.refreshed ? 'auto_refreshed' : 'none'),
-        });
-        const autoSyncEnabled = options.autoSync !== false && activation.autoSync?.enabled !== false;
-        (0, config_1.saveGlobalAuth)(activation.apiKey, parsed.apiUrl, activation.organizationId);
-        (0, state_1.setWorkspaceContext)({
-            orgId: activation.organizationId,
-            ...(activation.projectId ? { projectId: activation.projectId } : {}),
-        });
-        const localConnection = {
-            schemaVersion: 1,
-            apiUrl: parsed.apiUrl,
-            organizationId: activation.organizationId,
-            projectId: activation.projectId || null,
-            repo: activation.repo,
-            profileHash: profile.profile.profileHash,
-            topologyHash: profile.profile.topology.hash,
-            keyPrefix: activation.keyPrefix,
-            connectedAt: new Date().toISOString(),
-            autoSync: {
-                enabled: autoSyncEnabled,
-                lastStatus: 'skipped',
-            },
-        };
-        (0, runtime_connection_1.saveRuntimeConnection)(repoRoot, localConnection);
-        connection = {
-            connected: true,
-            apiUrl: parsed.apiUrl,
-            organizationId: activation.organizationId,
-            projectId: activation.projectId || null,
-            repoId: activation.repo.id,
-            repoName: activation.repo.name,
-            repoKey: activation.repo.repoKey,
-            autoSyncEnabled,
-            keyPrefix: activation.keyPrefix,
-        };
-    }
+    const connection = await connectRuntimeIfRequested(options, repoRoot, profile);
     return {
         ok,
         agent: 'copilot',
@@ -273,9 +343,47 @@ async function activateCopilotCommand(options = {}) {
         ],
     };
 }
+async function activateCompatibilityCommand(agent, options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: options.force === true });
+    const connection = await connectRuntimeIfRequested(options, repoRoot, profile);
+    const compatibility = COMPATIBILITY_ACTIVATIONS[agent];
+    return {
+        ok: profile.profile.topology.trackedFileCount > 0,
+        agent,
+        repoRoot,
+        profile: {
+            status: profile.status,
+            refreshed: profile.refreshed,
+            profileHash: profile.profile.profileHash,
+            topologyHash: profile.profile.topology.hash,
+            trackedFileCount: profile.profile.topology.trackedFileCount,
+            path: profile.profilePath,
+            reasons: profile.reasons,
+        },
+        restartRequired: false,
+        nextCheck: compatibility.nextCheck,
+        compatibility,
+        connection,
+        next: compatibility.next,
+    };
+}
+function agentLabel(agent) {
+    if (agent === 'claude')
+        return 'Claude Code';
+    if (agent === 'copilot')
+        return 'GitHub Copilot';
+    if (agent === 'codex')
+        return 'Codex';
+    if (agent === 'cursor')
+        return 'Cursor';
+    if (agent === 'vscode')
+        return 'VS Code / Copilot';
+    return 'GitHub Action';
+}
 function renderActivation(result, mcpSkipped) {
     console.log('');
-    console.log(chalk.bold(`Neurcode activation - ${result.agent === 'copilot' ? 'GitHub Copilot' : 'Claude Code'}`));
+    console.log(chalk.bold(`Neurcode activation - ${agentLabel(result.agent)}`));
     console.log(chalk.dim('-'.repeat(64)));
     console.log(`Repo:    ${chalk.white(result.repoRoot)}`);
     console.log(`Profile: ${result.profile.refreshed ? chalk.green('refreshed') : chalk.green('fresh')} ` +
@@ -283,6 +391,37 @@ function renderActivation(result, mcpSkipped) {
     console.log(`Files:   ${result.profile.trackedFileCount} tracked`);
     if (result.profile.reasons.length > 0) {
         console.log(chalk.dim(`Reason:  ${result.profile.reasons.join('; ')}`));
+    }
+    if (result.compatibility) {
+        console.log(`Control: ${chalk.cyan(result.compatibility.controlLevel)}`);
+        console.log(`Mode:    ${result.compatibility.label}`);
+        console.log('');
+        console.log(chalk.bold('Enforced / recorded'));
+        for (const item of result.compatibility.enforced)
+            console.log(chalk.dim(`  - ${item}`));
+        console.log(chalk.bold('Advisory / not claimed'));
+        for (const item of result.compatibility.advisory)
+            console.log(chalk.dim(`  - ${item}`));
+        if (result.connection?.connected) {
+            console.log('');
+            console.log(`Cloud:   ${chalk.green('connected')} ${chalk.dim(result.connection.repoName)} ` +
+                chalk.dim(`(${result.connection.keyPrefix || 'runtime key'})`));
+            console.log(`Sync:    ${result.connection.autoSyncEnabled ? chalk.green('automatic') : chalk.yellow('manual')} ` +
+                chalk.dim(result.connection.apiUrl));
+        }
+        console.log(chalk.dim('-'.repeat(64)));
+        console.log(chalk.green('Ready:') + ` ${result.compatibility.label} prepared. No hard hooks were installed by this command.`);
+        console.log(chalk.dim(`Verify: run \`${result.nextCheck}\`.`));
+        console.log('');
+        console.log(chalk.bold('Useful commands'));
+        for (const command of result.compatibility.commands)
+            console.log(chalk.dim(`  - ${command}`));
+        console.log('');
+        console.log(chalk.bold('Next'));
+        for (const step of result.next)
+            console.log(chalk.dim(`  - ${step}`));
+        console.log('');
+        return;
     }
     const hookStats = result.agent === 'copilot'
         ? result.copilot
@@ -338,6 +477,22 @@ function renderActivation(result, mcpSkipped) {
     console.log(chalk.dim('  - Blocked approvals can use dashboard approval or `neurcode session approve --path <path>`.'));
     console.log('');
 }
+function normalizeActivationAgent(input) {
+    const agent = (input || 'claude').toLowerCase();
+    if (agent === 'claude' || agent === 'claude-code')
+        return 'claude';
+    if (agent === 'copilot' || agent === 'github-copilot')
+        return 'copilot';
+    if (agent === 'codex')
+        return 'codex';
+    if (agent === 'cursor')
+        return 'cursor';
+    if (agent === 'vscode' || agent === 'vs-code' || agent === 'code')
+        return 'vscode';
+    if (agent === 'action' || agent === 'github-action' || agent === 'github-actions')
+        return 'action';
+    return null;
+}
 function activateCommand(program) {
     program
         .command('activate [agent]')
@@ -350,12 +505,12 @@ function activateCommand(program) {
         .option('--no-auto-sync', 'Pair the repo but leave automatic session upload disabled')
         .option('--json', 'Output machine-readable JSON')
         .action(async (agentArg, options) => {
-        const agent = (agentArg || 'claude').toLowerCase();
-        if (agent !== 'claude' && agent !== 'copilot') {
+        const agent = normalizeActivationAgent(agentArg);
+        if (!agent) {
             const payload = {
                 ok: false,
-                error: `Unsupported activation target "${agent}".`,
-                supportedAgents: ['claude', 'copilot'],
+                error: `Unsupported activation target "${agentArg || 'claude'}".`,
+                supportedAgents: ['claude', 'copilot', 'codex', 'cursor', 'vscode', 'action'],
             };
             if (options.json) {
                 console.log(JSON.stringify(payload, null, 2));
@@ -369,7 +524,9 @@ function activateCommand(program) {
         try {
             const result = agent === 'copilot'
                 ? await activateCopilotCommand(options)
-                : await activateClaudeCommand(options);
+                : agent === 'claude'
+                    ? await activateClaudeCommand(options)
+                    : await activateCompatibilityCommand(agent, options);
             if (options.json) {
                 console.log(JSON.stringify(result, null, 2));
             }

@@ -109,6 +109,12 @@ export interface RuntimeEvidenceUploadResponse {
         status: 'uploaded' | 'skipped' | 'failed';
         reason?: string;
     }>;
+    receipts?: Array<{
+        sessionId: string;
+        receiptId: string;
+        signatureStatus: string;
+        verificationUrl: string | null;
+    }>;
     privacy: {
         sourceUploaded: boolean;
         uploadedFields: string[];
