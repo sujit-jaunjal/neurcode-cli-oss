@@ -1,7 +1,7 @@
 import { type AgentGuardPostureSummary } from '@neurcode-ai/governance-runtime';
 import { type AgentGuardEvaluation } from './agent-guard';
 export declare const CURSOR_GATE_SCHEMA_VERSION: "neurcode.cursor-gate.v1";
-export declare const MIN_CURSOR_GATE_CLI_VERSION: "0.15.4";
+export declare const MIN_CURSOR_GATE_CLI_VERSION: "0.15.7";
 export type CursorGateHookKind = 'pre-push' | 'pre-commit';
 export interface CliVersionStaleWarning {
     id: 'cli_version_stale';
@@ -54,6 +54,7 @@ export declare function resolveCursorGateExitCode(input: {
 }): number;
 export declare function evaluateCursorGate(options: CursorGateEvaluateOptions): Promise<CursorGatePayload>;
 export declare function formatCursorGateCiErrors(payload: CursorGatePayload): string[];
+export declare function hookPinCliVersionsToTry(): string[];
 export declare function ensureHookPinnedCli(repoRoot: string): {
     ok: boolean;
     cliPath: string;

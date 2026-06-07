@@ -13,28 +13,32 @@ const node_fs_1 = require("node:fs");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
 const v0_governance_1 = require("./v0-governance");
+const mcp_server_pin_1 = require("./mcp-server-pin");
 exports.AGENT_ADAPTER_SETUP_SCHEMA_VERSION = 'neurcode.agent-adapter-setup.v1';
 exports.AGENT_ADAPTER_DOCTOR_SCHEMA_VERSION = 'neurcode.agent-adapter-doctor.v1';
-const MCP_PACKAGE = '@neurcode-ai/mcp-server';
+const MCP_PACKAGE = mcp_server_pin_1.MCP_SERVER_PACKAGE;
 const VSCODE_EXTENSION_ID = 'sujit-jaunjal.neurcode-governance';
-function mcpServerEntry() {
-    return {
-        command: 'npx',
-        args: ['-y', MCP_PACKAGE],
-    };
+function mcpServerEntry(repoRoot, global = false) {
+    const baseRoot = (0, mcp_server_pin_1.pinnedMcpBaseRoot)(repoRoot, global);
+    const pinned = (0, mcp_server_pin_1.ensurePinnedMcpServer)(baseRoot);
+    if (!pinned.ok) {
+        throw new Error(pinned.message);
+    }
+    return (0, mcp_server_pin_1.buildPinnedMcpServerEntry)(repoRoot, { global });
 }
-function jsonSnippet() {
+function jsonSnippet(repoRoot, global = false) {
     return JSON.stringify({
         mcpServers: {
-            neurcode: mcpServerEntry(),
+            neurcode: mcpServerEntry(repoRoot, global),
         },
     }, null, 2);
 }
-function tomlSnippet() {
+function tomlSnippet(repoRoot) {
+    const entry = mcpServerEntry(repoRoot, true);
     return [
         '[mcp_servers.neurcode]',
-        'command = "npx"',
-        `args = ["-y", "${MCP_PACKAGE}"]`,
+        `command = "${entry.command}"`,
+        `args = ${JSON.stringify(entry.args)}`,
         '',
     ].join('\n');
 }
@@ -278,7 +282,7 @@ function buildAgentSetupSnippet(input) {
                 destination: '~/.codex/config.toml',
                 configPath: codexConfigPath(),
                 format: 'toml',
-                body: tomlSnippet(),
+                body: tomlSnippet(input.repoRoot),
                 instruction: 'Append this block to your Codex config so Codex can call Neurcode MCP tools before edits.',
             };
         case 'cursor':
@@ -288,7 +292,7 @@ function buildAgentSetupSnippet(input) {
                 destination: input.global ? '~/.cursor/mcp.json' : '.cursor/mcp.json',
                 configPath: cursorConfigPath(input.repoRoot, input.global === true),
                 format: 'json',
-                body: jsonSnippet(),
+                body: jsonSnippet(input.repoRoot, input.global === true),
                 instruction: 'Merge this mcpServers.neurcode entry into Cursor MCP config.',
             };
         case 'generic-mcp':
@@ -298,7 +302,7 @@ function buildAgentSetupSnippet(input) {
                 destination: 'your MCP client config',
                 configPath: null,
                 format: 'json',
-                body: jsonSnippet(),
+                body: jsonSnippet(input.repoRoot),
                 instruction: 'Register this MCP server in any agent host that supports stdio MCP tools.',
             };
         case 'vscode':
@@ -340,12 +344,18 @@ function isCodexConfigured(path) {
     const text = readText(path);
     return /\[mcp_servers\.neurcode\]/.test(text) || text.includes(MCP_PACKAGE);
 }
-function isCursorConfigured(path) {
+function isCursorConfigured(path, repoRoot, global) {
     if (!(0, node_fs_1.existsSync)(path))
         return false;
     try {
         const parsed = JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
-        return Boolean(parsed.mcpServers?.neurcode);
+        const entry = parsed.mcpServers?.neurcode;
+        if (!entry)
+            return false;
+        if ((0, mcp_server_pin_1.isLegacyNpxMcpEntry)(entry))
+            return false;
+        const expected = (0, mcp_server_pin_1.buildPinnedMcpServerEntry)(repoRoot, { global });
+        return (0, mcp_server_pin_1.mcpServerEntryIsCurrent)(entry, expected);
     }
     catch {
         return readText(path).includes(MCP_PACKAGE);
@@ -418,7 +428,7 @@ function inspectAgentSetup(input) {
     const configPath = snippet.configPath;
     const configured = input.target === 'codex'
         ? Boolean(configPath && isCodexConfigured(configPath))
-        : Boolean(configPath && isCursorConfigured(configPath));
+        : Boolean(configPath && isCursorConfigured(configPath, input.repoRoot, input.global === true));
     return {
         target: input.target,
         adapter,
@@ -467,7 +477,7 @@ function inspectAgentInstructions(input) {
 function ensureParent(path) {
     (0, node_fs_1.mkdirSync)((0, node_path_1.dirname)(path), { recursive: true });
 }
-function writeCodexConfig(path) {
+function writeCodexConfig(path, repoRoot) {
     if (isCodexConfigured(path)) {
         return {
             status: 'already_configured',
@@ -478,19 +488,20 @@ function writeCodexConfig(path) {
     ensureParent(path);
     const existing = readText(path);
     const prefix = existing.trim().length > 0 && !existing.endsWith('\n') ? '\n\n' : existing.trim().length > 0 ? '\n' : '';
-    (0, node_fs_1.writeFileSync)(path, `${existing}${prefix}${tomlSnippet()}`, 'utf8');
+    (0, node_fs_1.writeFileSync)(path, `${existing}${prefix}${tomlSnippet(repoRoot)}`, 'utf8');
     return {
         status: 'written',
         configPath: path,
         message: `Wrote Neurcode MCP server block to ${path}.`,
     };
 }
-function writeCursorConfig(path) {
-    if (isCursorConfigured(path)) {
+function writeCursorConfig(path, repoRoot, global) {
+    const expectedEntry = mcpServerEntry(repoRoot, global);
+    if (isCursorConfigured(path, repoRoot, global)) {
         return {
             status: 'already_configured',
             configPath: path,
-            message: `Cursor config already contains Neurcode MCP at ${path}.`,
+            message: `Cursor config already contains current Neurcode MCP at ${path}.`,
         };
     }
     ensureParent(path);
@@ -506,15 +517,18 @@ function writeCursorConfig(path) {
     const mcpServers = parsed.mcpServers && typeof parsed.mcpServers === 'object' && !Array.isArray(parsed.mcpServers)
         ? parsed.mcpServers
         : {};
+    const hadEntry = Object.prototype.hasOwnProperty.call(mcpServers, 'neurcode');
     parsed.mcpServers = {
         ...mcpServers,
-        neurcode: mcpServerEntry(),
+        neurcode: expectedEntry,
     };
     (0, node_fs_1.writeFileSync)(path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
     return {
         status: 'written',
         configPath: path,
-        message: `Wrote Neurcode MCP server entry to ${path}.`,
+        message: hadEntry
+            ? `Repaired stale Neurcode MCP entry in ${path} (pinned ${mcp_server_pin_1.MIN_MCP_SERVER_VERSION} via node).`
+            : `Wrote Neurcode MCP server entry to ${path} (pinned ${mcp_server_pin_1.MIN_MCP_SERVER_VERSION} via node).`,
     };
 }
 function writeVscodeRecommendations(path) {
@@ -558,9 +572,10 @@ function writeAgentSetup(input) {
         };
     }
     if (input.target === 'codex')
-        return writeCodexConfig(codexConfigPath());
-    if (input.target === 'cursor')
-        return writeCursorConfig(cursorConfigPath(input.repoRoot, input.global === true));
+        return writeCodexConfig(codexConfigPath(), input.repoRoot);
+    if (input.target === 'cursor') {
+        return writeCursorConfig(cursorConfigPath(input.repoRoot, input.global === true), input.repoRoot, input.global === true);
+    }
     if (input.target === 'vscode')
         return writeVscodeRecommendations(vscodeExtensionsPath(input.repoRoot));
     return {

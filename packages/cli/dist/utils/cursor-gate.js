@@ -7,6 +7,7 @@ exports.emitCliVersionStaleWarning = emitCliVersionStaleWarning;
 exports.resolveCursorGateExitCode = resolveCursorGateExitCode;
 exports.evaluateCursorGate = evaluateCursorGate;
 exports.formatCursorGateCiErrors = formatCursorGateCiErrors;
+exports.hookPinCliVersionsToTry = hookPinCliVersionsToTry;
 exports.ensureHookPinnedCli = ensureHookPinnedCli;
 exports.installCursorGateHook = installCursorGateHook;
 exports.doctorCursorGateHook = doctorCursorGateHook;
@@ -20,7 +21,7 @@ const agent_guard_1 = require("./agent-guard");
 const v0_governance_1 = require("./v0-governance");
 const runtime_live_1 = require("./runtime-live");
 exports.CURSOR_GATE_SCHEMA_VERSION = 'neurcode.cursor-gate.v1';
-exports.MIN_CURSOR_GATE_CLI_VERSION = '0.15.4';
+exports.MIN_CURSOR_GATE_CLI_VERSION = '0.15.7';
 function readBundledCliVersion() {
     try {
         const pkgPath = (0, node_path_1.join)(__dirname, '..', '..', 'package.json');
@@ -268,6 +269,22 @@ function hookPinnedCliDir(repoRoot) {
 function hookPinnedCliPath(repoRoot) {
     return (0, node_path_1.resolve)(hookPinnedCliDir(repoRoot), 'node_modules', '.bin', 'neurcode');
 }
+function hookPinCliVersionsToTry() {
+    const bundled = readBundledCliVersion();
+    const versions = [];
+    const add = (version) => {
+        const trimmed = version?.trim();
+        if (!trimmed || trimmed === 'unknown' || versions.includes(trimmed))
+            return;
+        versions.push(trimmed);
+    };
+    add(bundled);
+    add(exports.MIN_CURSOR_GATE_CLI_VERSION);
+    for (const fallback of ['0.15.6', '0.15.5', '0.15.4']) {
+        add(fallback);
+    }
+    return versions;
+}
 function ensureHookPinnedCli(repoRoot) {
     const cliDir = hookPinnedCliDir(repoRoot);
     const cliPath = hookPinnedCliPath(repoRoot);
@@ -275,15 +292,15 @@ function ensureHookPinnedCli(repoRoot) {
         return { ok: true, cliPath, message: `Pinned hook CLI present at ${cliPath}` };
     }
     (0, node_fs_1.mkdirSync)(cliDir, { recursive: true });
-    const install = (0, node_child_process_1.spawnSync)('npm', ['install', '--prefix', cliDir, '--silent', '--no-save', `@neurcode-ai/cli@${exports.MIN_CURSOR_GATE_CLI_VERSION}`], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    if (install.status !== 0 || !(0, node_fs_1.existsSync)(cliPath)) {
-        return {
-            ok: false,
-            cliPath,
-            message: install.stderr?.trim() || install.stdout?.trim() || 'Failed to install pinned hook CLI.',
-        };
+    let lastMessage = 'Failed to install pinned hook CLI.';
+    for (const version of hookPinCliVersionsToTry()) {
+        const install = (0, node_child_process_1.spawnSync)('npm', ['install', '--prefix', cliDir, '--silent', '--no-save', `@neurcode-ai/cli@${version}`], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        if (install.status === 0 && (0, node_fs_1.existsSync)(cliPath)) {
+            return { ok: true, cliPath, message: `Installed pinned hook CLI @${version} at ${cliPath}` };
+        }
+        lastMessage = install.stderr?.trim() || install.stdout?.trim() || lastMessage;
     }
-    return { ok: true, cliPath, message: `Installed pinned hook CLI at ${cliPath}` };
+    return { ok: false, cliPath, message: lastMessage };
 }
 function buildCursorGateHookScript(hookKind) {
     const gitAction = hookKind === 'pre-push' ? 'push' : 'commit';

@@ -32,7 +32,7 @@ exports.CODEOWNERS_CANDIDATES = ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEO
 exports.MANIFEST_CANDIDATES = ['package.json', 'pyproject.toml', 'go.mod', 'Cargo.toml', 'pom.xml'];
 const CLAUDE_MCP_ENTRY = Object.freeze({
     command: 'npx',
-    args: ['-y', '@neurcode-ai/mcp-server'],
+    args: ['-y', '@neurcode-ai/mcp-server@0.2.4'],
 });
 const CLAUDE_PRE_TOOL_MATCHER = 'Bash|Edit|Write|MultiEdit';
 const COPILOT_HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'Stop'];
