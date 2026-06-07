@@ -122,6 +122,17 @@ function runHook(event, hookAction, extras = {}) {
 function loadTargetSession(repoRoot, sessionId) {
     return sessionId ? (0, governance_runtime_1.loadSession)(repoRoot, sessionId) : (0, governance_runtime_1.loadActiveSession)(repoRoot);
 }
+function ensureAgentPlanCaptured(repoRoot, sessionId, planPayload) {
+    let session = (0, governance_runtime_1.loadSession)(repoRoot, sessionId);
+    if (!session || session.contract.agentPlan)
+        return session;
+    const plan = (0, governance_runtime_1.extractAgentPlan)({ cwd: repoRoot, plan: planPayload, session_id: sessionId }, { source: 'mcp' });
+    if (!plan)
+        return session;
+    const captured = (0, governance_runtime_1.captureAgentPlan)(repoRoot, sessionId, plan);
+    session = captured?.session ?? (0, governance_runtime_1.loadSession)(repoRoot, sessionId);
+    return session;
+}
 function launcherAdapterMatches(eventAdapter, launchedAdapter) {
     if (!launchedAdapter)
         return true;
@@ -207,13 +218,28 @@ async function submitAgentRuntimeEvent(event) {
             return decisionEnvelope(event, 'recorded', 'Governed agent session started.', result.json);
         }
         case 'plan.capture': {
+            const session = targetSession;
+            if (!session || session.status !== 'active') {
+                throw new Error(payload.sessionId
+                    ? `No active governed session found for ${payload.sessionId}.`
+                    : 'No active governed session found for plan capture.');
+            }
             const result = runHook(event, 'check', {
                 plan: payload.plan,
-                ...(payload.sessionId ? { session_id: payload.sessionId } : {}),
+                session_id: session.sessionId,
             });
             if (result.status !== 0)
                 childFailure(event, result);
-            return decisionEnvelope(event, 'recorded', 'Agent plan captured for the active session.', result.json);
+            const updated = ensureAgentPlanCaptured(event.cwd, session.sessionId, payload.plan);
+            if (!updated?.contract.agentPlan) {
+                throw new Error('Agent plan capture did not persist a source-free plan for the active session.');
+            }
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(event.cwd, updated);
+            return decisionEnvelope(event, 'recorded', 'Agent plan captured for the active session.', {
+                ...(result.json ?? {}),
+                sessionId: updated.sessionId,
+                agentPlanRevision: updated.contract.agentPlanRevision ?? null,
+            });
         }
         case 'plan.amend': {
             const args = [

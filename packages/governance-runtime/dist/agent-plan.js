@@ -375,6 +375,31 @@ function findPlanText(payload) {
     }
     // (3) An explicit plan field (used by manual/MCP callers).
     const planField = payload.plan;
+    if (typeof planField === 'string') {
+        const trimmed = planField.trim();
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+            try {
+                const parsed = asRecord(JSON.parse(trimmed));
+                if (parsed) {
+                    const summary = asString(parsed.summary) || '';
+                    const steps = Array.isArray(parsed.steps)
+                        ? parsed.steps.map((step) => asString(step)).filter((value) => Boolean(value))
+                        : [];
+                    if (summary || steps.length > 0) {
+                        return {
+                            text: [summary, ...steps].join('\n'),
+                            source: 'mcp',
+                            structured: true,
+                            steps: steps.length > 0 ? steps : undefined,
+                        };
+                    }
+                }
+            }
+            catch {
+                // Fall through to plain-string plan handling.
+            }
+        }
+    }
     const planString = asString(planField);
     if (planString) {
         return { text: planString, source: 'claude_prompt', structured: true };

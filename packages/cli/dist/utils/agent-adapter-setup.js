@@ -82,7 +82,7 @@ function instructionPath(target, repoRoot) {
     if (target === 'codex')
         return (0, node_path_1.join)(repoRoot, 'AGENTS.md');
     if (target === 'cursor')
-        return (0, node_path_1.join)(repoRoot, '.cursor', 'rules', 'neurcode-governance.mdc');
+        return (0, node_path_1.join)(repoRoot, '.cursor', 'rules', 'neurcode.mdc');
     if (target === 'copilot')
         return (0, node_path_1.join)(repoRoot, '.github', 'copilot-instructions.md');
     if (target === 'vscode')
@@ -95,7 +95,7 @@ function instructionDestination(target) {
     if (target === 'codex')
         return 'AGENTS.md';
     if (target === 'cursor')
-        return '.cursor/rules/neurcode-governance.mdc';
+        return '.cursor/rules/neurcode.mdc';
     if (target === 'copilot')
         return '.github/copilot-instructions.md';
     if (target === 'vscode')
@@ -109,7 +109,9 @@ function instructionHeader(target) {
         return [];
     return [
         '---',
-        'description: Neurcode runtime governance for AI coding edits',
+        'description: Neurcode in-flow governance runtime for Cursor (cooperative MCP enforcement)',
+        'globs:',
+        '  - "**/*"',
         'alwaysApply: true',
         '---',
         '',
@@ -166,6 +168,43 @@ function instructionBody(input) {
             '6. Finish the governed session so source-free runtime evidence and replay records are written.',
             '',
             'Never send source code, diffs, patches, file contents, or before/after text to Neurcode runtime payloads. Runtime evidence is paths, owners, decisions, plan metadata, guard posture, and integrity hashes.',
+            '',
+        ].join('\n');
+    }
+    if (input.target === 'cursor') {
+        const adapter = cliAdapterName(input.adapter);
+        return [
+            ...instructionHeader('cursor'),
+            '<!-- neurcode-agent-runtime-v1 -->',
+            '# Neurcode (Cursor supervised governance)',
+            '',
+            'This repository uses Neurcode as the in-flow governance runtime. Cursor reaches the',
+            'local CLI engine **cooperatively through MCP** — there is no host-level hard pre-write deny.',
+            '',
+            '## Mandatory contract',
+            '',
+            '1. Start or join a governed session before implementation.',
+            '2. Handshake: `neurcode_agent_session_handshake`.',
+            '3. Capture plan: `neurcode_agent_plan_capture` before edits.',
+            '4. **Before EVERY proposed file write**, call `neurcode_agent_edit_before` with the repo-relative `filePath`.',
+            '5. If decision is `deny`, **do not write the file**. Surface `approvalContext` to the human.',
+            '6. Exact-path approval only: `neurcode_session_approve` with the suggested path — never broaden to a directory.',
+            '7. Plan changes: `neurcode_agent_plan_amend` before editing outside the accepted plan.',
+            '8. Finish: `neurcode_agent_session_finish` for replayable evidence.',
+            '',
+            'Bypassing MCP and writing anyway is detected by the local guard supervisor as `unverified_write`.',
+            'Finish sessions with `neurcode agent guard finish --fail-on-unverified` so automation fails on bypass.',
+            '',
+            'Never send source code, diffs, patches, or file contents in Neurcode payloads.',
+            '',
+            'CLI fallback:',
+            '',
+            '```bash',
+            `neurcode agent check <repo-relative-path> --adapter ${adapter} --session-id <session-id>`,
+            `neurcode agent approve <exact-path> --adapter ${adapter} --session-id <session-id> --reason "<reason>"`,
+            'neurcode agent guard status --fail-on-unverified',
+            `neurcode agent guard finish --session-id <session-id> --fail-on-unverified`,
+            '```',
             '',
         ].join('\n');
     }

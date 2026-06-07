@@ -44,7 +44,8 @@ const consequence_nudges_1 = require("../utils/consequence-nudges");
 /** Read the full hook JSON from stdin, or return {} on any error. */
 function readHookInput() {
     try {
-        const raw = (0, fs_1.readFileSync)('/dev/stdin', 'utf8');
+        // Read fd 0 directly — /dev/stdin can be empty on Linux CI when stdin is a pipe.
+        const raw = (0, fs_1.readFileSync)(0, 'utf8');
         if (raw.trim())
             return JSON.parse(raw);
     }

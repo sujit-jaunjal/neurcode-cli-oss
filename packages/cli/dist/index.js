@@ -71,6 +71,7 @@ const session_hook_1 = require("./commands/session-hook");
 const runtime_adapter_1 = require("./commands/runtime-adapter");
 const agent_1 = require("./commands/agent");
 const activate_1 = require("./commands/activate");
+const cursor_1 = require("./commands/cursor");
 const run_1 = require("./commands/run");
 const runtime_doctor_1 = require("./commands/runtime-doctor");
 const runtime_report_1 = require("./commands/runtime-report");
@@ -443,6 +444,7 @@ program
 (0, runtime_adapter_1.runtimeAdapterCommand)(program);
 (0, agent_1.agentCommand)(program);
 (0, activate_1.activateCommand)(program);
+(0, cursor_1.cursorCommand)(program);
 (0, run_1.runCommand)(program);
 (0, runtime_report_1.reportCommand)(program);
 (0, runtime_sync_1.syncCommand)(program);

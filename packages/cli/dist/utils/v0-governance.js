@@ -359,7 +359,9 @@ function readModuleImports(repoRoot, paths) {
         catch {
             continue; // unreadable / binary — skip
         }
-        const specifiers = (0, governance_runtime_1.extractImportSpecifiers)(rel, content);
+        const specifiers = typeof governance_runtime_1.extractImportSpecifiers === 'function'
+            ? (0, governance_runtime_1.extractImportSpecifiers)(rel, content)
+            : [];
         if (specifiers.length > 0)
             records.push({ filePath: rel, specifiers });
     }
