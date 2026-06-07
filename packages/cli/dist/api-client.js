@@ -431,6 +431,16 @@ class ApiClient {
             body: JSON.stringify(body),
         });
     }
+    async recordGovernanceHealthReport(body) {
+        const url = `${this.apiUrl}/api/v1/runtime/governance-health/report`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+    }
     async getFileVersions(filePath, projectId, limit = 50) {
         const url = `${this.apiUrl}/api/v1/revert/versions`;
         const params = new URLSearchParams({ filePath });

@@ -588,6 +588,25 @@ export declare class ApiClient {
         ok: boolean;
         approval: RuntimeLiveApproval;
     }>;
+    recordGovernanceHealthReport(body: {
+        schemaVersion: string;
+        repoKey: string;
+        verdict: string;
+        ok: boolean;
+        summary?: string;
+        checks: Array<{
+            id: string;
+            status: string;
+            message: string;
+        }>;
+        remediation?: string[];
+        repoRootFingerprint?: string;
+    }): Promise<{
+        ok: boolean;
+        recordedAt: string;
+        repoKey: string;
+        verdict: string;
+    }>;
     getFileVersions(filePath: string, projectId?: string, limit?: number): Promise<Array<{
         id: string;
         organizationId: string;

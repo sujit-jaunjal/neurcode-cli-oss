@@ -11,6 +11,10 @@ const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
 const cursor_gate_1 = require("../utils/cursor-gate");
 const governance_health_1 = require("../utils/governance-health");
+const runtime_connection_1 = require("../utils/runtime-connection");
+const node_crypto_1 = require("node:crypto");
+const api_client_1 = require("../api-client");
+const config_1 = require("../config");
 let chalk;
 try {
     chalk = require('chalk');
@@ -485,11 +489,34 @@ Exit codes (CI contract):
         .description('Am I actually governed? Checks MCP, Home MCP, session, guard correlation, and supervisor')
         .option('--dir <path>', 'Repository root (default: current directory)')
         .option('--json', 'Output machine-readable JSON')
-        .action((options) => {
+        .option('--record', 'Upload this health report to Runtime Control Plane (requires paired repo + API key)')
+        .action(async (options) => {
         try {
+            const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
             const report = (0, governance_health_1.evaluateGovernanceHealth)(options.dir);
+            let recorded = null;
+            if (options.record) {
+                const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+                if (!connection?.repo?.repoKey) {
+                    throw new Error('Repository is not paired with Runtime Control Plane. Run activate --connect first.');
+                }
+                const config = (0, config_1.loadConfig)();
+                config.apiKey = (0, config_1.requireApiKey)(connection.organizationId);
+                const client = new api_client_1.ApiClient(config);
+                const fingerprint = (0, node_crypto_1.createHash)('sha256').update(repoRoot).digest('hex').slice(0, 32);
+                recorded = await client.recordGovernanceHealthReport({
+                    schemaVersion: governance_health_1.GOVERNANCE_HEALTH_SCHEMA_VERSION,
+                    repoKey: connection.repo.repoKey,
+                    verdict: report.verdict,
+                    ok: report.ok,
+                    summary: report.summary,
+                    checks: report.checks,
+                    remediation: report.remediation,
+                    repoRootFingerprint: fingerprint,
+                });
+            }
             if (options.json) {
-                emitJson(report);
+                emitJson(recorded ? { ...report, recorded } : report);
             }
             else {
                 console.log('');
@@ -507,6 +534,10 @@ Exit codes (CI contract):
                     console.log(chalk.bold('Remediation'));
                     for (const step of report.remediation)
                         console.log(chalk.dim(`  ${step}`));
+                }
+                if (recorded) {
+                    console.log('');
+                    console.log(chalk.green(`Recorded to control plane for ${recorded.repoKey} at ${recorded.recordedAt}`));
                 }
                 console.log('');
             }
