@@ -16,6 +16,8 @@ const runtime_evidence_1 = require("../utils/runtime-evidence");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_adapter_1 = require("./runtime-adapter");
 const session_1 = require("./session");
+const cursor_gate_1 = require("../utils/cursor-gate");
+const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 let chalk;
 try {
     chalk = require('chalk');
@@ -557,6 +559,7 @@ function buildDoctorPayload(agentArg, options) {
     const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
     const capability = capabilityFor(inspection.adapter);
     const needsNpx = target === 'codex' || target === 'cursor' || target === 'generic-mcp';
+    const cliVersionWarning = target === 'cursor' ? (0, cursor_gate_1.buildCliVersionStaleWarning)() : null;
     const checks = [
         {
             id: 'adapter',
@@ -584,6 +587,15 @@ function buildDoctorPayload(agentArg, options) {
                 ? `Session ${activeSession.sessionId} is active (${activeSession.contract.scopeMode} scope).`
                 : 'No active governed session. Start one with neurcode agent start.',
         },
+        ...(cliVersionWarning
+            ? [{
+                    id: 'cli_version_stale',
+                    label: 'CLI version',
+                    status: 'warn',
+                    message: cliVersionWarning.message,
+                    recommendation: cliVersionWarning.remediation.join(' · '),
+                }]
+            : []),
     ];
     const summary = {
         pass: checks.filter((item) => item.status === 'pass').length,
@@ -609,6 +621,7 @@ function buildDoctorPayload(agentArg, options) {
         },
         checks,
         summary,
+        cliVersionWarning,
         next: summary.fail > 0
             ? 'Resolve failed checks before relying on agent MCP calls.'
             : inspection.configured === false
@@ -1358,6 +1371,10 @@ function agentCommand(program) {
         .action((agent, options) => {
         try {
             const payload = buildDoctorPayload(agent, options);
+            const warning = payload.cliVersionWarning;
+            if (warning && !options.json) {
+                (0, cursor_gate_1.emitCliVersionStaleWarning)(warning);
+            }
             if (options.json)
                 emitJson(payload);
             else
@@ -1565,11 +1582,18 @@ function agentCommand(program) {
         .option('--agent <agent>', 'Agent alias, e.g. codex, cursor, gemini')
         .option('--tool-name <name>', 'Agent write tool name', 'Write')
         .option('--after', 'Record as post-change observation instead of pre-write enforcement')
+        .option('--reuse-profile', 'Reuse in-process governance profile cache (default when cache enabled)')
+        .option('--no-reuse-profile', 'Bypass in-process profile cache for this check')
         .option('--session-id <id>', 'Session ID (default: active session)')
         .option('--dir <path>', 'Repository root (default: current directory)')
         .option('--json', 'Output machine-readable JSON')
         .action(async (filePath, options) => {
         try {
+            const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+            const preStaleness = (0, v0_governance_1.getProfileStaleness)(repoRoot, {
+                bypassCache: options.reuseProfile === false || process.env.NEURCODE_PROFILE_CACHE === '0',
+            });
+            const startedAt = Date.now();
             const adapter = adapterFromOptions(options, 'generic-mcp');
             const result = await submitAgentEvent({
                 adapter,
@@ -1581,8 +1605,13 @@ function agentCommand(program) {
                     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
                 },
             });
+            const enriched = {
+                ...result,
+                checkDurationMs: Date.now() - startedAt,
+                profileCacheHit: preStaleness.profileCacheHit === true,
+            };
             if (options.json)
-                emitJson(result);
+                emitJson(enriched);
             else
                 renderDecision(result, filePath);
         }
@@ -1664,6 +1693,7 @@ function agentCommand(program) {
         .option('--debounce-ms <ms>', 'Supervisor file-change debounce in milliseconds', (value) => Number.parseInt(value, 10))
         .option('--no-activate', 'Do not install/refresh Claude Code hooks when launching Claude')
         .option('--force-profile', 'Force refresh the repo governance profile before launch')
+        .option('--scope-rules', 'Write .cursor/rules/neurcode-session-scope.mdc for this session')
         .option('--json', 'Output machine-readable JSON')
         .action(async (agent, options) => {
         try {
@@ -1731,6 +1761,14 @@ function agentCommand(program) {
                     },
                 });
             }
+            const scopeRules = options.scopeRules === true
+                ? (() => {
+                    const session = (0, governance_runtime_1.loadSession)(launch.repoRoot, launch.session.sessionId);
+                    return session
+                        ? (0, session_allowlist_rules_1.writeSessionScopeRules)({ repoRoot: launch.repoRoot, session })
+                        : undefined;
+                })()
+                : undefined;
             const payload = {
                 ok: true,
                 schemaVersion: artifact.schemaVersion,
@@ -1745,6 +1783,7 @@ function agentCommand(program) {
                     privacy: artifact.privacy,
                 },
                 supervisor,
+                scopeRules,
             };
             if (options.json)
                 emitJson(payload);

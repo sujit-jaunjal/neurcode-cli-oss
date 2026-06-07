@@ -37,6 +37,8 @@ export interface ProfileStalenessResult {
     cachedProfile: RepoGovernanceProfile | null;
     currentProfile: RepoGovernanceProfile;
     reasons: string[];
+    /** True when an in-process staleness snapshot was reused (5 min TTL). */
+    profileCacheHit?: boolean;
 }
 export interface EnsureProfileResult extends ProfileStalenessResult {
     profile: RepoGovernanceProfile;
@@ -159,15 +161,23 @@ export declare function readRuntimeGovernanceConfig(repoRoot: string): Governanc
  * never file contents. Bounded + deterministic.
  */
 export declare function readModuleImports(repoRoot: string, paths: string[]): ModuleImportRecord[];
-export declare function buildCurrentGovernanceProfile(repoRoot: string): RepoGovernanceProfile;
+export declare const PROFILE_STALENESS_CACHE_TTL_MS: number;
+export declare function buildCurrentGovernanceProfile(repoRoot: string, options?: {
+    bypassCache?: boolean;
+}): RepoGovernanceProfile;
 export declare function profilePath(repoRoot: string): string;
 export declare function readGovernanceProfile(repoRoot: string): ProfileReadResult;
 export declare function writeGovernanceProfile(repoRoot: string, profile: RepoGovernanceProfile): string;
 export declare function buildProfileFreshnessSignal(result: ProfileStalenessResult | EnsureProfileResult, action?: ProfileFreshnessAction): ProfileFreshnessSignal;
 export declare function profileFreshnessActionForSession(result: ProfileStalenessResult | EnsureProfileResult, sessionProfileHash: string | null | undefined): ProfileFreshnessAction;
-export declare function getProfileStaleness(repoRoot: string): ProfileStalenessResult;
+export declare function getLastProfileCacheHit(): boolean;
+export declare function clearProfileStalenessCache(repoRoot?: string): void;
+export declare function getProfileStaleness(repoRoot: string, options?: {
+    bypassCache?: boolean;
+}): ProfileStalenessResult;
 export declare function ensureFreshGovernanceProfile(repoRoot: string, options?: {
     force?: boolean;
+    bypassCache?: boolean;
 }): EnsureProfileResult;
 /**
  * Parse the node entrypoint path out of a pinned hook command.

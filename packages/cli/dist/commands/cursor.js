@@ -6,6 +6,7 @@ const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const v0_governance_1 = require("../utils/v0-governance");
 const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 const agent_guard_1 = require("../utils/agent-guard");
+const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
 const cursor_gate_1 = require("../utils/cursor-gate");
@@ -52,11 +53,18 @@ async function publishGuardEvent(input) {
 }
 async function runCursorOnboard(options) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const cliVersionWarning = (0, cursor_gate_1.buildCliVersionStaleWarning)();
+    if (cliVersionWarning && !options.json) {
+        (0, cursor_gate_1.emitCliVersionStaleWarning)(cliVersionWarning);
+    }
     const goal = options.goal || 'Make one bounded change inside the declared task scope';
     const plan = options.plan || 'Capture a source-free plan before edits; call edit.before before every write.';
     const shouldWrite = options.write !== false;
     const shouldWriteInstructions = options.writeInstructions !== false;
     const shouldStartGuard = options.guardStart !== false;
+    const strictMode = options.strict === true;
+    const shouldInstallGate = options.installGate === true || strictMode;
+    const shouldWriteScopeRules = options.scopeRules === true || strictMode;
     const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: true });
     const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('cursor-mcp');
     const mcpWrite = shouldWrite
@@ -139,14 +147,29 @@ async function runCursorOnboard(options) {
                 : { enabled: false },
         };
     }
-    const gateInstall = options.installGate
-        ? (0, cursor_gate_1.installCursorGateHook)({ dir: repoRoot, force: false })
+    const gateInstall = shouldInstallGate
+        ? (0, cursor_gate_1.installCursorGateHook)({
+            dir: repoRoot,
+            force: false,
+            hook: strictMode ? 'both' : 'pre-push',
+        })
         : undefined;
+    const strictRules = strictMode ? (0, session_allowlist_rules_1.writeStrictCursorRules)({ repoRoot }) : undefined;
+    let scopeRules;
+    if (shouldWriteScopeRules && guardPayload?.sessionId) {
+        const session = (0, governance_runtime_1.loadSession)(repoRoot, String(guardPayload.sessionId));
+        if (session) {
+            scopeRules = (0, session_allowlist_rules_1.writeSessionScopeRules)({ repoRoot, session });
+        }
+    }
     const payload = {
         schemaVersion: 'neurcode.cursor-onboard.v1',
         ok: doctorOk,
+        strict: strictMode,
         generatedAt: new Date().toISOString(),
         repoRoot,
+        cliVersionWarning,
+        installedArtifacts: strictMode ? (0, session_allowlist_rules_1.listStrictOnboardArtifacts)(repoRoot) : undefined,
         enforcement: {
             level: capability.enforcementLevel,
             controlLevel: capability.controlLevel,
@@ -168,15 +191,21 @@ async function runCursorOnboard(options) {
         },
         guard: guardPayload,
         gateInstall,
+        strictRules,
+        scopeRules,
         next: [
             'Reload Cursor so repo-local .cursor/mcp.json and rules are picked up.',
             'In Cursor Agent, call neurcode_agent_edit_before before every proposed file write.',
             'Before push or merge: neurcode cursor gate (exit 0 = clean, exit 2 = blocked)',
-            options.installGate
-                ? 'Pre-push gate installed via --install-gate.'
-                : 'Optional: neurcode cursor gate install (blocks push on unverified writes)',
+            strictMode
+                ? 'Enterprise strict: pre-commit + pre-push hooks installed; finish with cursor gate clean.'
+                : shouldInstallGate
+                    ? 'Pre-push gate installed via --install-gate.'
+                    : 'Optional: neurcode cursor gate install --hook both',
             'Finish with: neurcode agent guard finish --session-id <id> --fail-on-unverified',
-            'Demo: bash scripts/cursor-supervised-demo.sh',
+            strictMode
+                ? 'Demo: bash scripts/cursor-enforcement-stack-demo.sh'
+                : 'Demo: bash scripts/cursor-supervised-demo.sh',
         ],
     };
     return payload;
@@ -285,23 +314,38 @@ Exit codes (CI contract):
     });
     gate
         .command('install')
-        .description('Install repo-local git pre-push hook that runs cursor gate')
+        .description('Install repo-local git hooks (pre-push and/or pre-commit) that run cursor gate')
         .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--hook <kind>', 'Hook to install: pre-push (default), pre-commit, or both', 'pre-push')
         .option('--force', 'Rewrite existing cursor gate hook fragment')
         .option('--json', 'Output machine-readable JSON')
         .action((options) => {
         try {
-            const result = (0, cursor_gate_1.installCursorGateHook)({ dir: options.dir, force: options.force });
+            const hook = options.hook === 'both' || options.hook === 'pre-commit' || options.hook === 'pre-push'
+                ? options.hook
+                : 'pre-push';
+            const result = (0, cursor_gate_1.installCursorGateHook)({ dir: options.dir, force: options.force, hook });
+            const cliVersionWarning = (0, cursor_gate_1.buildCliVersionStaleWarning)();
+            if (cliVersionWarning && !options.json) {
+                (0, cursor_gate_1.emitCliVersionStaleWarning)(cliVersionWarning);
+            }
             if (options.json) {
-                emitJson({ schemaVersion: 'neurcode.cursor-gate-install.v1', ...result });
+                emitJson({
+                    schemaVersion: 'neurcode.cursor-gate-install.v1',
+                    ...result,
+                    cliVersionWarning,
+                    hookPath: result.hooks[0]?.hookPath,
+                    neurcodeHookPath: result.hooks[0]?.neurcodeHookPath,
+                });
             }
             else {
                 console.log('');
                 console.log(chalk.bold('Neurcode cursor gate install'));
                 console.log(result.ok ? chalk.green(result.message) : chalk.red(result.message));
-                console.log(chalk.dim(`Hook: ${result.neurcodeHookPath}`));
-                console.log(chalk.dim(`pre-push: ${result.hookPath}`));
-                console.log(chalk.dim('Emergency bypass: NEURCODE_CURSOR_GATE_SKIP=1 git push ...'));
+                for (const hookResult of result.hooks) {
+                    console.log(chalk.dim(`${hookResult.hookKind}: ${hookResult.neurcodeHookPath}`));
+                }
+                console.log(chalk.dim('Emergency bypass: NEURCODE_CURSOR_GATE_SKIP=1 git push|commit ...'));
                 console.log('');
             }
             if (!result.ok)
@@ -319,15 +363,23 @@ Exit codes (CI contract):
         .action((options) => {
         try {
             const result = (0, cursor_gate_1.doctorCursorGateHook)({ dir: options.dir });
+            const cliVersionWarning = result.cliVersionWarning ?? (0, cursor_gate_1.buildCliVersionStaleWarning)();
+            if (cliVersionWarning && !options.json) {
+                (0, cursor_gate_1.emitCliVersionStaleWarning)(cliVersionWarning);
+            }
             if (options.json) {
-                emitJson({ schemaVersion: 'neurcode.cursor-gate-doctor.v1', ...result });
+                emitJson({ schemaVersion: 'neurcode.cursor-gate-doctor.v1', ...result, cliVersionWarning });
             }
             else {
                 console.log('');
                 console.log(chalk.bold('Neurcode cursor gate doctor'));
                 console.log(result.ok ? chalk.green('pass') : chalk.red('fail'));
                 for (const check of result.checks) {
-                    const color = check.status === 'pass' ? chalk.green : chalk.red;
+                    const color = check.status === 'pass'
+                        ? chalk.green
+                        : check.status === 'skip'
+                            ? chalk.dim
+                            : chalk.red;
                     console.log(`  ${color(check.id)} ${check.message}`);
                 }
                 console.log('');
@@ -350,6 +402,8 @@ Exit codes (CI contract):
         .option('--global', 'Write ~/.cursor/mcp.json instead of repo-local config')
         .option('--no-guard-start', 'Skip starting a guarded Cursor session with supervisor')
         .option('--install-gate', 'Install repo-local pre-push hook (neurcode cursor gate)')
+        .option('--strict', 'Enterprise path: guarded session, both git hooks, strict rules, session scope')
+        .option('--scope-rules', 'Write .cursor/rules/neurcode-session-scope.mdc from active session')
         .option('--json', 'Output machine-readable JSON')
         .action(async (options) => {
         try {
@@ -375,6 +429,9 @@ Exit codes (CI contract):
                         ? chalk.green('running (default-on)')
                         : chalk.yellow('not started')}`);
                 }
+                if (payload.strict) {
+                    console.log(`Strict:  ${chalk.cyan('enterprise enforcement stack enabled')}`);
+                }
                 console.log('');
                 console.log(chalk.bold('Next'));
                 for (const step of payload.next)
@@ -382,6 +439,40 @@ Exit codes (CI contract):
                 console.log('');
             }
             if (!payload.ok)
+                process.exitCode = 1;
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    const scope = cmd
+        .command('scope')
+        .description('Session-scoped Cursor rules for drift reduction');
+    scope
+        .command('refresh')
+        .description('Regenerate .cursor/rules/neurcode-session-scope.mdc from the active session contract')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--session-id <id>', 'Session ID override (default: active session)')
+        .option('--json', 'Output machine-readable JSON')
+        .action((options) => {
+        try {
+            const result = (0, session_allowlist_rules_1.refreshSessionScopeRules)({
+                dir: options.dir,
+                sessionId: options.sessionId,
+            });
+            if (options.json) {
+                emitJson({ schemaVersion: 'neurcode.cursor-scope-refresh.v1', ...result });
+            }
+            else {
+                console.log('');
+                console.log(chalk.bold('Neurcode cursor scope refresh'));
+                console.log(result.ok ? chalk.green(result.message) : chalk.red(result.message));
+                if (result.ok && result.allowedGlobs.length > 0) {
+                    console.log(chalk.dim(`Globs: ${result.allowedGlobs.slice(0, 5).join(', ')}`));
+                }
+                console.log('');
+            }
+            if (!result.ok)
                 process.exitCode = 1;
         }
         catch (error) {

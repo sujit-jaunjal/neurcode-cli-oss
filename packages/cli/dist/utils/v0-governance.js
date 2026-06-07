@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CLAUDE_GOVERNANCE_HOOKS = exports.MANIFEST_CANDIDATES = exports.CODEOWNERS_CANDIDATES = void 0;
+exports.PROFILE_STALENESS_CACHE_TTL_MS = exports.CLAUDE_GOVERNANCE_HOOKS = exports.MANIFEST_CANDIDATES = exports.CODEOWNERS_CANDIDATES = void 0;
 exports.resolveRepoRoot = resolveRepoRoot;
 exports.gitLsFiles = gitLsFiles;
 exports.governanceConfigPath = governanceConfigPath;
@@ -12,6 +12,8 @@ exports.readGovernanceProfile = readGovernanceProfile;
 exports.writeGovernanceProfile = writeGovernanceProfile;
 exports.buildProfileFreshnessSignal = buildProfileFreshnessSignal;
 exports.profileFreshnessActionForSession = profileFreshnessActionForSession;
+exports.getLastProfileCacheHit = getLastProfileCacheHit;
+exports.clearProfileStalenessCache = clearProfileStalenessCache;
 exports.getProfileStaleness = getProfileStaleness;
 exports.ensureFreshGovernanceProfile = ensureFreshGovernanceProfile;
 exports.parseHookEntrypoint = parseHookEntrypoint;
@@ -367,21 +369,74 @@ function readModuleImports(repoRoot, paths) {
     }
     return records;
 }
-function buildCurrentGovernanceProfile(repoRoot) {
-    const paths = gitLsFiles(repoRoot);
-    const codeowners = readCodeownersBundle(repoRoot, paths);
-    const manifest = readFirstExisting(repoRoot, exports.MANIFEST_CANDIDATES);
-    const governance = readRuntimeGovernanceConfig(repoRoot);
-    const imports = readModuleImports(repoRoot, paths);
-    return (0, governance_runtime_1.buildRepoGovernanceProfile)({
+exports.PROFILE_STALENESS_CACHE_TTL_MS = 5 * 60 * 1000;
+function buildCurrentGovernanceProfile(repoRoot, options = {}) {
+    const root = resolveRepoRoot(repoRoot);
+    if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
+        const fileCached = readProfileBuildFileCache(root);
+        if (fileCached) {
+            lastProfileCacheHit = true;
+            return fileCached;
+        }
+    }
+    lastProfileCacheHit = false;
+    const paths = gitLsFiles(root);
+    const codeowners = readCodeownersBundle(root, paths);
+    const manifest = readFirstExisting(root, exports.MANIFEST_CANDIDATES);
+    const governance = readRuntimeGovernanceConfig(root);
+    const imports = readModuleImports(root, paths);
+    const profile = (0, governance_runtime_1.buildRepoGovernanceProfile)({
         paths,
         codeownersContent: codeowners.content,
         manifestContent: manifest.content,
-        repoName: (0, path_1.basename)(repoRoot),
+        repoName: (0, path_1.basename)(root),
         source: 'local',
         runtimeConfig: governance.config,
         imports,
     });
+    if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
+        writeProfileBuildFileCache(root, profile);
+    }
+    return profile;
+}
+function profileBuildCachePath(repoRoot) {
+    return (0, path_1.join)(repoRoot, '.neurcode', 'cache', 'profile-build.json');
+}
+function readProfileBuildFileCache(repoRoot) {
+    const path = profileBuildCachePath(repoRoot);
+    if (!(0, fs_1.existsSync)(path))
+        return null;
+    try {
+        const parsed = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
+        if (!parsed.profile || !parsed.expiresAt)
+            return null;
+        if (Date.now() > Date.parse(parsed.expiresAt))
+            return null;
+        return parsed.profile;
+    }
+    catch {
+        return null;
+    }
+}
+function writeProfileBuildFileCache(repoRoot, profile) {
+    const path = profileBuildCachePath(repoRoot);
+    (0, fs_1.mkdirSync)((0, path_1.dirname)(path), { recursive: true });
+    (0, fs_1.writeFileSync)(path, JSON.stringify({
+        expiresAt: new Date(Date.now() + exports.PROFILE_STALENESS_CACHE_TTL_MS).toISOString(),
+        profileHash: profile.profileHash,
+        profile,
+    }, null, 2) + '\n', 'utf8');
+}
+function clearProfileBuildFileCache(repoRoot) {
+    const path = profileBuildCachePath(resolveRepoRoot(repoRoot));
+    if ((0, fs_1.existsSync)(path)) {
+        try {
+            (0, fs_1.rmSync)(path, { force: true });
+        }
+        catch {
+            // best-effort
+        }
+    }
 }
 function profilePath(repoRoot) {
     return (0, path_1.join)(repoRoot, '.neurcode', 'profile.json');
@@ -436,8 +491,35 @@ function profileFreshnessActionForSession(result, sessionProfileHash) {
     }
     return 'session_restart_required';
 }
-function getProfileStaleness(repoRoot) {
-    const currentProfile = buildCurrentGovernanceProfile(repoRoot);
+const profileStalenessCache = new Map();
+let lastProfileCacheHit = false;
+function getLastProfileCacheHit() {
+    return lastProfileCacheHit;
+}
+function clearProfileStalenessCache(repoRoot) {
+    if (repoRoot) {
+        const root = resolveRepoRoot(repoRoot);
+        profileStalenessCache.delete(root);
+        clearProfileBuildFileCache(root);
+    }
+    else {
+        profileStalenessCache.clear();
+    }
+}
+function getProfileStaleness(repoRoot, options = {}) {
+    const root = resolveRepoRoot(repoRoot);
+    const now = Date.now();
+    lastProfileCacheHit = false;
+    if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
+        const cached = profileStalenessCache.get(root);
+        if (cached && cached.expiresAt > now) {
+            lastProfileCacheHit = true;
+            return { ...cached.result, profileCacheHit: true };
+        }
+    }
+    const currentProfile = buildCurrentGovernanceProfile(root, {
+        bypassCache: options.bypassCache === true,
+    });
     const cached = readGovernanceProfile(repoRoot);
     const reasons = [];
     if (cached.error) {
@@ -447,6 +529,7 @@ function getProfileStaleness(repoRoot) {
             cachedProfile: null,
             currentProfile,
             reasons: [`profile could not be parsed: ${cached.error}`],
+            profileCacheHit: lastProfileCacheHit,
         };
     }
     if (!cached.profile) {
@@ -456,6 +539,7 @@ function getProfileStaleness(repoRoot) {
             cachedProfile: null,
             currentProfile,
             reasons: ['profile is missing'],
+            profileCacheHit: lastProfileCacheHit,
         };
     }
     const cachedTopology = topologyHash(cached.profile);
@@ -469,16 +553,27 @@ function getProfileStaleness(repoRoot) {
     if (cached.profile.profileHash !== currentProfile.profileHash) {
         reasons.push('profile hash differs from current repo metadata');
     }
-    return {
+    const result = {
         status: reasons.length > 0 ? 'stale' : 'fresh',
         profilePath: cached.path,
         cachedProfile: cached.profile,
         currentProfile,
         reasons,
+        profileCacheHit: lastProfileCacheHit,
     };
+    profileStalenessCache.set(root, {
+        expiresAt: now + exports.PROFILE_STALENESS_CACHE_TTL_MS,
+        result,
+    });
+    return result;
 }
 function ensureFreshGovernanceProfile(repoRoot, options = {}) {
-    const staleness = getProfileStaleness(repoRoot);
+    if (options.force === true) {
+        clearProfileStalenessCache(repoRoot);
+    }
+    const staleness = getProfileStaleness(repoRoot, {
+        bypassCache: options.force === true || options.bypassCache === true,
+    });
     const shouldRefresh = options.force === true || staleness.status !== 'fresh';
     const profile = shouldRefresh
         ? staleness.currentProfile
