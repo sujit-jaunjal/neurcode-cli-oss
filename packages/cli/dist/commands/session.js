@@ -74,6 +74,7 @@ const runtime_evidence_1 = require("../utils/runtime-evidence");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
+const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
 const structural_understanding_1 = require("../utils/structural-understanding");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
@@ -635,8 +636,10 @@ async function approveGovernanceSessionCommand(options = {}) {
     try {
         const result = (0, governance_runtime_1.approveSession)(repoRoot, path, options.reason, options.sessionId);
         const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
-        if (session)
+        if (session) {
+            (0, session_allowlist_rules_1.refreshSessionScopeRules)({ dir: repoRoot, sessionId: session.sessionId });
             await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+        }
         if (options.json) {
             console.log(JSON.stringify({ ok: true, repoRoot, ...result }, null, 2));
             return;

@@ -112,6 +112,7 @@ function createSession(projectRoot, profile, goal) {
         intentContract,
         graph: architectureGraph,
         policy: architectureObligationPolicy,
+        approvalRequiredGlobs: profile.approvalRequiredPaths,
         now: startedAt,
     });
     const session = {
@@ -204,6 +205,7 @@ function recomputeArchitectureObligations(session, now = new Date().toISOString(
         agentPlan: session.contract.agentPlan,
         events: session.events,
         approvedPaths: activeApprovalPaths(session.contract, now),
+        approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
         graph: session.contract.architectureGraph,
         policy: session.contract.architectureObligationPolicy,
         waivers: (0, architecture_obligations_1.activeArchitectureObligationWaivers)(session.contract.architectureObligationWaivers ?? [], now),
@@ -800,7 +802,28 @@ function cleanScopePathToken(raw) {
         .replace(/[)"'`>\].,;:]+$/, '')
         .trim();
 }
-function isLikelyRepoScopePath(token) {
+function deriveScopePathRoots(profile) {
+    const roots = new Set(SCOPE_PATH_ROOTS);
+    if (!profile)
+        return roots;
+    for (const prefix of deriveSourceRootPrefixes(profile)) {
+        const first = prefix.replace(/\/$/, '').split('/').filter(Boolean)[0];
+        if (first && !first.includes('*'))
+            roots.add(first);
+    }
+    for (const boundary of [
+        ...profile.ownershipBoundaries,
+        ...profile.sensitiveBoundaries,
+    ]) {
+        const glob = boundary.glob.replace(/^\//, '').replace(/\\/g, '/');
+        const first = glob.split('/').filter(Boolean)[0];
+        if (first && !first.includes('*') && !/^[A-Z][A-Za-z]+$/.test(first)) {
+            roots.add(first);
+        }
+    }
+    return roots;
+}
+function isLikelyRepoScopePath(token, profile) {
     if (!token || token.length > 240 || token.includes('://'))
         return false;
     if (!token.includes('/'))
@@ -811,7 +834,7 @@ function isLikelyRepoScopePath(token) {
     if (segments.length < 2)
         return false;
     const first = segments[0];
-    if (!SCOPE_PATH_ROOTS.has(first))
+    if (!deriveScopePathRoots(profile).has(first))
         return false;
     const lastSeg = segments.at(-1) ?? '';
     if (!lastSeg || lastSeg === '*' || lastSeg === '**')
@@ -820,10 +843,58 @@ function isLikelyRepoScopePath(token) {
         return false;
     return true;
 }
-function extractPathTokens(goal) {
+function extractPathTokens(goal, profile) {
     return unique((goal.match(/[a-z0-9_./-]+\/[a-z0-9_./-]+/gi) ?? [])
         .map(cleanScopePathToken)
-        .filter(isLikelyRepoScopePath));
+        .filter((token) => isLikelyRepoScopePath(token, profile)));
+}
+function deriveExcludedScopePrefixes(lowerGoal) {
+    const excluded = [];
+    if (/\b(?:do not touch|don't touch|without touching|no changes to|avoid)\s+providers\b/.test(lowerGoal)) {
+        excluded.push('providers/');
+    }
+    if (/\b(?:do not touch|don't touch|without touching|no changes to|avoid)\s+(?:ci|\.github|github workflows?)\b/.test(lowerGoal)) {
+        excluded.push('.github/');
+    }
+    return excluded;
+}
+function filterExcludedScopePrefixes(globs, excludedPrefixes) {
+    if (excludedPrefixes.length === 0)
+        return globs;
+    return globs.filter((glob) => !excludedPrefixes.some((prefix) => glob.startsWith(prefix)));
+}
+function anchorKeywordGlobsToGoal(pathTokens, profile, segment) {
+    const normalizedSegment = segment.toLowerCase();
+    const anchored = new Set();
+    for (const token of pathTokens) {
+        const parts = token.replace(/\/$/, '').split('/').filter(Boolean);
+        const segIndex = parts.findIndex((part) => part.toLowerCase() === normalizedSegment);
+        if (segIndex >= 0) {
+            anchored.add(`${parts.slice(0, segIndex + 1).join('/')}/**`);
+        }
+    }
+    if (anchored.size > 0)
+        return Array.from(anchored);
+    return inferKeywordGlobsFromProfile(profile, segment);
+}
+function inferTestSupportGlobs(lowerGoal, pathTokens, profile) {
+    if (!/\b(unit tests?|focused tests?|tests?\b)/i.test(lowerGoal))
+        return [];
+    const support = new Set();
+    const prefixes = deriveSourceRootPrefixes(profile);
+    for (const token of pathTokens) {
+        if (isFileScopeToken(token))
+            continue;
+        const dir = token.replace(/\/$/, '');
+        for (const rawPrefix of prefixes) {
+            const prefix = rawPrefix.replace(/\/$/, '');
+            if (!prefix || !dir.startsWith(prefix))
+                continue;
+            support.add(`${prefix}/tests/**`);
+            support.add(`${prefix}/test/**`);
+        }
+    }
+    return Array.from(support);
 }
 function primaryActionForGoal(lower) {
     if (/\b(add|create|implement|build|introduce)\b/.test(lower))
@@ -864,7 +935,7 @@ function domainKeywordsForGoal(lower) {
 }
 function supportGlobsForIntent(goal, profile) {
     const lower = goal.toLowerCase();
-    if (hasExclusiveScopeCue(lower) && extractPathTokens(goal).length > 0) {
+    if (hasExclusiveScopeCue(lower) && extractPathTokens(goal, profile).length > 0) {
         return [];
     }
     const globs = [
@@ -1155,6 +1226,14 @@ function recordAgentPlanRevision(args) {
         },
     });
     recomputeArchitectureObligations(args.session, capturedAt);
+    expandSessionScope(args.session, {
+        text: [
+            args.plan.summary,
+            ...args.plan.steps,
+        ].join('\n'),
+        expectedFiles: args.plan.expectedFiles,
+        expectedGlobs: args.plan.expectedGlobs,
+    });
     (0, node_fs_1.writeFileSync)(sessionPath(args.projectRoot, args.session.sessionId), JSON.stringify(args.session, null, 2) + '\n', 'utf8');
     return args.session;
 }
@@ -1919,23 +1998,23 @@ function deriveAllowedGlobs(goal, profile) {
     // We must NOT strip the extension and append /**, which was the bug that turned
     // "src/tasks/export_task.py" into "src/tasks/export_task/**" and then blocked
     // the exact file the user named.
-    const pathTokens = extractPathTokens(goal);
+    const excludedPrefixes = deriveExcludedScopePrefixes(lower);
+    const pathTokens = extractPathTokens(goal, profile);
     if (pathTokens.length > 0) {
         const exclusiveExplicitScope = hasExclusiveScopeCue(lower);
         const expanded = pathTokens.map((t) => {
             const normalised = t.replace(/^\//, '');
-            return isFileScopeToken(normalised) ? normalised : normalised.replace(/\/$/, '') + '/**';
+            return isFileScopeToken(normalised) ? normalised : `${normalised.replace(/\/$/, '')}/**`;
         });
-        const globs = excludeApprovalRequired(expandNestedSourceGlobs([
+        const globs = filterExcludedScopePrefixes(excludeApprovalRequired(expandNestedSourceGlobs([
             ...expanded,
+            ...inferTestSupportGlobs(lower, pathTokens, profile),
             ...(exclusiveExplicitScope ? [] : safeSupportGlobs),
-        ]));
+        ])), excludedPrefixes);
         if (globs.length > 0)
             return { allowedGlobs: globs, scopeMode: 'explicit' };
     }
     // ── Keyword inference ────────────────────────────────────────────────────────
-    // Match whole words only to avoid "services" matching "service" inside "user_services_old".
-    const wordOf = (kw) => new RegExp(`\\b${kw}\\b`, 'i').test(lower);
     const DIR_KEYWORDS = [
         [/\btasks?\b/i, 'src/tasks/**'],
         [/\bservices?\b/i, 'src/services/**'],
@@ -1951,18 +2030,46 @@ function deriveAllowedGlobs(goal, profile) {
         [/\bapi\b/i, 'src/api/**'],
     ];
     const matched = new Set();
-    for (const [re, glob] of DIR_KEYWORDS) {
-        if (re.test(lower))
-            matched.add(glob);
+    if (pathTokens.length > 0) {
+        for (const [re, fallbackGlob] of DIR_KEYWORDS) {
+            if (!re.test(lower))
+                continue;
+            const segment = fallbackGlob.match(/\/([^/*]+)\/\*\*$/)?.[1];
+            if (!segment)
+                continue;
+            for (const glob of anchorKeywordGlobsToGoal(pathTokens, profile, segment)) {
+                matched.add(glob);
+            }
+        }
+    }
+    else {
+        for (const [re, glob] of DIR_KEYWORDS) {
+            if (re.test(lower))
+                matched.add(glob);
+        }
     }
     if (matched.size > 0) {
-        // Always include non-sensitive support dirs alongside the primary match.
-        // These are genuinely low-risk and blocking them in a task-focused session
-        // is pure noise.
         for (const support of safeSupportGlobs) {
             matched.add(support);
         }
-        const globs = excludeApprovalRequired(expandNestedSourceGlobs(Array.from(matched)));
+        const globs = filterExcludedScopePrefixes(excludeApprovalRequired(expandNestedSourceGlobs(Array.from(matched))), excludedPrefixes);
+        return { allowedGlobs: globs, scopeMode: 'inferred' };
+    }
+    // Profile-aware keyword fallback when the goal names a segment but not a full path.
+    for (const [re, fallbackGlob] of DIR_KEYWORDS) {
+        if (!re.test(lower))
+            continue;
+        const segment = fallbackGlob.match(/\/([^/*]+)\/\*\*$/)?.[1];
+        if (!segment)
+            continue;
+        for (const glob of inferKeywordGlobsFromProfile(profile, segment)) {
+            matched.add(glob);
+        }
+    }
+    if (matched.size > 0) {
+        for (const support of safeSupportGlobs)
+            matched.add(support);
+        const globs = filterExcludedScopePrefixes(excludeApprovalRequired(expandNestedSourceGlobs(Array.from(matched))), excludedPrefixes);
         return { allowedGlobs: globs, scopeMode: 'inferred' };
     }
     // ── Ambiguous fallback ───────────────────────────────────────────────────────
@@ -1980,6 +2087,53 @@ function deriveAllowedGlobs(goal, profile) {
     // any approval-required path as a hard block even if it appears in-scope.
     const safeDirs = deriveSafeDirs(profile);
     return { allowedGlobs: safeDirs, scopeMode: 'ambiguous' };
+}
+function inferKeywordGlobsFromProfile(profile, segment) {
+    const found = new Set();
+    const sources = [
+        ...profile.ownershipBoundaries.map((boundary) => boundary.glob),
+        ...profile.sensitiveBoundaries.map((boundary) => boundary.glob),
+        ...profile.approvalRequiredPaths,
+    ];
+    const normalizedSegment = segment.toLowerCase();
+    for (const raw of sources) {
+        const glob = raw.replace(/^\//, '').replace(/\\/g, '/');
+        const parts = glob.split('/');
+        for (let index = 0; index < parts.length; index += 1) {
+            const part = parts[index]?.replace(/\*\*$/, '').replace(/\*$/, '');
+            if (!part || part.toLowerCase() !== normalizedSegment)
+                continue;
+            found.add(`${parts.slice(0, index + 1).join('/')}/**`);
+        }
+    }
+    return Array.from(found).sort();
+}
+function scopeEntriesFromPaths(paths) {
+    return normalizePlanPaths(paths).map((token) => (isFileScopeToken(token) ? token : `${token.replace(/\/$/, '')}/**`));
+}
+function expandSessionScope(session, input) {
+    const fromText = input.text?.trim()
+        ? (0, agent_plan_1.extractExpectedTargetsFromText)(input.text)
+        : { expectedFiles: [], expectedGlobs: [] };
+    const additions = unique([
+        ...scopeEntriesFromPaths([
+            ...(input.expectedFiles ?? []),
+            ...fromText.expectedFiles,
+        ]),
+        ...normalizePlanPaths([
+            ...(input.expectedGlobs ?? []),
+            ...fromText.expectedGlobs,
+        ]),
+    ]);
+    if (additions.length === 0)
+        return;
+    session.contract.allowedGlobs = unique([
+        ...session.contract.allowedGlobs,
+        ...additions,
+    ]);
+    if (session.contract.scopeMode === 'ambiguous') {
+        session.contract.scopeMode = 'explicit';
+    }
 }
 function deriveSourceRootPrefixes(profile) {
     const candidates = [

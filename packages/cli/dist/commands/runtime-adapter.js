@@ -7,6 +7,7 @@ const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const v0_governance_1 = require("../utils/v0-governance");
+const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const runtime_live_1 = require("../utils/runtime-live");
 function readStdin() {
@@ -143,7 +144,7 @@ function payloadKeys(payload) {
         .filter((key) => payload[key] !== undefined)
         .sort();
 }
-function recordAgentRuntimeCall(event, session) {
+function recordAgentRuntimeCall(event, session, governanceDecision) {
     const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)(event.adapter);
     (0, governance_runtime_1.appendEvent)(event.cwd, session.sessionId, {
         type: 'agent_runtime_call',
@@ -163,6 +164,9 @@ function recordAgentRuntimeCall(event, session) {
             automatic: capability.automatic,
             toolName: typeof event.payload.toolName === 'string' ? event.payload.toolName : null,
             payloadKeys: payloadKeys(event.payload),
+            ...(governanceDecision && governanceDecision !== 'recorded' && governanceDecision !== 'observe'
+                ? { governanceDecision }
+                : {}),
             privacy: {
                 metadataOnly: true,
                 sourceUploaded: false,
@@ -180,9 +184,6 @@ async function submitAgentRuntimeEvent(event) {
     const targetSession = event.eventType === 'session.start'
         ? null
         : loadTargetSession(event.cwd, payload.sessionId);
-    if (targetSession) {
-        recordAgentRuntimeCall(event, targetSession);
-    }
     switch (event.eventType) {
         case 'session.handshake': {
             const session = targetSession;
@@ -234,6 +235,7 @@ async function submitAgentRuntimeEvent(event) {
             if (!updated?.contract.agentPlan) {
                 throw new Error('Agent plan capture did not persist a source-free plan for the active session.');
             }
+            (0, session_allowlist_rules_1.refreshSessionScopeRules)({ dir: event.cwd, sessionId: updated.sessionId });
             await (0, runtime_live_1.publishRuntimeLiveStatus)(event.cwd, updated);
             return decisionEnvelope(event, 'recorded', 'Agent plan captured for the active session.', {
                 ...(result.json ?? {}),
@@ -273,6 +275,9 @@ async function submitAgentRuntimeEvent(event) {
             if (result.status !== 0)
                 childFailure(event, result);
             const checked = hookDecision(result);
+            if (targetSession) {
+                recordAgentRuntimeCall(event, targetSession, checked.decision);
+            }
             return decisionEnvelope(event, checked.decision, checked.message, checked.payload);
         }
         case 'edit.after': {
@@ -284,6 +289,9 @@ async function submitAgentRuntimeEvent(event) {
             if (result.status !== 0)
                 childFailure(event, result);
             const checked = hookDecision(result);
+            if (targetSession) {
+                recordAgentRuntimeCall(event, targetSession, checked.decision === 'deny' ? 'deny' : 'observe');
+            }
             return decisionEnvelope(event, 'observe', checked.decision === 'deny'
                 ? `Post-change observation: ${checked.message}`
                 : 'Post-change observation recorded.', checked.payload, checked.decision === 'deny');

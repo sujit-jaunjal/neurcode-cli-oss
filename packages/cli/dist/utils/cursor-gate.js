@@ -21,7 +21,7 @@ const agent_guard_1 = require("./agent-guard");
 const v0_governance_1 = require("./v0-governance");
 const runtime_live_1 = require("./runtime-live");
 exports.CURSOR_GATE_SCHEMA_VERSION = 'neurcode.cursor-gate.v1';
-exports.MIN_CURSOR_GATE_CLI_VERSION = '0.15.7';
+exports.MIN_CURSOR_GATE_CLI_VERSION = '0.15.8';
 function readBundledCliVersion() {
     try {
         const pkgPath = (0, node_path_1.join)(__dirname, '..', '..', 'package.json');
@@ -332,7 +332,7 @@ else
 fi
 
 set +e
-OUTPUT=\$("\${CLI[@]}" cursor gate --dir "\$ROOT" --json 2>&1)
+OUTPUT=$("\${CLI[@]}" cursor gate --dir "\$ROOT" --explain 2>&1)
 STATUS=\$?
 set -e
 
@@ -348,7 +348,8 @@ cat >&2 <<'MSG'
 Unverified or denied-but-changed writes were detected in the active guarded session.
 Finish the session, fix bypassed writes, or run agent checks before ${beforeAction}.
 
-Remediation:
+  Remediation:
+  neurcode cursor health
   neurcode agent guard status --fail-on-unverified --explain
   neurcode agent guard finish --fail-on-unverified
 

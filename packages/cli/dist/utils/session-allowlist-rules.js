@@ -23,9 +23,21 @@ function planTargetLines(session) {
     const globs = (plan.expectedGlobs ?? []).slice(0, 20).map((glob) => `- \`${glob}\` (glob)`);
     return [...files, ...globs];
 }
+function planApprovalObligationLines(session) {
+    const obligations = session.contract.architectureObligations ?? [];
+    return obligations
+        .filter((item) => item.category === 'ownership' &&
+        item.status === 'pending' &&
+        item.requiredPath &&
+        (item.triggeredBy ?? []).some((trigger) => trigger.startsWith('plan declares')))
+        .slice(0, 20)
+        .map((item) => (`- \`${item.requiredPath}\` — ${item.requiredEvidence[0] ?? 'Approve exact path before edit.'} ` +
+        `(tool: \`neurcode_session_approve\`)`));
+}
 function buildSessionScopeRulesBody(session) {
     const globs = session.contract.allowedGlobs.slice(0, 50);
     const planLines = planTargetLines(session);
+    const approvalLines = planApprovalObligationLines(session);
     return `---
 description: Neurcode active session scope (auto-generated — do not edit manually)
 globs:
@@ -43,7 +55,7 @@ alwaysApply: true
 
 ${globs.length > 0 ? globs.map((glob) => `- \`${glob}\``).join('\n') : '- _(no allowed globs derived — approval-required boundaries still apply)_'}
 
-${planLines.length > 0 ? `## Plan-declared targets\n\n${planLines.join('\n')}\n` : ''}
+${planLines.length > 0 ? `## Plan-declared targets\n\n${planLines.join('\n')}\n` : ''}${approvalLines.length > 0 ? `## Plan paths requiring approval before edit\n\nThese CODEOWNERS / approval-required paths are in your plan. Call \`neurcode_session_approve\` for each exact path before \`edit.before\`:\n\n${approvalLines.join('\n')}\n` : ''}
 ## Drift rule
 
 Do **not** edit files outside the in-scope globs above without an explicit \`neurcode agent amend\` / replan.

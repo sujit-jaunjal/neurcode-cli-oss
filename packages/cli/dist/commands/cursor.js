@@ -10,6 +10,7 @@ const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
 const cursor_gate_1 = require("../utils/cursor-gate");
+const governance_health_1 = require("../utils/governance-health");
 let chalk;
 try {
     chalk = require('chalk');
@@ -68,18 +69,35 @@ async function runCursorOnboard(options) {
     const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: true });
     const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('cursor-mcp');
     const mcpWrite = shouldWrite
-        ? (0, agent_adapter_setup_1.writeAgentSetup)({ target: 'cursor', repoRoot, global: options.global === true })
+        ? options.global === true
+            ? (0, agent_adapter_setup_1.writeAgentSetup)({ target: 'cursor', repoRoot, global: true })
+            : (() => {
+                const repoLocal = (0, agent_adapter_setup_1.writeAgentSetup)({ target: 'cursor', repoRoot, global: false });
+                const home = (0, agent_adapter_setup_1.writeAgentSetup)({ target: 'cursor', repoRoot, global: true });
+                return {
+                    status: repoLocal.status === 'written' || home.status === 'written' ? 'written' : repoLocal.status,
+                    configPath: `${repoLocal.configPath ?? '.cursor/mcp.json'} + ${home.configPath ?? '~/.cursor/mcp.json'}`,
+                    message: `Repo MCP: ${repoLocal.message} Home MCP: ${home.message}`,
+                };
+            })()
         : { status: 'not_requested', configPath: null, message: 'Skipped (--no-write).' };
     const instructionsWrite = shouldWriteInstructions
         ? (0, agent_adapter_setup_1.writeAgentInstructions)({ target: 'cursor', repoRoot })
         : { status: 'not_requested', filePath: null, message: 'Skipped (--no-write-instructions).' };
-    const mcpInspection = (0, agent_adapter_setup_1.inspectAgentSetup)({ target: 'cursor', repoRoot, global: options.global === true });
+    const mcpInspection = (0, agent_adapter_setup_1.inspectAgentSetup)({ target: 'cursor', repoRoot, global: false });
+    const globalMcpInspection = (0, agent_adapter_setup_1.inspectAgentSetup)({ target: 'cursor', repoRoot, global: true });
     const instructionInspection = (0, agent_adapter_setup_1.inspectAgentInstructions)({ target: 'cursor', repoRoot });
     const doctorChecks = [
         {
             id: 'mcp_config',
-            status: mcpInspection.configured ? 'pass' : 'fail',
-            message: mcpInspection.message,
+            status: mcpInspection.configured && globalMcpInspection.configured ? 'pass' : mcpInspection.configured || globalMcpInspection.configured ? 'warn' : 'fail',
+            message: mcpInspection.configured && globalMcpInspection.configured
+                ? 'Repo-local and Home MCP configs are pinned.'
+                : mcpInspection.configured
+                    ? `Repo MCP ready; Home MCP needs attention: ${globalMcpInspection.message}`
+                    : globalMcpInspection.configured
+                        ? `Home MCP ready; repo MCP needs attention: ${mcpInspection.message}`
+                        : mcpInspection.message,
         },
         {
             id: 'agent_instructions',
@@ -194,8 +212,9 @@ async function runCursorOnboard(options) {
         strictRules,
         scopeRules,
         next: [
-            'Reload Cursor so repo-local .cursor/mcp.json and rules are picked up.',
+            'Reload Cursor and enable Home MCP in Settings → MCP (required for Agent tool list).',
             'In Cursor Agent, call neurcode_agent_edit_before before every proposed file write.',
+            'Check posture anytime: neurcode cursor health',
             'Before push or merge: neurcode cursor gate (exit 0 = clean, exit 2 = blocked)',
             strictMode
                 ? 'Enterprise strict: pre-commit + pre-push hooks installed; finish with cursor gate clean.'
@@ -227,8 +246,24 @@ function renderCursorGateExplain(payload) {
     if (payload.evaluation) {
         console.log('');
         console.log(`Changed ${payload.summary.changedFiles} · ` +
+            `verified ${payload.evaluation.summary.verifiedPrewrite} · ` +
             `unverified ${payload.summary.unverifiedWrites > 0 ? chalk.red(String(payload.summary.unverifiedWrites)) : '0'} · ` +
             `denied-changed ${payload.summary.deniedButChanged > 0 ? chalk.red(String(payload.summary.deniedButChanged)) : '0'}`);
+        const actionable = payload.evaluation.changedFiles.filter((file) => file.classification !== 'verified_prewrite');
+        if (actionable.length > 0) {
+            console.log('');
+            console.log(chalk.bold('Files needing attention'));
+            for (const file of actionable.slice(0, 10)) {
+                const label = file.classification.replace(/_/g, ' ');
+                console.log(`  ${chalk.white(file.path)} — ${label} (${file.changeType})`);
+                if (file.classification === 'denied_but_changed') {
+                    console.log(chalk.dim('    Approve the exact path, then retry the write in the agent.'));
+                }
+                else if (file.classification === 'unverified_write') {
+                    console.log(chalk.dim('    Call neurcode_agent_edit_before before writing this file.'));
+                }
+            }
+        }
     }
     if (payload.remediation.length > 0) {
         console.log('');
@@ -439,6 +474,43 @@ Exit codes (CI contract):
                 console.log('');
             }
             if (!payload.ok)
+                process.exitCode = 1;
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    cmd
+        .command('health')
+        .description('Am I actually governed? Checks MCP, Home MCP, session, guard correlation, and supervisor')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--json', 'Output machine-readable JSON')
+        .action((options) => {
+        try {
+            const report = (0, governance_health_1.evaluateGovernanceHealth)(options.dir);
+            if (options.json) {
+                emitJson(report);
+            }
+            else {
+                console.log('');
+                console.log(chalk.bold('Neurcode governance health'));
+                console.log(chalk.dim('-'.repeat(72)));
+                console.log(`Verdict: ${report.verdict === 'governed' ? chalk.green(report.verdict) : report.verdict === 'ungoverned' ? chalk.red(report.verdict) : chalk.yellow(report.verdict)}`);
+                console.log(report.summary);
+                console.log('');
+                for (const check of report.checks) {
+                    const color = check.status === 'pass' ? chalk.green : check.status === 'warn' ? chalk.yellow : chalk.red;
+                    console.log(`  ${color(check.id)} ${check.message}`);
+                }
+                if (report.remediation.length > 0) {
+                    console.log('');
+                    console.log(chalk.bold('Remediation'));
+                    for (const step of report.remediation)
+                        console.log(chalk.dim(`  ${step}`));
+                }
+                console.log('');
+            }
+            if (!report.ok)
                 process.exitCode = 1;
         }
         catch (error) {

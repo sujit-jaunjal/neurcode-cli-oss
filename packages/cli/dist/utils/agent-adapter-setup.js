@@ -352,7 +352,7 @@ function isCursorConfigured(path, repoRoot, global) {
         const entry = parsed.mcpServers?.neurcode;
         if (!entry)
             return false;
-        if ((0, mcp_server_pin_1.isLegacyNpxMcpEntry)(entry))
+        if ((0, mcp_server_pin_1.isLegacyNpxMcpEntry)(entry) || (0, mcp_server_pin_1.isRelativeNodeMcpEntry)(entry))
             return false;
         const expected = (0, mcp_server_pin_1.buildPinnedMcpServerEntry)(repoRoot, { global });
         return (0, mcp_server_pin_1.mcpServerEntryIsCurrent)(entry, expected);

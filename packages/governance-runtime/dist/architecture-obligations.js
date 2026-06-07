@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_ARCHITECTURE_OBLIGATION_POLICY = exports.ARCHITECTURE_OBLIGATION_SCHEMA_VERSION = void 0;
+exports.planDeclaredApprovalRequiredPaths = planDeclaredApprovalRequiredPaths;
 exports.normalizeArchitectureObligationPolicy = normalizeArchitectureObligationPolicy;
 exports.effectiveArchitectureObligationMode = effectiveArchitectureObligationMode;
 exports.isArchitectureObligationWaiverActive = isArchitectureObligationWaiverActive;
@@ -69,6 +70,57 @@ function approvalRequiredPaths(events) {
             paths.push(candidate.trim());
     }
     return unique(paths);
+}
+function pathMatchesApprovalRequiredGlob(filePath, approvalRequiredGlobs) {
+    return approvalRequiredGlobs.some((glob) => matchesPath(filePath, glob.replace(/^\//, '')));
+}
+/**
+ * Paths the accepted agent plan declares that sit inside approval-required /
+ * CODEOWNERS boundaries. These become live obligations at plan capture — before
+ * the first guarded write attempt — so agents and humans can approve upfront.
+ */
+function planDeclaredApprovalRequiredPaths(input) {
+    const approvalGlobs = input.approvalRequiredGlobs ?? [];
+    if (approvalGlobs.length === 0 || !input.agentPlan)
+        return [];
+    const required = new Set();
+    for (const raw of input.agentPlan.expectedFiles) {
+        const filePath = String(raw ?? '').trim().replace(/^\.\//, '').replace(/^\//, '');
+        if (!filePath || !pathMatchesApprovalRequiredGlob(filePath, approvalGlobs))
+            continue;
+        required.add(filePath);
+    }
+    for (const raw of input.agentPlan.expectedGlobs) {
+        const glob = String(raw ?? '').trim().replace(/^\.\//, '').replace(/^\//, '');
+        if (!glob || !pathMatchesApprovalRequiredGlob(glob, approvalGlobs))
+            continue;
+        // Prefer exact file obligations when the glob names a concrete file.
+        if (!glob.includes('*') && !glob.includes('?')) {
+            required.add(glob);
+        }
+    }
+    return Array.from(required).sort();
+}
+function ownershipApprovalDraft(requiredPath, approvedPaths, triggers) {
+    const approved = approvedPaths.find((approvedPath) => matchesPath(requiredPath, approvedPath));
+    const planDeclared = triggers.some((trigger) => trigger.startsWith('plan declares'));
+    return {
+        id: `ownership:exact-approval:${requiredPath}`,
+        category: 'ownership',
+        title: planDeclared
+            ? `Approve plan-declared path ${requiredPath}`
+            : `Approve sensitive path ${requiredPath}`,
+        description: planDeclared
+            ? 'This path is in the active agent plan and sits in a CODEOWNERS / approval-required boundary. Approve the exact path before the first edit.'
+            : 'A guarded sensitive or team-owned path must have an explicit session-scoped approval before the write lands.',
+        severity: 'critical',
+        triggeredBy: triggers,
+        requiredEvidence: [`Approve exactly ${requiredPath} or an explicitly chosen broader glob.`],
+        observedEvidence: approved
+            ? [evidence('exact-approval', `Active session approval recorded: ${approved}`, approved)]
+            : [],
+        requiredPath,
+    };
 }
 function evidence(kind, summary, path) {
     return { kind, summary, ...(path ? { path } : {}) };
@@ -335,21 +387,17 @@ function deriveArchitectureObligations(input) {
         });
     }
     const approvedPaths = input.approvedPaths ?? [];
+    const ownershipTriggers = new Map();
+    for (const requiredPath of planDeclaredApprovalRequiredPaths(input)) {
+        ownershipTriggers.set(requiredPath, [`plan declares owned target: ${requiredPath}`]);
+    }
     for (const requiredPath of approvalRequiredPaths(events)) {
-        const approved = approvedPaths.find((approvedPath) => matchesPath(requiredPath, approvedPath));
-        drafts.push({
-            id: `ownership:exact-approval:${requiredPath}`,
-            category: 'ownership',
-            title: `Approve sensitive path ${requiredPath}`,
-            description: 'A guarded sensitive or team-owned path must have an explicit session-scoped approval before the write lands.',
-            severity: 'critical',
-            triggeredBy: [`guarded write attempted: ${requiredPath}`],
-            requiredEvidence: [`Approve exactly ${requiredPath} or an explicitly chosen broader glob.`],
-            observedEvidence: approved
-                ? [evidence('exact-approval', `Active session approval recorded: ${approved}`, approved)]
-                : [],
-            requiredPath,
-        });
+        const existing = ownershipTriggers.get(requiredPath) ?? [];
+        existing.push(`guarded write attempted: ${requiredPath}`);
+        ownershipTriggers.set(requiredPath, existing);
+    }
+    for (const [requiredPath, triggers] of ownershipTriggers) {
+        drafts.push(ownershipApprovalDraft(requiredPath, approvedPaths, triggers));
     }
     // V2: architecture-graph-derived structural obligations (auth/payments/
     // public-api/migration/downstream-impact) for the modules currently in play.

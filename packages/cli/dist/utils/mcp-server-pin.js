@@ -12,13 +12,15 @@ exports.normalizeMcpServerEntry = normalizeMcpServerEntry;
 exports.mcpServerEntryStaleReasons = mcpServerEntryStaleReasons;
 exports.mcpServerEntryIsCurrent = mcpServerEntryIsCurrent;
 exports.isLegacyNpxMcpEntry = isLegacyNpxMcpEntry;
+exports.isRelativeNodeMcpEntry = isRelativeNodeMcpEntry;
 const node_fs_1 = require("node:fs");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
 const node_child_process_1 = require("node:child_process");
 exports.MCP_SERVER_PACKAGE = '@neurcode-ai/mcp-server';
 exports.MIN_MCP_SERVER_VERSION = '0.2.4';
-exports.PINNED_MCP_ENTRY_RELATIVE = '.neurcode/mcp-server/node_modules/@neurcode-ai/mcp-server/dist/index.js';
+/** Legacy relative paths fail when Cursor MCP cwd is not the workspace root. */
+exports.PINNED_MCP_ENTRY_RELATIVE = 'mcp-server/node_modules/@neurcode-ai/mcp-server/dist/index.js';
 function pinnedMcpBaseRoot(repoRoot, global = false) {
     return global ? (0, node_path_1.join)((0, node_os_1.homedir)(), '.neurcode') : repoRoot;
 }
@@ -61,10 +63,10 @@ function ensurePinnedMcpServer(baseRoot) {
         message: lastMessage,
     };
 }
-function buildRepoLocalMcpServerEntry() {
+function buildRepoLocalMcpServerEntry(repoRoot) {
     return {
         command: 'node',
-        args: [exports.PINNED_MCP_ENTRY_RELATIVE],
+        args: [mcpServerEntryScriptPath((0, node_path_1.resolve)(repoRoot))],
     };
 }
 function buildGlobalMcpServerEntry(homeDir = (0, node_os_1.homedir)()) {
@@ -77,12 +79,7 @@ function buildPinnedMcpServerEntry(repoRoot, options = {}) {
     if (options.global) {
         return buildGlobalMcpServerEntry(options.homeDir);
     }
-    const absoluteEntry = mcpServerEntryScriptPath(repoRoot);
-    const repoRelative = (0, node_path_1.relative)((0, node_path_1.resolve)(repoRoot), absoluteEntry);
-    if (repoRelative && !repoRelative.startsWith('..')) {
-        return { command: 'node', args: [repoRelative.split('\\').join('/')] };
-    }
-    return buildRepoLocalMcpServerEntry();
+    return buildRepoLocalMcpServerEntry(repoRoot);
 }
 function normalizeMcpServerEntry(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -123,5 +120,13 @@ function isLegacyNpxMcpEntry(value) {
     if (entry.command !== 'npx')
         return false;
     return Boolean(entry.args?.some((arg) => arg.includes(exports.MCP_SERVER_PACKAGE)));
+}
+/** Repo-relative node paths break Cursor MCP spawn when cwd is not workspace root. */
+function isRelativeNodeMcpEntry(value) {
+    const entry = normalizeMcpServerEntry(value);
+    if (!entry || entry.command !== 'node' || !entry.args?.[0])
+        return false;
+    const script = entry.args[0];
+    return !script.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(script);
 }
 //# sourceMappingURL=mcp-server-pin.js.map

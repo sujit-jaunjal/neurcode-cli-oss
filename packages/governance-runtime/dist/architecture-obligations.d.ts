@@ -75,6 +75,8 @@ export interface DeriveArchitectureObligationsInput {
     agentPlan?: AgentPlan | null;
     events?: ArchitectureObligationEvent[];
     approvedPaths?: string[];
+    /** Profile approval-required globs — used to pre-declare ownership obligations for plan targets. */
+    approvalRequiredGlobs?: string[];
     policy?: ArchitectureObligationPolicy;
     waivers?: ArchitectureObligationWaiver[];
     previous?: ArchitectureObligation[];
@@ -98,6 +100,12 @@ export interface ArchitectureObligationFeedback {
     reasons: string[];
 }
 export declare const DEFAULT_ARCHITECTURE_OBLIGATION_POLICY: ArchitectureObligationPolicy;
+/**
+ * Paths the accepted agent plan declares that sit inside approval-required /
+ * CODEOWNERS boundaries. These become live obligations at plan capture — before
+ * the first guarded write attempt — so agents and humans can approve upfront.
+ */
+export declare function planDeclaredApprovalRequiredPaths(input: Pick<DeriveArchitectureObligationsInput, 'agentPlan' | 'approvalRequiredGlobs'>): string[];
 export declare function normalizeArchitectureObligationPolicy(value?: Partial<ArchitectureObligationPolicy> | null): ArchitectureObligationPolicy;
 export declare function effectiveArchitectureObligationMode(obligation: Pick<ArchitectureObligation, 'id' | 'severity'>, policy?: Partial<ArchitectureObligationPolicy> | null): ArchitectureObligationPolicyMode;
 export declare function isArchitectureObligationWaiverActive(waiver: ArchitectureObligationWaiver, checkedAt?: string): boolean;

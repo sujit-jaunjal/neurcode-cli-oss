@@ -16,6 +16,33 @@ exports.AGENT_GUARD_SCHEMA_VERSION = 'neurcode.agent-guard.v1';
 function normalizeRepoPath(value) {
     return value.replace(/\\/g, '/').replace(/^\.\//, '').trim();
 }
+function normalizeEventPath(value, repoRoot) {
+    const trimmed = normalizeRepoPath(value);
+    if (!trimmed)
+        return trimmed;
+    const absolute = (0, node_path_1.resolve)(repoRoot, trimmed);
+    const repoRelative = (0, node_path_1.relative)(repoRoot, absolute).replace(/\\/g, '/');
+    if (repoRelative && !repoRelative.startsWith('..') && !repoRelative.startsWith('/')) {
+        return normalizeRepoPath(repoRelative);
+    }
+    if (trimmed.startsWith('/')) {
+        const root = (0, node_path_1.resolve)(repoRoot).replace(/\\/g, '/').replace(/\/+$/, '');
+        const normalized = trimmed.replace(/\\/g, '/');
+        if (normalized.startsWith(`${root}/`)) {
+            return normalizeRepoPath(normalized.slice(root.length + 1));
+        }
+    }
+    return trimmed;
+}
+function runtimeCallDecision(event) {
+    const detail = event.detail && typeof event.detail === 'object'
+        ? event.detail
+        : null;
+    const decision = detail?.governanceDecision ?? detail?.decision;
+    if (decision === 'allow' || decision === 'deny' || decision === 'warn')
+        return decision;
+    return null;
+}
 function sha256Hex(input) {
     return (0, node_crypto_1.createHash)('sha256').update(input).digest('hex');
 }
@@ -209,6 +236,9 @@ function emptyEvidence() {
         allowedPreWriteCheckCount: 0,
         deniedPreWriteCheckCount: 0,
         postWriteObservationCount: 0,
+        cooperativeAllowCount: 0,
+        cooperativeDenyCount: 0,
+        latestCheckVerdict: null,
         latestEventAt: null,
     };
 }
@@ -223,10 +253,10 @@ function touchLatest(evidence, event) {
         evidence.latestEventAt = event.ts;
     }
 }
-function evidenceForSession(session, startedAt) {
+function evidenceForSession(session, startedAt, repoRoot) {
     const evidence = new Map();
     const forPath = (path) => {
-        const normalized = normalizeRepoPath(path);
+        const normalized = normalizeEventPath(path, repoRoot);
         const existing = evidence.get(normalized);
         if (existing)
             return existing;
@@ -237,30 +267,63 @@ function evidenceForSession(session, startedAt) {
     for (const event of session.events) {
         if (!eventTimestampAtOrAfter(event, startedAt))
             continue;
-        const path = typeof event.filePath === 'string' ? normalizeRepoPath(event.filePath) : '';
+        const path = typeof event.filePath === 'string'
+            ? normalizeEventPath(event.filePath, repoRoot)
+            : '';
         if (!path)
             continue;
         const item = forPath(path);
         if (event.type === 'agent_runtime_call' && runtimeEventType(event) === 'edit.before') {
             item.preWriteCallCount += 1;
+            const decision = runtimeCallDecision(event);
+            if (decision === 'allow' || decision === 'warn')
+                item.cooperativeAllowCount += 1;
+            if (decision === 'deny')
+                item.cooperativeDenyCount += 1;
             touchLatest(item, event);
         }
         else if (event.type === 'agent_runtime_call' && runtimeEventType(event) === 'edit.after') {
             item.postWriteObservationCount += 1;
             touchLatest(item, event);
         }
-        else if (event.type === 'check_ok' || event.type === 'check_warn') {
+        else if (event.type === 'check_ok') {
             item.allowedPreWriteCheckCount += 1;
+            item.latestCheckVerdict = 'ok';
+            touchLatest(item, event);
+        }
+        else if (event.type === 'check_warn') {
+            item.allowedPreWriteCheckCount += 1;
+            item.latestCheckVerdict = 'warn';
             touchLatest(item, event);
         }
         else if (event.type === 'check_block') {
             item.deniedPreWriteCheckCount += 1;
+            item.latestCheckVerdict = 'block';
             touchLatest(item, event);
         }
     }
     return evidence;
 }
+function toPublicEvidence(item) {
+    return {
+        preWriteCallCount: item.preWriteCallCount,
+        allowedPreWriteCheckCount: item.allowedPreWriteCheckCount,
+        deniedPreWriteCheckCount: item.deniedPreWriteCheckCount,
+        postWriteObservationCount: item.postWriteObservationCount,
+        latestEventAt: item.latestEventAt,
+    };
+}
 function classify(evidence) {
+    const latest = evidence.latestCheckVerdict;
+    if (latest === 'ok' || latest === 'warn')
+        return 'verified_prewrite';
+    if (latest === 'block')
+        return 'denied_but_changed';
+    if (evidence.cooperativeAllowCount > 0 && evidence.cooperativeDenyCount === 0) {
+        return 'verified_prewrite';
+    }
+    if (evidence.cooperativeDenyCount > 0)
+        return 'denied_but_changed';
     if (evidence.allowedPreWriteCheckCount > 0)
         return 'verified_prewrite';
     if (evidence.deniedPreWriteCheckCount > 0)
@@ -274,14 +337,14 @@ function classify(evidence) {
 function evaluateAgentGuard(repoRoot, artifact, session) {
     const generatedAt = new Date().toISOString();
     const current = captureAgentGuardSnapshot(repoRoot);
-    const evidence = evidenceForSession(session, artifact.startedAt);
+    const evidence = evidenceForSession(session, artifact.startedAt, repoRoot);
     const files = changedFiles(artifact.baseline.files, current)
         .map((change) => {
-        const item = evidence.get(change.path) || emptyEvidence();
+        const item = evidence.get(normalizeEventPath(change.path, repoRoot)) || emptyEvidence();
         return {
             ...change,
             classification: classify(item),
-            evidence: item,
+            evidence: toPublicEvidence(item),
         };
     });
     const summary = {

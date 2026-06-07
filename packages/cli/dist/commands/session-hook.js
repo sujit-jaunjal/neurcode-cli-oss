@@ -123,6 +123,10 @@ function normalizeHookFilePathForRepo(rawPath, repoRoot) {
     }
     return filePath.replace(/^\//, '');
 }
+function isPlanDeclaredTarget(session, filePath) {
+    const normalized = filePath.replace(/^\.\//, '').replace(/^\//, '');
+    return (session.contract.agentPlan?.expectedFiles ?? []).some((candidate) => candidate.replace(/^\.\//, '').replace(/^\//, '') === normalized);
+}
 /** Emit a diagnostic to stderr without breaking the hook exit code. */
 function diagnostic(msg) {
     process.stderr.write(`[neurcode] ${msg}\n`);
@@ -933,6 +937,15 @@ async function handleCheck(cmdCwd) {
     catch (err) {
         diagnostic(`check failed: ${err instanceof Error ? err.message : String(err)} — edit allowed`);
         process.exit(0);
+    }
+    if (result.verdict === 'block' && result.isApprovalRequired && isPlanDeclaredTarget(session, filePath)) {
+        const ownerNote = result.owners.length ? ` (owned by ${result.owners.join(', ')})` : '';
+        result = {
+            ...result,
+            message: `⏸ Neurcode: ${filePath} is declared in your active plan but requires CODEOWNERS approval${ownerNote}. ` +
+                'Approve the exact path before editing: neurcode_session_approve. ' +
+                'See neurcode_session_obligations or .cursor/rules/neurcode-session-scope.mdc for the full list.',
+        };
     }
     const boundaryVerdict = result.verdict;
     const intentCoherence = (0, governance_runtime_1.evaluateIntentCoherence)(session.contract, filePath);
