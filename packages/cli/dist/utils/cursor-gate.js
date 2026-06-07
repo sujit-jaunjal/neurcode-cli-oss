@@ -7,6 +7,7 @@ exports.emitCliVersionStaleWarning = emitCliVersionStaleWarning;
 exports.resolveCursorGateExitCode = resolveCursorGateExitCode;
 exports.evaluateCursorGate = evaluateCursorGate;
 exports.formatCursorGateCiErrors = formatCursorGateCiErrors;
+exports.ensureHookPinnedCli = ensureHookPinnedCli;
 exports.installCursorGateHook = installCursorGateHook;
 exports.doctorCursorGateHook = doctorCursorGateHook;
 const node_crypto_1 = require("node:crypto");
@@ -261,6 +262,29 @@ function formatCursorGateCiErrors(payload) {
     }
     return lines;
 }
+function hookPinnedCliDir(repoRoot) {
+    return (0, node_path_1.resolve)(repoRoot, '.neurcode', 'hooks-cli');
+}
+function hookPinnedCliPath(repoRoot) {
+    return (0, node_path_1.resolve)(hookPinnedCliDir(repoRoot), 'node_modules', '.bin', 'neurcode');
+}
+function ensureHookPinnedCli(repoRoot) {
+    const cliDir = hookPinnedCliDir(repoRoot);
+    const cliPath = hookPinnedCliPath(repoRoot);
+    if ((0, node_fs_1.existsSync)(cliPath)) {
+        return { ok: true, cliPath, message: `Pinned hook CLI present at ${cliPath}` };
+    }
+    (0, node_fs_1.mkdirSync)(cliDir, { recursive: true });
+    const install = (0, node_child_process_1.spawnSync)('npm', ['install', '--prefix', cliDir, '--silent', '--no-save', `@neurcode-ai/cli@${exports.MIN_CURSOR_GATE_CLI_VERSION}`], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (install.status !== 0 || !(0, node_fs_1.existsSync)(cliPath)) {
+        return {
+            ok: false,
+            cliPath,
+            message: install.stderr?.trim() || install.stdout?.trim() || 'Failed to install pinned hook CLI.',
+        };
+    }
+    return { ok: true, cliPath, message: `Installed pinned hook CLI at ${cliPath}` };
+}
 function buildCursorGateHookScript(hookKind) {
     const gitAction = hookKind === 'pre-push' ? 'push' : 'commit';
     const blockedLabel = hookKind === 'pre-push' ? 'push' : 'commit';
@@ -277,18 +301,21 @@ if [[ "\${NEURCODE_CURSOR_GATE_SKIP:-0}" == "1" ]]; then
 fi
 
 ROOT="\$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-CLI=""
-if command -v neurcode >/dev/null 2>&1; then
-  CLI="neurcode"
-elif command -v npx >/dev/null 2>&1; then
-  CLI="npx @neurcode-ai/cli"
+CLI=()
+PINNED_CLI="\$ROOT/.neurcode/hooks-cli/node_modules/.bin/neurcode"
+if [[ -x "\$PINNED_CLI" ]]; then
+  CLI=("\$PINNED_CLI")
+elif [[ -n "\${NEURCODE_CLI:-}" && -x "\${NEURCODE_CLI}" ]]; then
+  CLI=("\${NEURCODE_CLI}")
+elif command -v neurcode >/dev/null 2>&1 && neurcode cursor gate --help 2>&1 | grep -q 'Fail-closed'; then
+  CLI=(neurcode)
 else
-  echo "❌ Neurcode cursor gate: neurcode CLI not found. Install @neurcode-ai/cli or set NEURCODE_CURSOR_GATE_SKIP=1." >&2
+  echo "❌ Neurcode cursor gate: neurcode CLI not found or too old (need @neurcode-ai/cli@${exports.MIN_CURSOR_GATE_CLI_VERSION}+). Run: neurcode cursor gate install --force" >&2
   exit 1
 fi
 
 set +e
-OUTPUT=\$($CLI cursor gate --dir "\$ROOT" --json 2>&1)
+OUTPUT=\$("\${CLI[@]}" cursor gate --dir "\$ROOT" --json 2>&1)
 STATUS=\$?
 set -e
 
@@ -373,11 +400,18 @@ exec "${neurcodeHookPath}"
 function installCursorGateHook(input) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(input.dir || process.cwd());
     const hookKinds = resolveCursorGateHookKinds(input.hook);
+    const pinnedCli = ensureHookPinnedCli(repoRoot);
     const hooks = hookKinds.map((hookKind) => installSingleCursorGateHook({
         repoRoot,
         hookKind,
         force: input.force,
     }));
+    if (!pinnedCli.ok) {
+        for (const hook of hooks) {
+            hook.ok = false;
+            hook.message = `${hook.message} ${pinnedCli.message}`.trim();
+        }
+    }
     const setResult = runGit(['config', 'core.hooksPath', '.githooks'], repoRoot);
     const hooksPathConfigured = setResult.status === 0;
     for (const hook of hooks) {

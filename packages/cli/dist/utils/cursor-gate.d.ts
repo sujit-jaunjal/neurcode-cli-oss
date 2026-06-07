@@ -54,6 +54,11 @@ export declare function resolveCursorGateExitCode(input: {
 }): number;
 export declare function evaluateCursorGate(options: CursorGateEvaluateOptions): Promise<CursorGatePayload>;
 export declare function formatCursorGateCiErrors(payload: CursorGatePayload): string[];
+export declare function ensureHookPinnedCli(repoRoot: string): {
+    ok: boolean;
+    cliPath: string;
+    message: string;
+};
 export interface CursorGateInstallResult {
     ok: boolean;
     repoRoot: string;
