@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runtimeCloudStatusCommand = runtimeCloudStatusCommand;
+exports.runtimeHygieneCommand = runtimeHygieneCommand;
 exports.runtimeResetStaleCloudCommand = runtimeResetStaleCloudCommand;
 exports.runtimeCommand = runtimeCommand;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
@@ -238,6 +239,53 @@ async function runtimeCloudStatusCommand(options = {}) {
         process.exitCode = 1;
     }
 }
+async function runtimeHygieneCommand(options = {}) {
+    try {
+        const connection = (0, runtime_connection_1.loadRuntimeConnection)((0, v0_governance_1.resolveRepoRoot)(process.cwd()));
+        if (!connection) {
+            const payload = { ok: false, error: 'Repository is not paired with the Runtime Control Plane.' };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else
+                console.error(chalk.red(payload.error));
+            process.exitCode = 1;
+            return;
+        }
+        const client = buildClientForConnection(connection);
+        if (options.dryRun) {
+            const preview = await client.getRuntimeHygienePreview();
+            if (options.json) {
+                console.log(JSON.stringify(preview, null, 2));
+                return;
+            }
+            console.log(chalk.bold('Runtime hygiene preview'));
+            console.log(chalk.dim(`Orphaned approvals: ${preview.preview.orphanedApprovals}`));
+            console.log(chalk.dim(`Ghost repos:         ${preview.preview.ghostRepos}`));
+            console.log(chalk.dim(`Stale live sessions: ${preview.preview.staleLiveSessions}`));
+            return;
+        }
+        const response = await client.applyRuntimeHygiene({
+            dryRun: false,
+            reason: options.reason || 'Operator runtime hygiene from CLI',
+        });
+        if (options.json) {
+            console.log(JSON.stringify(response, null, 2));
+            return;
+        }
+        console.log(chalk.bold('Runtime hygiene applied'));
+        console.log(chalk.green(`Expired approvals: ${response.result.expiredApprovals}`));
+        console.log(chalk.green(`Removed ghost repos: ${response.result.removedGhostRepos.length}`));
+        console.log(chalk.green(`Finished stale sessions: ${response.result.finishedStaleSessions.length}`));
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json)
+            console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+        else
+            console.error(chalk.red(`Runtime hygiene failed: ${message}`));
+        process.exitCode = 1;
+    }
+}
 async function runtimeResetStaleCloudCommand(options = {}) {
     try {
         const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
@@ -354,6 +402,19 @@ function runtimeCommand(program) {
             sessionId: options.sessionId,
             repoKey: options.repoKey,
             dir: options.dir,
+            json: options.json === true,
+        });
+    });
+    runtime
+        .command('hygiene')
+        .description('Expire orphaned approvals, remove ghost repo pairings, and finish stale live sessions')
+        .option('--dry-run', 'Preview hygiene counts without mutating cloud state')
+        .option('--reason <text>', 'Operator cleanup reason')
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        await runtimeHygieneCommand({
+            dryRun: options.dryRun === true,
+            reason: options.reason,
             json: options.json === true,
         });
     });

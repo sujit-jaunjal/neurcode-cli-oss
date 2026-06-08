@@ -411,6 +411,21 @@ class ApiClient {
             },
         });
     }
+    async getRuntimeHygienePreview() {
+        const url = `${this.apiUrl}/api/v1/runtime/hygiene/preview`;
+        return this.makeRequest(url, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+        });
+    }
+    async applyRuntimeHygiene(input) {
+        const url = `${this.apiUrl}/api/v1/runtime/hygiene/apply`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(input || {}),
+        });
+    }
     async finishStaleRuntimeLiveSession(sessionId, input = {}) {
         const url = `${this.apiUrl}/api/v1/runtime/live-sessions/${encodeURIComponent(sessionId)}/finish-stale`;
         return this.makeRequest(url, {

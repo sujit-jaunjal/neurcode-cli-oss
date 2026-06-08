@@ -575,6 +575,36 @@ export declare class ApiClient {
         repoKey?: string;
     }): Promise<RuntimeEvidenceSummaryResponse>;
     getRuntimeOperationsStatus(): Promise<RuntimeOperationsStatusResponse>;
+    getRuntimeHygienePreview(): Promise<{
+        generatedAt: string;
+        preview: {
+            orphanedApprovals: number;
+            ghostRepos: number;
+            staleLiveSessions: number;
+        };
+        actor: {
+            canApply: boolean;
+        };
+    }>;
+    applyRuntimeHygiene(input?: {
+        dryRun?: boolean;
+        reason?: string;
+    }): Promise<{
+        ok: boolean;
+        generatedAt: string;
+        result: {
+            dryRun: boolean;
+            expiredApprovals: number;
+            removedGhostRepos: Array<{
+                repoKey: string;
+                name: string;
+            }>;
+            finishedStaleSessions: Array<{
+                sessionId: string;
+                repoKey: string;
+            }>;
+        };
+    }>;
     finishStaleRuntimeLiveSession(sessionId: string, input?: {
         repoKey?: string;
         reason?: string;
