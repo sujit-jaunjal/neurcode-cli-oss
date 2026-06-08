@@ -10,6 +10,7 @@ const config_1 = require("../config");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
 const v0_governance_1 = require("../utils/v0-governance");
+const runtime_identity_1 = require("./runtime-identity");
 let chalk;
 try {
     chalk = require('chalk');
@@ -390,6 +391,7 @@ function runtimeCommand(program) {
     const runtime = program
         .command('runtime')
         .description('Read-only runtime cloud verification for governed agent sessions');
+    (0, runtime_identity_1.registerRuntimeIdentityCommand)(runtime);
     runtime
         .command('cloud-status')
         .description('Read dashboard/runtime cloud state without mutating approvals or sessions')

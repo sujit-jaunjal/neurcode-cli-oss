@@ -7,6 +7,7 @@ const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const v0_governance_1 = require("../utils/v0-governance");
+const cli_entry_1 = require("../utils/cli-entry");
 const session_hook_1 = require("./session-hook");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
@@ -46,9 +47,7 @@ function parseJsonOutput(stdout) {
     return undefined;
 }
 function runCurrentCli(args, cwd, stdinText) {
-    const cliEntry = process.argv[1];
-    if (!cliEntry)
-        throw new Error('Unable to resolve the active Neurcode CLI entrypoint.');
+    const cliEntry = (0, cli_entry_1.getActiveCliEntry)();
     const child = (0, node_child_process_1.spawnSync)(process.execPath, [(0, node_path_1.resolve)(cliEntry), ...args], {
         cwd,
         input: stdinText,

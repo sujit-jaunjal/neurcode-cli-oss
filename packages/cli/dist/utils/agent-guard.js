@@ -2,10 +2,16 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AGENT_GUARD_SCHEMA_VERSION = void 0;
 exports.captureAgentGuardSnapshot = captureAgentGuardSnapshot;
+exports.snapshotMapFromFiles = snapshotMapFromFiles;
+exports.snapshotFilesFromMap = snapshotFilesFromMap;
+exports.hashRepoFile = hashRepoFile;
+exports.applyIncrementalSnapshotChanges = applyIncrementalSnapshotChanges;
 exports.createAgentGuardArtifact = createAgentGuardArtifact;
 exports.defaultAgentGuardPath = defaultAgentGuardPath;
 exports.writeAgentGuardArtifact = writeAgentGuardArtifact;
 exports.readAgentGuardArtifact = readAgentGuardArtifact;
+exports.evaluateAgentGuardFromLedger = evaluateAgentGuardFromLedger;
+exports.evaluateAgentGuardFromCurrent = evaluateAgentGuardFromCurrent;
 exports.evaluateAgentGuard = evaluateAgentGuard;
 exports.markAgentGuardFinished = markAgentGuardFinished;
 const node_crypto_1 = require("node:crypto");
@@ -67,23 +73,55 @@ function treeHash(files) {
 function captureAgentGuardSnapshot(repoRoot) {
     const files = [];
     for (const path of listRepoFiles(repoRoot)) {
-        const absolutePath = (0, node_path_1.resolve)(repoRoot, path);
-        try {
-            const stat = (0, node_fs_1.statSync)(absolutePath);
-            if (!stat.isFile())
-                continue;
-            files.push({
-                path,
-                digest: sha256Hex((0, node_fs_1.readFileSync)(absolutePath)),
-                size: stat.size,
-            });
-        }
-        catch {
-            // A file can disappear between git listing and read. The next evaluation
-            // will classify it from the stable baseline/current snapshot pair.
-        }
+        const hashed = hashRepoFile(repoRoot, path);
+        if (hashed)
+            files.push(hashed);
     }
     return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+function snapshotMapFromFiles(files) {
+    return snapshotMap(files);
+}
+function snapshotFilesFromMap(map) {
+    return [...map.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+function hashRepoFile(repoRoot, repoRelativePath) {
+    const path = normalizeRepoPath(repoRelativePath);
+    if (!path || isInternalPath(path))
+        return null;
+    const absolutePath = (0, node_path_1.resolve)(repoRoot, path);
+    try {
+        if (!(0, node_fs_1.existsSync)(absolutePath))
+            return null;
+        const stat = (0, node_fs_1.statSync)(absolutePath);
+        if (!stat.isFile())
+            return null;
+        return {
+            path,
+            digest: sha256Hex((0, node_fs_1.readFileSync)(absolutePath)),
+            size: stat.size,
+        };
+    }
+    catch {
+        return null;
+    }
+}
+function applyIncrementalSnapshotChanges(repoRoot, current, changedPaths) {
+    for (const rawPath of changedPaths) {
+        const path = normalizeRepoPath(rawPath);
+        if (!path || isInternalPath(path))
+            continue;
+        const absolutePath = (0, node_path_1.resolve)(repoRoot, path);
+        if (!(0, node_fs_1.existsSync)(absolutePath)) {
+            current.delete(path);
+            continue;
+        }
+        const hashed = hashRepoFile(repoRoot, path);
+        if (hashed)
+            current.set(path, hashed);
+        else
+            current.delete(path);
+    }
 }
 function createAgentGuardArtifact(input) {
     const startedAt = input.startedAt || new Date().toISOString();
@@ -378,11 +416,11 @@ function classify(evidence) {
         return 'observed_after_only';
     return 'unverified_write';
 }
-function evaluateAgentGuard(repoRoot, artifact, session) {
+function buildEvaluationFromChanges(repoRoot, artifact, session, changes) {
     const generatedAt = new Date().toISOString();
-    const current = captureAgentGuardSnapshot(repoRoot);
     const evidence = evidenceForSession(session, artifact.startedAt, repoRoot);
-    const files = changedFiles(artifact.baseline.files, current)
+    const files = [...changes]
+        .sort((left, right) => left.path.localeCompare(right.path))
         .map((change) => {
         const item = lookupEvidence(evidence, change.path, repoRoot);
         return {
@@ -421,6 +459,15 @@ function evaluateAgentGuard(repoRoot, artifact, session) {
             : 'Review unverified or denied-but-changed paths. Re-run agent checks before edits, or approve exact paths before retrying.',
         privacy: artifact.privacy,
     };
+}
+function evaluateAgentGuardFromLedger(repoRoot, artifact, session, changes) {
+    return buildEvaluationFromChanges(repoRoot, artifact, session, changes);
+}
+function evaluateAgentGuardFromCurrent(repoRoot, artifact, session, current) {
+    return buildEvaluationFromChanges(repoRoot, artifact, session, changedFiles(artifact.baseline.files, current));
+}
+function evaluateAgentGuard(repoRoot, artifact, session) {
+    return evaluateAgentGuardFromCurrent(repoRoot, artifact, session, captureAgentGuardSnapshot(repoRoot));
 }
 function markAgentGuardFinished(artifact, finishedAt = new Date().toISOString()) {
     return {

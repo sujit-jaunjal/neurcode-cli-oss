@@ -489,6 +489,7 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
         }, 1);
         return;
     }
+    (0, agent_guard_supervisor_1.stopSupervisorOnSessionCompletion)(repoRoot);
     await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, finished);
     output({
         ok: true,

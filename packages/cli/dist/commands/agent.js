@@ -6,9 +6,11 @@ const node_child_process_1 = require("node:child_process");
 const node_crypto_1 = require("node:crypto");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
+const cli_entry_1 = require("../utils/cli-entry");
 const v0_governance_1 = require("../utils/v0-governance");
 const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 const agent_guard_1 = require("../utils/agent-guard");
+const agent_guard_diff_engine_1 = require("../utils/agent-guard-diff-engine");
 const admission_artifact_1 = require("../utils/admission-artifact");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
@@ -1731,8 +1733,8 @@ function agentCommand(program) {
                     },
                 },
             });
-            const cliEntry = process.argv[1];
-            const supervisor = options.supervise !== false && cliEntry
+            const cliEntry = (0, cli_entry_1.getActiveCliEntry)();
+            const supervisor = options.supervise !== false
                 ? {
                     enabled: true,
                     ...(0, agent_guard_supervisor_1.startAgentGuardSupervisorDetached)({
@@ -1870,7 +1872,7 @@ function agentCommand(program) {
                     ? 'Agent guard finished: all changed files had allowed pre-write evidence.'
                     : 'Agent guard finished: attention required for unverified or denied writes.',
             });
-            const supervisorStop = (0, agent_guard_supervisor_1.stopAgentGuardSupervisor)(repoRoot, session.sessionId);
+            const supervisorStop = (0, agent_guard_supervisor_1.stopAgentGuardSupervisor)(repoRoot);
             if (supervisorStop.state) {
                 await recordSupervisorEvent({
                     repoRoot,
@@ -1936,13 +1938,11 @@ function agentCommand(program) {
         .action(async (options) => {
         try {
             const { repoRoot, guardRead, artifact, session } = requireGuardContext(options);
-            if (!process.argv[1])
-                throw new Error('Unable to resolve the active Neurcode CLI entrypoint.');
             const supervisor = (0, agent_guard_supervisor_1.startAgentGuardSupervisorDetached)({
                 repoRoot,
                 sessionId: session.sessionId,
                 guardPath: guardRead.path,
-                cliEntry: process.argv[1],
+                cliEntry: (0, cli_entry_1.getActiveCliEntry)(),
                 debounceMs: options.debounceMs,
             });
             await recordSupervisorEvent({
@@ -2001,7 +2001,7 @@ function agentCommand(program) {
         .action(async (options) => {
         try {
             const { repoRoot, artifact, session } = requireGuardContext(options);
-            const stopped = (0, agent_guard_supervisor_1.stopAgentGuardSupervisor)(repoRoot, session.sessionId);
+            const stopped = (0, agent_guard_supervisor_1.stopAgentGuardSupervisor)(repoRoot);
             if (stopped.state) {
                 await recordSupervisorEvent({
                     repoRoot,
@@ -2040,7 +2040,8 @@ function agentCommand(program) {
         .option('--json-lines', 'Emit source-free JSON line updates')
         .action(async (options) => {
         try {
-            const { repoRoot, guardRead, session } = requireGuardContext(options);
+            const { repoRoot, guardRead, artifact, session } = requireGuardContext(options);
+            const diffEngine = agent_guard_diff_engine_1.AgentGuardDiffEngine.seedFromArtifact(artifact);
             const finalState = await (0, agent_guard_supervisor_1.runAgentGuardSupervisor)({
                 repoRoot,
                 sessionId: session.sessionId,
@@ -2049,11 +2050,19 @@ function agentCommand(program) {
                 heartbeatMs: options.heartbeatMs,
                 exitAfterMs: options.exitAfterMs,
                 evaluateImmediately: options.initialEvaluation !== false,
-                onEvaluate: async () => {
-                    const { evaluation } = await evaluateAndPublishGuardStatus({
-                        dir: repoRoot,
-                        sessionId: session.sessionId,
-                        guardPath: guardRead.path,
+                onEvaluate: async ({ changedPaths }) => {
+                    if (changedPaths.length > 0) {
+                        diffEngine.applyPaths(changedPaths);
+                    }
+                    const evaluation = (0, agent_guard_1.evaluateAgentGuardFromLedger)(repoRoot, artifact, session, diffEngine.getLedgerChanges());
+                    await publishGuardEvaluation({
+                        repoRoot,
+                        artifactPath: guardRead.path,
+                        evaluation,
+                        eventType: 'agent_guard_status',
+                        message: evaluation.pass
+                            ? 'Agent guard status: changed files have allowed pre-write evidence.'
+                            : 'Agent guard status: attention required for unverified or denied writes.',
                     });
                     if (options.jsonLines)
                         emitJsonLine({ type: 'evaluation', evaluation });

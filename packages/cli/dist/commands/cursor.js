@@ -8,6 +8,7 @@ const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 const agent_guard_1 = require("../utils/agent-guard");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
+const cli_entry_1 = require("../utils/cli-entry");
 const runtime_live_1 = require("../utils/runtime-live");
 const cursor_gate_1 = require("../utils/cursor-gate");
 const governance_health_1 = require("../utils/governance-health");
@@ -172,15 +173,12 @@ async function runCursorOnboard(options) {
                 },
             },
         });
-        const cliEntry = process.argv[1];
-        const supervisorStarted = cliEntry
-            ? (0, agent_guard_supervisor_1.startAgentGuardSupervisorDetached)({
-                repoRoot: launch.repoRoot,
-                sessionId: launch.session.sessionId,
-                guardPath,
-                cliEntry,
-            })
-            : null;
+        const supervisorStarted = (0, agent_guard_supervisor_1.startAgentGuardSupervisorDetached)({
+            repoRoot: launch.repoRoot,
+            sessionId: launch.session.sessionId,
+            guardPath,
+            cliEntry: (0, cli_entry_1.getActiveCliEntry)(),
+        });
         guardPayload = {
             sessionId: launch.session.sessionId,
             adapter: launch.agent.adapter,

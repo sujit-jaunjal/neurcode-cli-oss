@@ -27,7 +27,7 @@ export interface CliInvocationResult {
     command: string[];
 }
 /**
- * Spawn a sub-invocation of the current Neurcode CLI process (`process.argv[1]`)
+ * Spawn a sub-invocation of the active Neurcode CLI entry (resolved via cli-runtime).
  * with `--json` appended and parse the JSON output.
  */
 export declare function runCliJson(commandArgs: string[], options?: {

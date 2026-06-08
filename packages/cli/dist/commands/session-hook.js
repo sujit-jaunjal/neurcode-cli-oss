@@ -40,6 +40,7 @@ const bash_command_analysis_1 = require("../utils/bash-command-analysis");
 const diff_parser_1 = require("@neurcode-ai/diff-parser");
 const structural_understanding_1 = require("../utils/structural-understanding");
 const consequence_nudges_1 = require("../utils/consequence-nudges");
+const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 // ── Helpers ───────────────────────────────────────────────────────────────────
 /** Read the full hook JSON from stdin, or return {} on any error. */
 function readHookInput() {
@@ -1192,6 +1193,10 @@ async function handleFinish(cmdCwd) {
             : undefined);
         if (!finished)
             return;
+        const supervisorStop = (0, agent_guard_supervisor_1.stopSupervisorOnSessionCompletion)(repoRoot);
+        if (supervisorStop.signaled) {
+            diagnostic(`agent guard supervisor stop requested (pid ${supervisorStop.state?.pid ?? 'unknown'})`);
+        }
         const blockCount = finished.events.filter((e) => e.type === 'check_block').length;
         const warnCount = finished.events.filter((e) => e.type === 'check_warn').length;
         const unresolvedLine = pendingApproval

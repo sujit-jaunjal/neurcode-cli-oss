@@ -81,6 +81,7 @@ const admission_1 = require("./commands/admission");
 const demo_1 = require("./commands/demo");
 const execution_bus_1 = require("./utils/execution-bus");
 const execution_actions_1 = require("./utils/execution-actions");
+const cli_startup_1 = require("./utils/cli-startup");
 // Read version from package.json
 let version = '0.1.2'; // fallback
 try {
@@ -91,6 +92,10 @@ try {
 catch (error) {
     // If we can't read package.json, use fallback
 }
+(0, cli_startup_1.runStartupConsistencyChecks)({
+    bundledCliDir: (0, path_1.join)(__dirname),
+    argv: process.argv,
+});
 const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
     {

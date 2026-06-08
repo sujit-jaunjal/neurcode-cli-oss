@@ -73,6 +73,10 @@ export interface AgentGuardEvaluation {
     privacy: AgentGuardArtifact['privacy'];
 }
 export declare function captureAgentGuardSnapshot(repoRoot: string): AgentGuardFileSnapshot[];
+export declare function snapshotMapFromFiles(files: AgentGuardFileSnapshot[]): Map<string, AgentGuardFileSnapshot>;
+export declare function snapshotFilesFromMap(map: Map<string, AgentGuardFileSnapshot>): AgentGuardFileSnapshot[];
+export declare function hashRepoFile(repoRoot: string, repoRelativePath: string): AgentGuardFileSnapshot | null;
+export declare function applyIncrementalSnapshotChanges(repoRoot: string, current: Map<string, AgentGuardFileSnapshot>, changedPaths: string[]): void;
 export declare function createAgentGuardArtifact(input: {
     repoRoot: string;
     sessionId: string;
@@ -87,6 +91,11 @@ export declare function readAgentGuardArtifact(input: {
     sessionId?: string;
     artifactPath?: string;
 }): AgentGuardReadResult;
+export declare function evaluateAgentGuardFromLedger(repoRoot: string, artifact: AgentGuardArtifact, session: GovernanceSession, changes: Array<{
+    path: string;
+    changeType: AgentGuardChangeType;
+}>): AgentGuardEvaluation;
+export declare function evaluateAgentGuardFromCurrent(repoRoot: string, artifact: AgentGuardArtifact, session: GovernanceSession, current: AgentGuardFileSnapshot[]): AgentGuardEvaluation;
 export declare function evaluateAgentGuard(repoRoot: string, artifact: AgentGuardArtifact, session: GovernanceSession): AgentGuardEvaluation;
 export declare function markAgentGuardFinished(artifact: AgentGuardArtifact, finishedAt?: string): AgentGuardArtifact;
 //# sourceMappingURL=agent-guard.d.ts.map

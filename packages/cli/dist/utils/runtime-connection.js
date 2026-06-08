@@ -11,6 +11,7 @@ const crypto_1 = require("crypto");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const gitignore_1 = require("./gitignore");
+const cli_entry_1 = require("./cli-entry");
 const CONNECTION_FILE = 'connection.json';
 function connectionDir(repoRoot) {
     return (0, path_1.join)(repoRoot, '.neurcode');
@@ -110,9 +111,7 @@ function triggerRuntimeAutoSync(repoRoot) {
         return { started: false, reason: 'disabled by env' };
     if (envFlag(process.env.NEURCODE_AUTO_SYNC_CHILD))
         return { started: false, reason: 'already in sync child' };
-    const cliEntry = process.argv[1];
-    if (!cliEntry)
-        return { started: false, reason: 'missing cli entrypoint' };
+    const cliEntry = (0, cli_entry_1.getActiveCliEntry)();
     updateRuntimeConnection(repoRoot, (current) => ({
         ...current,
         autoSync: {
@@ -139,6 +138,7 @@ function triggerRuntimeAutoSync(repoRoot) {
         stdio: 'ignore',
         env: {
             ...process.env,
+            ...(0, cli_entry_1.cliSpawnEnv)(),
             NEURCODE_AUTO_SYNC_CHILD: '1',
         },
     });

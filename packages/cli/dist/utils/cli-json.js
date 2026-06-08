@@ -16,6 +16,7 @@ exports.runCliJson = runCliJson;
 exports.emitJson = emitJson;
 exports.loadChalk = loadChalk;
 const child_process_1 = require("child_process");
+const cli_entry_1 = require("./cli-entry");
 /* -------------------------------------------------------------------------- */
 /*  ANSI / JSON helpers                                                       */
 /* -------------------------------------------------------------------------- */
@@ -144,7 +145,7 @@ function asViolationsCount(record) {
     return value.length;
 }
 /**
- * Spawn a sub-invocation of the current Neurcode CLI process (`process.argv[1]`)
+ * Spawn a sub-invocation of the active Neurcode CLI entry (resolved via cli-runtime).
  * with `--json` appended and parse the JSON output.
  */
 async function runCliJson(commandArgs, options) {
@@ -153,12 +154,13 @@ async function runCliJson(commandArgs, options) {
     const stderrChunks = [];
     const cwd = options?.cwd ?? process.cwd();
     const exitCode = await new Promise((resolvePromise, reject) => {
-        const child = (0, child_process_1.spawn)(process.execPath, [process.argv[1], ...args], {
+        const child = (0, child_process_1.spawn)(process.execPath, [(0, cli_entry_1.getActiveCliEntry)(), ...args], {
             cwd,
             env: {
                 ...process.env,
                 CI: process.env.CI || 'true',
                 FORCE_COLOR: '0',
+                ...(0, cli_entry_1.cliSpawnEnv)(),
                 ...(options?.env ?? {}),
             },
             stdio: ['ignore', 'pipe', 'pipe'],
