@@ -18,8 +18,9 @@ const node_child_process_1 = require("node:child_process");
 const contracts_1 = require("@neurcode-ai/contracts");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const agent_guard_1 = require("./agent-guard");
-const v0_governance_1 = require("./v0-governance");
+const cursor_mcp_agent_1 = require("./cursor-mcp-agent");
 const runtime_live_1 = require("./runtime-live");
+const v0_governance_1 = require("./v0-governance");
 exports.CURSOR_GATE_SCHEMA_VERSION = 'neurcode.cursor-gate.v1';
 exports.MIN_CURSOR_GATE_CLI_VERSION = '0.15.8';
 function readBundledCliVersion() {
@@ -551,11 +552,20 @@ function doctorCursorGateHook(input) {
             message: cliVersionWarning.message,
         });
     }
+    const mcpAdoption = (0, cursor_mcp_agent_1.inspectCursorMcpAdoptionPath)(repoRoot);
+    for (const check of mcpAdoption.checks) {
+        checks.push({
+            id: check.id,
+            status: check.status === 'warn' ? 'fail' : check.status,
+            message: check.message,
+        });
+    }
     return {
         ok: checks.every((check) => check.status === 'pass'),
         checks,
         repoRoot,
         cliVersionWarning,
+        mcpAdoption,
     };
 }
 //# sourceMappingURL=cursor-gate.js.map

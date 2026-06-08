@@ -239,8 +239,31 @@ function emptyEvidence() {
         cooperativeAllowCount: 0,
         cooperativeDenyCount: 0,
         latestCheckVerdict: null,
+        latestCheckAt: null,
+        latestCooperativeAt: null,
         latestEventAt: null,
     };
+}
+function isNewerTimestamp(candidate, current) {
+    if (!current)
+        return true;
+    const candidateMs = Date.parse(candidate);
+    const currentMs = Date.parse(current);
+    if (!Number.isFinite(candidateMs) || !Number.isFinite(currentMs))
+        return true;
+    return candidateMs >= currentMs;
+}
+function lookupEvidence(evidence, path, repoRoot) {
+    const normalized = normalizeEventPath(path, repoRoot);
+    const direct = evidence.get(normalized);
+    if (direct)
+        return direct;
+    for (const [key, item] of evidence.entries()) {
+        if (key === normalized || key.endsWith(`/${normalized}`) || normalized.endsWith(`/${key}`)) {
+            return item;
+        }
+    }
+    return emptyEvidence();
 }
 function touchLatest(evidence, event) {
     if (!evidence.latestEventAt) {
@@ -276,8 +299,12 @@ function evidenceForSession(session, startedAt, repoRoot) {
         if (event.type === 'agent_runtime_call' && runtimeEventType(event) === 'edit.before') {
             item.preWriteCallCount += 1;
             const decision = runtimeCallDecision(event);
-            if (decision === 'allow' || decision === 'warn')
+            if (decision === 'allow' || decision === 'warn') {
                 item.cooperativeAllowCount += 1;
+                if (isNewerTimestamp(event.ts, item.latestCooperativeAt)) {
+                    item.latestCooperativeAt = event.ts;
+                }
+            }
             if (decision === 'deny')
                 item.cooperativeDenyCount += 1;
             touchLatest(item, event);
@@ -288,17 +315,26 @@ function evidenceForSession(session, startedAt, repoRoot) {
         }
         else if (event.type === 'check_ok') {
             item.allowedPreWriteCheckCount += 1;
-            item.latestCheckVerdict = 'ok';
+            if (isNewerTimestamp(event.ts, item.latestCheckAt)) {
+                item.latestCheckVerdict = 'ok';
+                item.latestCheckAt = event.ts;
+            }
             touchLatest(item, event);
         }
         else if (event.type === 'check_warn') {
             item.allowedPreWriteCheckCount += 1;
-            item.latestCheckVerdict = 'warn';
+            if (isNewerTimestamp(event.ts, item.latestCheckAt)) {
+                item.latestCheckVerdict = 'warn';
+                item.latestCheckAt = event.ts;
+            }
             touchLatest(item, event);
         }
         else if (event.type === 'check_block') {
             item.deniedPreWriteCheckCount += 1;
-            item.latestCheckVerdict = 'block';
+            if (isNewerTimestamp(event.ts, item.latestCheckAt)) {
+                item.latestCheckVerdict = 'block';
+                item.latestCheckAt = event.ts;
+            }
             touchLatest(item, event);
         }
     }
@@ -315,8 +351,16 @@ function toPublicEvidence(item) {
 }
 function classify(evidence) {
     const latest = evidence.latestCheckVerdict;
+    const cooperativeAfterLatestCheck = Boolean(evidence.latestCooperativeAt &&
+        (!evidence.latestCheckAt || evidence.latestCooperativeAt >= evidence.latestCheckAt));
     if (latest === 'ok' || latest === 'warn')
         return 'verified_prewrite';
+    if (latest === 'block' &&
+        evidence.cooperativeAllowCount > 0 &&
+        evidence.cooperativeDenyCount === 0 &&
+        cooperativeAfterLatestCheck) {
+        return 'verified_prewrite';
+    }
     if (latest === 'block')
         return 'denied_but_changed';
     if (evidence.cooperativeAllowCount > 0 && evidence.cooperativeDenyCount === 0) {
@@ -340,7 +384,7 @@ function evaluateAgentGuard(repoRoot, artifact, session) {
     const evidence = evidenceForSession(session, artifact.startedAt, repoRoot);
     const files = changedFiles(artifact.baseline.files, current)
         .map((change) => {
-        const item = evidence.get(normalizeEventPath(change.path, repoRoot)) || emptyEvidence();
+        const item = lookupEvidence(evidence, change.path, repoRoot);
         return {
             ...change,
             classification: classify(item),

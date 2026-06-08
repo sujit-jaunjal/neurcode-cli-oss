@@ -18,7 +18,7 @@ const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
 const node_child_process_1 = require("node:child_process");
 exports.MCP_SERVER_PACKAGE = '@neurcode-ai/mcp-server';
-exports.MIN_MCP_SERVER_VERSION = '0.2.4';
+exports.MIN_MCP_SERVER_VERSION = '0.2.5';
 /** Legacy relative paths fail when Cursor MCP cwd is not the workspace root. */
 exports.PINNED_MCP_ENTRY_RELATIVE = 'mcp-server/node_modules/@neurcode-ai/mcp-server/dist/index.js';
 function pinnedMcpBaseRoot(repoRoot, global = false) {

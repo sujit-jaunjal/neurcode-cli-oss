@@ -7,6 +7,7 @@ const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const v0_governance_1 = require("../utils/v0-governance");
+const session_hook_1 = require("./session-hook");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const runtime_live_1 = require("../utils/runtime-live");
@@ -146,14 +147,18 @@ function payloadKeys(payload) {
 }
 function recordAgentRuntimeCall(event, session, governanceDecision) {
     const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)(event.adapter);
+    const rawPath = typeof event.payload.filePath === 'string'
+        ? event.payload.filePath
+        : typeof event.payload.path === 'string'
+            ? event.payload.path
+            : undefined;
+    const normalizedPath = rawPath
+        ? (0, session_hook_1.normalizeHookFilePathForRepo)(rawPath, event.cwd)
+        : undefined;
     (0, governance_runtime_1.appendEvent)(event.cwd, session.sessionId, {
         type: 'agent_runtime_call',
         ts: new Date().toISOString(),
-        filePath: typeof event.payload.filePath === 'string'
-            ? event.payload.filePath
-            : typeof event.payload.path === 'string'
-                ? event.payload.path
-                : undefined,
+        filePath: normalizedPath,
         detail: {
             schemaVersion: 'neurcode.agent-runtime-call.v1',
             adapter: event.adapter,

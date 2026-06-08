@@ -1,5 +1,5 @@
 export declare const MCP_SERVER_PACKAGE: "@neurcode-ai/mcp-server";
-export declare const MIN_MCP_SERVER_VERSION: "0.2.4";
+export declare const MIN_MCP_SERVER_VERSION: "0.2.5";
 /** Legacy relative paths fail when Cursor MCP cwd is not the workspace root. */
 export declare const PINNED_MCP_ENTRY_RELATIVE: "mcp-server/node_modules/@neurcode-ai/mcp-server/dist/index.js";
 export declare function pinnedMcpBaseRoot(repoRoot: string, global?: boolean): string;

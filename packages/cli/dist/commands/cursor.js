@@ -11,6 +11,7 @@ const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const runtime_live_1 = require("../utils/runtime-live");
 const cursor_gate_1 = require("../utils/cursor-gate");
 const governance_health_1 = require("../utils/governance-health");
+const cursor_pilot_readiness_1 = require("../utils/cursor-pilot-readiness");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const node_crypto_1 = require("node:crypto");
 const api_client_1 = require("../api-client");
@@ -542,6 +543,43 @@ Exit codes (CI contract):
                 console.log('');
             }
             if (!report.ok)
+                process.exitCode = 1;
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    cmd
+        .command('pilot-readiness')
+        .description('Full Cursor pilot readiness gate (repo + MCP + guard correlation)')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--json', 'Output machine-readable JSON')
+        .action((options) => {
+        try {
+            const report = (0, cursor_pilot_readiness_1.runCursorPilotReadinessCheck)(options.dir);
+            if (options.json) {
+                emitJson(report);
+            }
+            else {
+                console.log('');
+                console.log(chalk.bold('Neurcode cursor pilot readiness'));
+                console.log(report.ready ? chalk.green('Ready for pilot') : chalk.red('Not ready'));
+                console.log(chalk.dim(`Health verdict: ${report.health.verdict} · MCP ok: ${report.mcp.ok}`));
+                if (report.blockers.length > 0) {
+                    console.log('');
+                    console.log(chalk.bold('Blockers'));
+                    for (const blocker of report.blockers)
+                        console.log(chalk.red(`  ${blocker}`));
+                }
+                if (report.warnings.length > 0) {
+                    console.log('');
+                    console.log(chalk.bold('Warnings'));
+                    for (const warning of report.warnings)
+                        console.log(chalk.yellow(`  ${warning}`));
+                }
+                console.log('');
+            }
+            if (!report.ready)
                 process.exitCode = 1;
         }
         catch (error) {

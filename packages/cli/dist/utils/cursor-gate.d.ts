@@ -1,5 +1,6 @@
 import { type AgentGuardPostureSummary } from '@neurcode-ai/governance-runtime';
 import { type AgentGuardEvaluation } from './agent-guard';
+import { inspectCursorMcpAdoptionPath } from './cursor-mcp-agent';
 export declare const CURSOR_GATE_SCHEMA_VERSION: "neurcode.cursor-gate.v1";
 export declare const MIN_CURSOR_GATE_CLI_VERSION: "0.15.8";
 export type CursorGateHookKind = 'pre-push' | 'pre-commit';
@@ -92,6 +93,7 @@ export interface CursorGateDoctorResult {
     }>;
     repoRoot: string;
     cliVersionWarning?: CliVersionStaleWarning | null;
+    mcpAdoption?: ReturnType<typeof inspectCursorMcpAdoptionPath>;
 }
 export declare function doctorCursorGateHook(input: {
     dir?: string;
