@@ -116,9 +116,11 @@ async function runCursorOnboard(options) {
         },
     ];
     const doctorOk = doctorChecks.every((check) => check.status === 'pass');
-    let guardPayload;
+    // Session first; bootstrap artifacts (hooks, rules) before guard baseline so
+    // strict onboard does not leave .githooks as denied-but-changed on fresh clones.
+    let launch;
     if (shouldStartGuard && doctorOk) {
-        const launch = await (0, agent_session_launcher_1.launchAgentSession)({
+        launch = await (0, agent_session_launcher_1.launchAgentSession)({
             agent: 'cursor',
             goal,
             dir: repoRoot,
@@ -127,6 +129,24 @@ async function runCursorOnboard(options) {
             forceProfile: false,
             actor: 'local_cli_cursor_onboard',
         });
+    }
+    const gateInstall = shouldInstallGate
+        ? (0, cursor_gate_1.installCursorGateHook)({
+            dir: repoRoot,
+            force: false,
+            hook: strictMode ? 'both' : 'pre-push',
+        })
+        : undefined;
+    const strictRules = strictMode ? (0, session_allowlist_rules_1.writeStrictCursorRules)({ repoRoot }) : undefined;
+    let scopeRules;
+    if (shouldWriteScopeRules && launch?.session.sessionId) {
+        const session = (0, governance_runtime_1.loadSession)(repoRoot, launch.session.sessionId);
+        if (session) {
+            scopeRules = (0, session_allowlist_rules_1.writeSessionScopeRules)({ repoRoot, session });
+        }
+    }
+    let guardPayload;
+    if (launch && shouldStartGuard && doctorOk) {
         const artifact = (0, agent_guard_1.createAgentGuardArtifact)({
             repoRoot: launch.repoRoot,
             sessionId: launch.session.sessionId,
@@ -169,21 +189,6 @@ async function runCursorOnboard(options) {
                 ? { enabled: true, ...supervisorStarted }
                 : { enabled: false },
         };
-    }
-    const gateInstall = shouldInstallGate
-        ? (0, cursor_gate_1.installCursorGateHook)({
-            dir: repoRoot,
-            force: false,
-            hook: strictMode ? 'both' : 'pre-push',
-        })
-        : undefined;
-    const strictRules = strictMode ? (0, session_allowlist_rules_1.writeStrictCursorRules)({ repoRoot }) : undefined;
-    let scopeRules;
-    if (shouldWriteScopeRules && guardPayload?.sessionId) {
-        const session = (0, governance_runtime_1.loadSession)(repoRoot, String(guardPayload.sessionId));
-        if (session) {
-            scopeRules = (0, session_allowlist_rules_1.writeSessionScopeRules)({ repoRoot, session });
-        }
     }
     const payload = {
         schemaVersion: 'neurcode.cursor-onboard.v1',

@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CURSOR_MCP_AGENT_SCHEMA_VERSION = void 0;
+exports.projectIdMatchesRepo = projectIdMatchesRepo;
 exports.inspectCursorAgentMcpSurface = inspectCursorAgentMcpSurface;
 exports.inspectCursorMcpAdoptionPath = inspectCursorMcpAdoptionPath;
 const node_fs_1 = require("node:fs");
@@ -14,8 +15,16 @@ exports.CURSOR_MCP_AGENT_SCHEMA_VERSION = 'neurcode.cursor-mcp-agent.v1';
 function cursorProjectsDir() {
     return (0, node_path_1.join)((0, node_os_1.homedir)(), '.cursor', 'projects');
 }
-function repoPathSlug(repoRoot) {
-    return (0, node_path_1.resolve)(repoRoot).replace(/\\/g, '/').replace(/\//g, '-').replace(/^-/, '');
+function normalizeProjectKey(value) {
+    return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+function repoProjectMatchKeys(repoRoot) {
+    const segments = (0, node_path_1.resolve)(repoRoot).replace(/\\/g, '/').split('/').filter(Boolean);
+    const keys = new Set();
+    for (let length = Math.min(5, segments.length); length >= 1; length -= 1) {
+        keys.add(normalizeProjectKey(segments.slice(-length).join('-')));
+    }
+    return [...keys].filter(Boolean);
 }
 function mcpsDirHasNeurcodeTools(mcpsDir) {
     if (!(0, node_fs_1.existsSync)(mcpsDir))
@@ -32,36 +41,55 @@ function mcpsDirHasNeurcodeTools(mcpsDir) {
     }
     return false;
 }
+function projectIdMatchesRepo(projectId, repoRoot) {
+    const normalizedProject = normalizeProjectKey(projectId);
+    return repoProjectMatchKeys(repoRoot).some((key) => key.length >= 4 && normalizedProject.includes(key));
+}
 function inspectCursorAgentMcpSurface(repoRoot) {
     const projectsDir = cursorProjectsDir();
     if (!(0, node_fs_1.existsSync)(projectsDir)) {
         return {
             neurcodeInAgentToolList: false,
+            neurcodeInRepoWorkspace: false,
             matchingProjectIds: [],
+            globalOnlyProjectIds: [],
             message: 'Cursor has not indexed MCP tools for this machine yet (.cursor/projects missing).',
         };
     }
-    const slug = repoPathSlug(repoRoot);
     const matchingProjectIds = [];
-    let neurcodeInAgentToolList = false;
+    const globalOnlyProjectIds = [];
+    let neurcodeInAnyWorkspace = false;
     for (const projectId of (0, node_fs_1.readdirSync)(projectsDir)) {
         const mcpsDir = (0, node_path_1.join)(projectsDir, projectId, 'mcps');
         if (!mcpsDirHasNeurcodeTools(mcpsDir))
             continue;
-        neurcodeInAgentToolList = true;
-        if (projectId.includes(slug.slice(-48)) || projectId.endsWith(slug.slice(-32))) {
+        neurcodeInAnyWorkspace = true;
+        if (projectIdMatchesRepo(projectId, repoRoot)) {
             matchingProjectIds.push(projectId);
         }
+        else if (/^(empty-window|global)/i.test(projectId)) {
+            globalOnlyProjectIds.push(projectId);
+        }
     }
-    if (neurcodeInAgentToolList && matchingProjectIds.length === 0) {
-        matchingProjectIds.push('user-neurcode-or-global');
+    const neurcodeInRepoWorkspace = matchingProjectIds.length > 0;
+    const neurcodeInAgentToolList = neurcodeInRepoWorkspace || neurcodeInAnyWorkspace;
+    let message;
+    if (neurcodeInRepoWorkspace) {
+        message = `Neurcode MCP indexed for this repo workspace (${matchingProjectIds.join(', ')}).`;
+    }
+    else if (neurcodeInAnyWorkspace) {
+        message =
+            'Neurcode MCP is indexed in another Cursor workspace, not this repo. Open this repository in Cursor and reload the window.';
+    }
+    else {
+        message = 'Neurcode MCP is not present in Cursor Agent tool list. Enable Home MCP and reload the window.';
     }
     return {
         neurcodeInAgentToolList,
+        neurcodeInRepoWorkspace,
         matchingProjectIds,
-        message: neurcodeInAgentToolList
-            ? `Neurcode MCP indexed in Cursor Agent (${matchingProjectIds.join(', ') || 'Home MCP'}).`
-            : 'Neurcode MCP is not present in Cursor Agent tool list. Enable Home MCP and reload the window.',
+        globalOnlyProjectIds,
+        message,
     };
 }
 function runPinnedMcpDoctor(repoRoot) {
@@ -111,16 +139,22 @@ function inspectCursorMcpAdoptionPath(dir) {
     }
     checks.push(runPinnedMcpDoctor(repoRoot));
     const agentSurface = inspectCursorAgentMcpSurface(repoRoot);
+    const agentToolsStatus = agentSurface.neurcodeInRepoWorkspace
+        ? 'pass'
+        : agentSurface.neurcodeInAgentToolList
+            ? 'warn'
+            : 'fail';
     checks.push({
         id: 'cursor_agent_mcp_tools',
-        status: agentSurface.neurcodeInAgentToolList ? 'pass' : 'fail',
+        status: agentToolsStatus,
         message: agentSurface.message,
     });
-    if (!agentSurface.neurcodeInAgentToolList) {
-        remediation.push('Reload Cursor after onboarding; confirm user-neurcode appears under Agent MCP tools');
-        remediation.push('If tools stay missing, verify ~/.cursor/mcp.json uses absolute node path to pinned mcp-server');
+    if (!agentSurface.neurcodeInRepoWorkspace) {
+        remediation.push('Open this repository root in Cursor, enable Home MCP, then Developer: Reload Window');
+        remediation.push('Confirm ~/.cursor/projects/<this-repo>/mcps/user-neurcode/tools includes neurcode_agent_edit_before');
     }
     const failCount = checks.filter((check) => check.status === 'fail').length;
+    const warnCount = checks.filter((check) => check.status === 'warn').length;
     return {
         schemaVersion: exports.CURSOR_MCP_AGENT_SCHEMA_VERSION,
         ok: failCount === 0,
@@ -128,6 +162,7 @@ function inspectCursorMcpAdoptionPath(dir) {
         checks,
         remediation: [...new Set(remediation)],
         neurcodeInAgentToolList: agentSurface.neurcodeInAgentToolList,
+        neurcodeInRepoWorkspace: agentSurface.neurcodeInRepoWorkspace,
     };
 }
 //# sourceMappingURL=cursor-mcp-agent.js.map

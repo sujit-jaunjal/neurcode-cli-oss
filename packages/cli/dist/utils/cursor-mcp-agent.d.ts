@@ -11,10 +11,14 @@ export interface CursorMcpAgentInspection {
     checks: CursorMcpAgentCheck[];
     remediation: string[];
     neurcodeInAgentToolList: boolean;
+    neurcodeInRepoWorkspace: boolean;
 }
+export declare function projectIdMatchesRepo(projectId: string, repoRoot: string): boolean;
 export declare function inspectCursorAgentMcpSurface(repoRoot: string): {
     neurcodeInAgentToolList: boolean;
+    neurcodeInRepoWorkspace: boolean;
     matchingProjectIds: string[];
+    globalOnlyProjectIds: string[];
     message: string;
 };
 export declare function inspectCursorMcpAdoptionPath(dir?: string): CursorMcpAgentInspection;

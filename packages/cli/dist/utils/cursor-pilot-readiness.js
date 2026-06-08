@@ -20,6 +20,7 @@ function runCursorPilotReadinessCheck(dir) {
     const warnings = [
         ...repo.warnings,
         ...health.checks.filter((check) => check.status === 'warn').map((check) => `[${check.id}] ${check.message}`),
+        ...mcp.checks.filter((check) => check.status === 'warn').map((check) => `[${check.id}] ${check.message}`),
     ];
     return {
         schemaVersion: exports.CURSOR_PILOT_READINESS_SCHEMA_VERSION,

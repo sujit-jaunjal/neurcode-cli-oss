@@ -293,7 +293,11 @@ async function probeApiRuntimeCompatibility(apiUrl) {
             errors.push(`API runtimeContractVersion mismatch (expected ${contracts_1.RUNTIME_COMPATIBILITY_CONTRACT_VERSION}, got ${runtimeContractVersion || 'missing'}).`);
         }
         if (cliJsonContractVersion !== contracts_1.CLI_JSON_CONTRACT_VERSION) {
-            errors.push(`API cliJsonContractVersion mismatch (expected ${contracts_1.CLI_JSON_CONTRACT_VERSION}, got ${cliJsonContractVersion || 'missing'}).`);
+            const contractOrder = (0, contracts_1.compareCalendarContractVersion)(contracts_1.CLI_JSON_CONTRACT_VERSION, cliJsonContractVersion);
+            const apiContractAhead = contractOrder === -1;
+            if (!apiContractAhead) {
+                errors.push(`API cliJsonContractVersion mismatch (expected ${contracts_1.CLI_JSON_CONTRACT_VERSION}, got ${cliJsonContractVersion || 'missing'}).`);
+            }
         }
         if (component !== 'api') {
             errors.push(`API compatibility payload component must be "api" (received ${component || 'missing'}).`);
