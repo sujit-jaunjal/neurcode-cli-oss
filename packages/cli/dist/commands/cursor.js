@@ -507,6 +507,8 @@ Exit codes (CI contract):
                     throw new Error('Repository is not paired with Runtime Control Plane. Run activate --connect first.');
                 }
                 const config = (0, config_1.loadConfig)();
+                config.orgId = connection.organizationId;
+                config.projectId = connection.projectId || config.projectId;
                 config.apiKey = (0, config_1.requireApiKey)(connection.organizationId);
                 const client = new api_client_1.ApiClient(config);
                 const fingerprint = (0, node_crypto_1.createHash)('sha256').update(repoRoot).digest('hex').slice(0, 32);
