@@ -60,7 +60,6 @@ exports.AGENT_GUARD_SUPERVISOR_IGNORED_PATTERNS = [
     '**/dist/**',
     '**/build/**',
     '**/coverage/**',
-    '**/tmp/**',
     '**/logs/**',
     '**/.cache/**',
     '**/__pycache__/**',
