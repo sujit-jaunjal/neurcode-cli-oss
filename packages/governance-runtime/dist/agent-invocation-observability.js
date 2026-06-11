@@ -77,6 +77,21 @@ function latestProtocolEvent(events) {
         decision: latest.decision ?? latest.verdict ?? null,
     };
 }
+function hasRuntimeCall(events, runtimeEventType) {
+    return events.some((event) => event.type === 'agent_runtime_call' && callEventType(event) === runtimeEventType);
+}
+function explicitProtocolCallCount(events, runtimeCalls, planEvents) {
+    let count = runtimeCalls.length;
+    if (events.some((event) => event.type === 'agent_handshake') && !hasRuntimeCall(events, 'session.handshake')) {
+        count += 1;
+    }
+    for (const event of planEvents) {
+        const expectedRuntimeType = event.type === 'plan_amended' ? 'plan.amend' : 'plan.capture';
+        if (!hasRuntimeCall(events, expectedRuntimeType))
+            count += 1;
+    }
+    return count;
+}
 function buildAgentInvocationSummary(session) {
     const events = Array.isArray(session.events) ? session.events : [];
     const launch = latestOf(events, (event) => event.type === 'agent_session_launched');
@@ -209,7 +224,7 @@ function buildAgentInvocationSummary(session) {
         handshakeSeen: Boolean(handshake) || isHardDeny,
         planCaptured,
         planBeforeFirstEdit,
-        explicitRuntimeCallCount: runtimeCalls.length,
+        explicitRuntimeCallCount: explicitProtocolCallCount(events, runtimeCalls, planEvents),
         editBeforeCallCount: editBeforeCalls.length,
         preWriteCheckCount: checkEvents.length,
         allowedCheckCount: okEvents.length,
