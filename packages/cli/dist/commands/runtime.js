@@ -87,7 +87,7 @@ function approvalVisibleForPath(approvals, sessionId, path) {
     return approvals.some((approval) => {
         const sessionMatches = !sessionId || approval.sessionId === sessionId;
         const pathMatches = !path || approval.path === path;
-        return sessionMatches && pathMatches && ['pending', 'applied', 'failed', 'denied', 'revoked', 'expired'].includes(approval.status);
+        return sessionMatches && pathMatches && ['requested', 'pending', 'applied', 'failed', 'denied', 'revoked', 'expired'].includes(approval.status);
     });
 }
 function nextActionFor(payload) {
