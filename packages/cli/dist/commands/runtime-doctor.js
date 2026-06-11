@@ -163,6 +163,7 @@ function runtimeDoctorCommand(options = {}) {
     // the hook that is actually executing) against what is installed on disk now.
     const activeHookEntrypoint = h.installed ? h.entrypoint : ch.installed ? ch.entrypoint : h.entrypoint || ch.entrypoint;
     const activeHookLabel = h.installed ? 'Claude Code' : ch.installed ? 'GitHub Copilot' : 'agent';
+    const hardHooksInstalled = h.installed || ch.installed;
     const installedFingerprint = activeHookEntrypoint ? (0, hook_heartbeat_1.fingerprintEntrypoint)(activeHookEntrypoint) : null;
     let liveness;
     const RESTART_MSG = 'restart or reload the coding agent in this repo before demoing governance.';
@@ -199,10 +200,15 @@ function runtimeDoctorCommand(options = {}) {
     }
     else {
         liveness = {
-            status: heartbeat ? 'pass' : 'skip',
+            status: hardHooksInstalled ? 'warn' : heartbeat ? 'pass' : 'skip',
             message: heartbeat
-                ? `No active session. ${describeHeartbeat(heartbeat)}.`
-                : 'No live hook heartbeat yet (no governed Claude Code session has run in this repo).',
+                ? `No active governed session is running. ${describeHeartbeat(heartbeat)}. Protected paths fail closed, but task scope and approval evidence need a live session.`
+                : hardHooksInstalled
+                    ? `Hooks are installed, but no active governed session has run in this repo yet. Protected paths fail closed; ordinary writes are advisory-only until a session starts.`
+                    : 'No live hook heartbeat yet (no governed Claude Code session has run in this repo).',
+            recommendation: hardHooksInstalled
+                ? `Start or restart ${activeHookLabel} in this repo and begin a governed task before demoing protected-path enforcement.`
+                : undefined,
         };
     }
     checks.push({ id: 'hook_liveness', label: 'Live hook heartbeat / restart', ...liveness });
@@ -234,14 +240,18 @@ function runtimeDoctorCommand(options = {}) {
     checks.push({
         id: 'active_session',
         label: 'Active governance session',
-        status: !sessionActive ? 'skip' : overBroadScope ? 'warn' : 'pass',
+        status: !sessionActive ? hardHooksInstalled ? 'warn' : 'skip' : overBroadScope ? 'warn' : 'pass',
         message: !sessionActive
-            ? 'No active governed agent session. This is normal until an agent session starts.'
+            ? hardHooksInstalled
+                ? 'No active governed agent session. Hooks are installed, so protected paths fail closed, but ordinary writes are only advisory and dashboard decisions cannot be applied to a session yet.'
+                : 'No active governed agent session. This is normal until an agent session starts.'
             : overBroadScope
                 ? `Session ${activeSession.sessionId} is active but its scope is over-broad: approvalRequiredGlobs includes "**", so every file needs approval. This usually means the goal/prompt was very long or path-heavy.`
                 : `Session ${activeSession.sessionId} is active (${activeSession.contract.scopeMode} scope).`,
         recommendation: !sessionActive
-            ? undefined
+            ? hardHooksInstalled
+                ? 'Start a governed agent session before outreach/demo, then rerun `neurcode runtime doctor --json` and confirm active_session is pass.'
+                : undefined
             : overBroadScope
                 ? 'For demos, start sessions with a short, crisp goal (e.g. "Add retry with backoff to the export task") so scope stays tight.'
                 : 'Run `neurcode status` for live session details.',

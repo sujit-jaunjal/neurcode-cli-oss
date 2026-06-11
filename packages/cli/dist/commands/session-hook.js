@@ -22,6 +22,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolveSessionForHook = resolveSessionForHook;
 exports.normalizeHookFilePathForRepo = normalizeHookFilePathForRepo;
 exports.hookFilePathCandidates = hookFilePathCandidates;
+exports.evaluateNoActiveSessionWrite = evaluateNoActiveSessionWrite;
 exports.shouldKeepSessionActiveForPendingApproval = shouldKeepSessionActiveForPendingApproval;
 exports.sessionHookCommand = sessionHookCommand;
 const child_process_1 = require("child_process");
@@ -391,6 +392,32 @@ function blockContext(input) {
                 : input.blockType === 'profile_or_runtime_health_block'
                     ? 'Refresh the governance profile or restart the active governed session.'
                     : 'Retry as separate single-file edits so each path can be governed.'),
+    };
+}
+const NO_ACTIVE_SESSION_SCOPE_SENTINEL = '__neurcode_no_active_session_scope__';
+function evaluateNoActiveSessionWrite(repoRoot, filePath) {
+    const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot).profile;
+    const result = (0, governance_runtime_1.checkFileBoundary)({
+        filePath,
+        allowedGlobs: [NO_ACTIVE_SESSION_SCOPE_SENTINEL],
+        ownershipRules: profile.ownershipBoundaries,
+        sensitiveGlobs: profile.sensitiveBoundaries.map((boundary) => boundary.glob),
+        approvalRequiredGlobs: profile.approvalRequiredPaths,
+        approvedPaths: [],
+        approvalGrants: [],
+        scopeMode: 'explicit',
+        localMode: 'strict',
+    });
+    const protectedPath = result.isApprovalRequired || result.isSensitive || result.owners.length > 0;
+    const ownerNote = result.owners.length ? ` Owners: ${result.owners.join(', ')}.` : '';
+    const message = protectedPath
+        ? `⏸ Neurcode: no active governed session is running, so protected path ${filePath} cannot be checked or approved safely.${ownerNote} Start a governed session with \`neurcode session-hook start\`/agent activation, or run \`neurcode doctor --runtime\` for recovery before retrying.`
+        : `No active governed session at ${repoRoot}; ${filePath} is not a detected protected path and is allowed advisory-only.`;
+    return {
+        block: protectedPath,
+        filePath,
+        result,
+        message,
     };
 }
 function blockTypeFromEvent(event) {
@@ -818,13 +845,53 @@ async function handleCheck(cmdCwd) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
     (0, hook_heartbeat_1.recordHookHeartbeat)({ repoRoot, eventType: 'check' });
     const requestedSessionId = sessionIdFromHookInput(hookInput);
+    const toolName = hookInput['tool_name'] ||
+        hookInput['toolName'] ||
+        '';
+    const toolInput = hookInput['tool_input'] ??
+        hookInput['toolInput'] ??
+        {};
     const resolution = resolveSessionForHook(repoRoot, requestedSessionId);
     const activeSession = resolution.session;
     if (!activeSession) {
-        // No active session — not governed, pass through
+        const rawPaths = hookFilePathCandidates(hookInput);
+        const bashLike = /^(bash|shell|runCommand|run_command|runInTerminal|run_in_terminal|terminal)$/i.test(toolName);
+        const bashAnalysis = bashLike
+            ? (0, bash_command_analysis_1.analyzeBashCommand)(toolInput['command'] ||
+                toolInput['cmd'] ||
+                hookInput['command'] ||
+                '')
+            : null;
+        const candidatePaths = bashAnalysis?.mutates
+            ? bashAnalysis.targetPaths
+            : rawPaths;
+        const normalizedPaths = Array.from(new Set(candidatePaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot))));
+        for (const filePath of normalizedPaths) {
+            try {
+                const decision = evaluateNoActiveSessionWrite(repoRoot, filePath);
+                if (decision.block) {
+                    denyPreToolUse(decision.message, {
+                        ...(decision.result.approvalContext ? { approvalContext: decision.result.approvalContext } : {}),
+                        blockContext: blockContext({
+                            blockType: 'profile_or_runtime_health_block',
+                            filePath,
+                            message: decision.message,
+                            suggestedApprovalPath: decision.result.approvalContext?.suggestedApprovalPath,
+                            owners: decision.result.owners,
+                            runtimeMode: 'strict',
+                            nextAction: 'Start or resume a governed Neurcode session, then retry this protected path.',
+                        }),
+                    });
+                }
+            }
+            catch (error) {
+                diagnostic(`no-active-session protected-path check skipped: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        const targetNote = normalizedPaths.length > 0 ? ` for ${normalizedPaths.join(', ')}` : '';
         diagnostic(requestedSessionId
-            ? `no active session ${requestedSessionId} at ${repoRoot} — edit allowed (ungoverned)`
-            : `no active session at ${repoRoot} — edit allowed (ungoverned)`);
+            ? `no active session ${requestedSessionId} at ${repoRoot} — edit allowed advisory-only${targetNote}`
+            : `no active session at ${repoRoot} — edit allowed advisory-only${targetNote}`);
         process.exit(0);
         return;
     }
@@ -890,12 +957,6 @@ async function handleCheck(cmdCwd) {
     // ── Extract the target file path ─────────────────────────────────────────
     // Claude Code PreToolUse payload shape:
     //   { tool_name, tool_input: { path, ... }, cwd, ... }
-    const toolName = hookInput['tool_name'] ||
-        hookInput['toolName'] ||
-        '';
-    const toolInput = hookInput['tool_input'] ??
-        hookInput['toolInput'] ??
-        {};
     if (/^(bash|shell|runCommand|run_command|runInTerminal|run_in_terminal|terminal)$/i.test(toolName)) {
         const command = toolInput['command'] ||
             toolInput['cmd'] ||

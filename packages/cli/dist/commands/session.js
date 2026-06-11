@@ -187,6 +187,15 @@ function resolveUnderstandingDiff(repoRoot, options) {
 function loadLocalGovernanceSession(repoRoot, sessionId) {
     return sessionId ? (0, governance_runtime_1.loadSession)(repoRoot, sessionId) : (0, governance_runtime_1.loadActiveSession)(repoRoot);
 }
+function normalizeApprovalPathForCloudMatch(repoRoot, inputPath) {
+    const normalized = inputPath.trim().replace(/\\/g, '/');
+    if (!normalized)
+        return normalized;
+    if ((0, node_path_1.isAbsolute)(normalized)) {
+        return (0, node_path_1.relative)(repoRoot, normalized).replace(/\\/g, '/').replace(/^\.\//, '');
+    }
+    return normalized.replace(/^\.\//, '').replace(/^\//, '');
+}
 function latestEventTimestamp(session) {
     return [...session.events]
         .reverse()
@@ -635,7 +644,25 @@ async function approveGovernanceSessionCommand(options = {}) {
     }
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     try {
-        const result = (0, governance_runtime_1.approveSession)(repoRoot, path, options.reason, options.sessionId);
+        const sessionId = options.sessionId || (0, governance_runtime_1.loadActiveSession)(repoRoot)?.sessionId;
+        const normalizedPath = normalizeApprovalPathForCloudMatch(repoRoot, path);
+        const matchingCloudApproval = sessionId
+            ? await (0, runtime_live_1.findRuntimeLiveApprovalRequest)(repoRoot, sessionId, normalizedPath)
+            : null;
+        const result = (0, governance_runtime_1.approveSession)(repoRoot, path, {
+            reason: options.reason,
+            sessionId: options.sessionId,
+            source: matchingCloudApproval ? 'dashboard' : 'local_cli',
+            approvedBy: matchingCloudApproval?.requestedBy || null,
+            requestId: matchingCloudApproval?.id || null,
+            expiresAt: matchingCloudApproval?.expiresAt || undefined,
+        });
+        if (matchingCloudApproval?.id) {
+            (0, runtime_live_1.queueRuntimeLiveApprovalAppliedAck)(repoRoot, result.sessionId, matchingCloudApproval, {
+                appliedPath: result.approvedPath,
+                expiresAt: result.expiresAt,
+            });
+        }
         const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
         if (session) {
             (0, session_allowlist_rules_1.refreshSessionScopeRules)({ dir: repoRoot, sessionId: session.sessionId });

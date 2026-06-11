@@ -1,5 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.normalizeRuntimeActionStatus = normalizeRuntimeActionStatus;
+exports.runtimeActionApiStatus = runtimeActionApiStatus;
+exports.filterRuntimeActionsForStatus = filterRuntimeActionsForStatus;
 exports.runtimeCloudStatusCommand = runtimeCloudStatusCommand;
 exports.runtimeHygieneCommand = runtimeHygieneCommand;
 exports.runtimeResetStaleCloudCommand = runtimeResetStaleCloudCommand;
@@ -47,10 +50,19 @@ function parseRuntimeActionLimit(value) {
     const parsed = parseRuntimeActionNumber(value, 50, 100);
     return parsed < 1 ? 50 : parsed;
 }
+const ACTIONABLE_RUNTIME_ACTION_STATUSES = new Set(['requested', 'pending']);
 function normalizeRuntimeActionStatus(value) {
-    const status = firstString(value) || 'pending';
-    const allowed = new Set(['all', 'requested', 'pending', 'applied', 'denied', 'revoked', 'failed', 'expired']);
-    return allowed.has(status) ? status : 'pending';
+    const status = firstString(value) || 'actionable';
+    const allowed = new Set(['actionable', 'all', 'requested', 'pending', 'applied', 'denied', 'revoked', 'failed', 'expired']);
+    return allowed.has(status) ? status : 'actionable';
+}
+function runtimeActionApiStatus(status) {
+    return status === 'actionable' ? 'all' : status;
+}
+function filterRuntimeActionsForStatus(items, status) {
+    if (status !== 'actionable')
+        return items;
+    return items.filter((item) => ACTIONABLE_RUNTIME_ACTION_STATUSES.has(item.status));
 }
 function unique(values) {
     return [...new Set(values.filter((value) => value.trim().length > 0))];
@@ -460,22 +472,25 @@ async function runtimeActionsListCommand(options = {}) {
         const repoKey = options.repoKey || connection.repo.repoKey;
         const sessionId = firstString(options.sessionId) || activeSession?.sessionId || null;
         const status = normalizeRuntimeActionStatus(options.status);
+        const apiStatus = runtimeActionApiStatus(status);
         const limit = parseRuntimeActionLimit(options.limit);
         const offset = parseRuntimeActionNumber(options.offset, 0, 10_000);
-        const [approvals, scopeAmendments] = await Promise.all([
-            client.getRuntimeControlPlaneApprovals({ repoKey, sessionId: sessionId || undefined, status, limit, offset }),
-            client.getRuntimeControlPlaneScopeAmendments({ repoKey, sessionId: sessionId || undefined, status, limit, offset }),
+        const [approvalsResponse, scopeAmendmentsResponse] = await Promise.all([
+            client.getRuntimeControlPlaneApprovals({ repoKey, sessionId: sessionId || undefined, status: apiStatus, limit, offset }),
+            client.getRuntimeControlPlaneScopeAmendments({ repoKey, sessionId: sessionId || undefined, status: apiStatus, limit, offset }),
         ]);
+        const approvals = filterRuntimeActionsForStatus(approvalsResponse.approvals, status);
+        const scopeAmendments = filterRuntimeActionsForStatus(scopeAmendmentsResponse.scopeAmendments, status);
         const payload = {
             ok: true,
             repoRoot,
             repo: connection.repo,
             sessionId,
-            approvals: approvals.approvals,
-            scopeAmendments: scopeAmendments.scopeAmendments,
+            approvals,
+            scopeAmendments,
             pageInfo: {
-                approvals: approvals.pageInfo || null,
-                scopeAmendments: scopeAmendments.pageInfo || null,
+                approvals: approvalsResponse.pageInfo || null,
+                scopeAmendments: scopeAmendmentsResponse.pageInfo || null,
             },
             fallbackCommand: 'neurcode runtime actions apply',
             privacy: {
@@ -488,12 +503,12 @@ async function runtimeActionsListCommand(options = {}) {
             console.log(JSON.stringify(payload, null, 2));
             return;
         }
-        console.log(chalk.bold(status === 'pending' ? 'Pending runtime actions' : 'Runtime actions'));
+        console.log(chalk.bold(status === 'actionable' ? 'Actionable runtime actions' : status === 'pending' ? 'Pending runtime actions' : 'Runtime actions'));
         console.log(chalk.dim(`Repo:     ${connection.repo.name} (${connection.repo.repoKey})`));
         console.log(chalk.dim(`Session:  ${sessionId || 'all visible sessions'}`));
         console.log(chalk.dim(`Filter:   status=${status} limit=${limit} offset=${offset}`));
         if (payload.approvals.length === 0 && payload.scopeAmendments.length === 0) {
-            console.log(chalk.green(status === 'pending' ? 'No pending local runtime actions.' : 'No runtime actions matched the filter.'));
+            console.log(chalk.green(status === 'actionable' ? 'No requested or pending local runtime actions.' : status === 'pending' ? 'No pending local runtime actions.' : 'No runtime actions matched the filter.'));
             return;
         }
         for (const approval of payload.approvals) {
@@ -685,10 +700,10 @@ function runtimeCommand(program) {
         .description('List and apply pending dashboard runtime actions for the local session');
     actions
         .command('list')
-        .description('List pending exact approvals and scope amendments for this repo')
+        .description('List actionable exact approvals and scope amendments for this repo')
         .option('--session-id <id>', 'Governance session ID (default: active local session)')
         .option('--repo-key <key>', 'Runtime repo key (default: paired repo)')
-        .option('--status <status>', 'Action status filter (default: pending; use all for the bounded ledger)')
+        .option('--status <status>', 'Action status filter (default: actionable=requested+pending; use all for the bounded ledger)')
         .option('--limit <n>', 'Max actions per kind to list (default: 50, max: 100)')
         .option('--offset <n>', 'Pagination offset per kind (default: 0)')
         .option('--dir <path>', 'Repository root (default: current directory)')

@@ -16,6 +16,11 @@ interface RuntimeActionOptions extends RuntimeCloudStatusOptions {
     status?: string;
 }
 type RuntimeLocalMode = 'strict' | 'advisory' | 'paused';
+export declare function normalizeRuntimeActionStatus(value: unknown): string;
+export declare function runtimeActionApiStatus(status: string): string;
+export declare function filterRuntimeActionsForStatus<T extends {
+    status: string;
+}>(items: T[], status: string): T[];
 export declare function runtimeCloudStatusCommand(options?: RuntimeCloudStatusOptions): Promise<void>;
 export interface RuntimeHygieneOptions {
     dryRun?: boolean;

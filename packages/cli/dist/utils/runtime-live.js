@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.publishRuntimeLiveStatus = publishRuntimeLiveStatus;
 exports.flushRuntimeLiveOutbox = flushRuntimeLiveOutbox;
+exports.findRuntimeLiveApprovalRequest = findRuntimeLiveApprovalRequest;
+exports.queueRuntimeLiveApprovalAppliedAck = queueRuntimeLiveApprovalAppliedAck;
 exports.applyPendingRuntimeLiveActions = applyPendingRuntimeLiveActions;
 exports.applyPendingRuntimeLiveApprovals = applyPendingRuntimeLiveApprovals;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
@@ -294,6 +296,12 @@ async function fetchPendingApprovals(repoRoot, sessionId) {
         return [];
     }
 }
+async function findRuntimeLiveApprovalRequest(repoRoot, sessionId, path) {
+    const approvals = await fetchPendingApprovals(repoRoot, sessionId);
+    return approvals.find((approval) => approval.path === path &&
+        (approval.status === 'requested' || approval.status === 'pending') &&
+        Boolean(approval.id)) || null;
+}
 async function fetchPendingScopeAmendments(repoRoot, sessionId) {
     const auth = runtimeAuth(repoRoot);
     if (!auth)
@@ -315,6 +323,13 @@ function queueApprovalAcknowledgement(repoRoot, sessionId, approval, body) {
     (0, runtime_outbox_1.enqueueRuntimeApprovalAck)(repoRoot, sessionId, {
         approvalId: approval.id,
         body,
+    });
+}
+function queueRuntimeLiveApprovalAppliedAck(repoRoot, sessionId, approval, body) {
+    queueApprovalAcknowledgement(repoRoot, sessionId, approval, {
+        status: 'applied',
+        appliedPath: body.appliedPath,
+        expiresAt: body.expiresAt,
     });
 }
 function queueScopeAmendmentAcknowledgement(repoRoot, sessionId, amendment, body) {

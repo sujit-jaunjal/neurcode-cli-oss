@@ -1,6 +1,17 @@
 import { type GovernanceSession } from '@neurcode-ai/governance-runtime';
 import { type RuntimeOutboxStatus } from './runtime-outbox';
 import type { ProfileFreshnessSignal } from './v0-governance';
+export interface RuntimeLiveApproval {
+    id: string | null;
+    sessionId: string;
+    path: string;
+    reason?: string | null;
+    status: string;
+    expiresAt?: string | null;
+    requestedBy?: string | null;
+    revokedBy?: string | null;
+    revocationReason?: string | null;
+}
 export declare function publishRuntimeLiveStatus(repoRoot: string, session: GovernanceSession, options?: {
     profileFreshness?: ProfileFreshnessSignal;
 }): Promise<{
@@ -25,6 +36,11 @@ export declare function flushRuntimeLiveOutbox(repoRoot: string, options?: {
     timeoutMs?: number;
     force?: boolean;
 }): Promise<RuntimeLiveOutboxFlushResult>;
+export declare function findRuntimeLiveApprovalRequest(repoRoot: string, sessionId: string, path: string): Promise<RuntimeLiveApproval | null>;
+export declare function queueRuntimeLiveApprovalAppliedAck(repoRoot: string, sessionId: string, approval: RuntimeLiveApproval, body: {
+    appliedPath: string;
+    expiresAt?: string | null;
+}): void;
 export declare function applyPendingRuntimeLiveActions(repoRoot: string, sessionId: string): Promise<{
     applied: number;
     revoked: number;

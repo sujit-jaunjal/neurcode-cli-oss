@@ -18,7 +18,7 @@
  *   plan-coherence policy returns 'block', we deny — intentional enforcement.
  */
 import type { Command } from 'commander';
-import { type GovernanceSession, type RuntimeBlockType } from '@neurcode-ai/governance-runtime';
+import { checkFileBoundary, type GovernanceSession, type RuntimeBlockType } from '@neurcode-ai/governance-runtime';
 export interface HookSessionResolution {
     session: GovernanceSession | null;
     requestedSessionId?: string;
@@ -27,6 +27,13 @@ export interface HookSessionResolution {
 export declare function resolveSessionForHook(repoRoot: string, requestedSessionId?: string): HookSessionResolution;
 export declare function normalizeHookFilePathForRepo(rawPath: string, repoRoot: string): string;
 export declare function hookFilePathCandidates(hookInput: Record<string, unknown>): string[];
+export interface NoActiveSessionWriteDecision {
+    block: boolean;
+    filePath: string;
+    result: ReturnType<typeof checkFileBoundary>;
+    message: string;
+}
+export declare function evaluateNoActiveSessionWrite(repoRoot: string, filePath: string): NoActiveSessionWriteDecision;
 export declare function shouldKeepSessionActiveForPendingApproval(session: GovernanceSession, pendingApproval: {
     filePath: string;
     suggestedApprovalPath?: string | null;
