@@ -259,6 +259,7 @@ const EMPTY_GOVERNANCE_CONFIG = {
     safeSupportGlobs: [],
     ignoredGlobs: [],
     planCoherence: 'warn',
+    localMode: 'advisory',
     architectureObligations: { mode: 'warn', ruleModes: {} },
 };
 function normalizeStringArray(value, field, errors) {
@@ -287,6 +288,14 @@ function normalizePlanCoherence(value, errors) {
         return value;
     errors.push('planCoherence must be one of: off, warn, block');
     return 'warn';
+}
+function normalizeLocalMode(value, errors) {
+    if (value === undefined || value === null || value === '')
+        return 'advisory';
+    if (value === 'strict' || value === 'advisory' || value === 'paused')
+        return value;
+    errors.push('localMode must be one of: strict, advisory, paused');
+    return 'advisory';
 }
 function governanceConfigPath(repoRoot) {
     return (0, path_1.join)(repoRoot, '.neurcode', 'governance.json');
@@ -319,6 +328,7 @@ function readRuntimeGovernanceConfig(repoRoot) {
         safeSupportGlobs: normalizeStringArray(parsed.safeSupportGlobs, 'safeSupportGlobs', errors),
         ignoredGlobs: normalizeStringArray(parsed.ignoredGlobs, 'ignoredGlobs', errors),
         planCoherence: normalizePlanCoherence(parsed.planCoherence, errors),
+        localMode: normalizeLocalMode(parsed.localMode, errors),
         architectureObligations: (0, governance_runtime_1.normalizeArchitectureObligationPolicy)(parsed.architectureObligations),
     };
     return {

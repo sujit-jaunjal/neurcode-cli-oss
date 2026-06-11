@@ -351,15 +351,91 @@ function hookFilePathCandidates(hookInput) {
     }
     return Array.from(new Set(candidates));
 }
-function latestUnresolvedApprovalBlock(session) {
+function runtimeMode(session) {
+    return session.contract.runtimeMode === 'strict' ||
+        session.contract.runtimeMode === 'paused' ||
+        session.contract.runtimeMode === 'advisory'
+        ? session.contract.runtimeMode
+        : 'strict';
+}
+function blockContext(input) {
+    const isApproval = input.blockType === 'approval_required_boundary';
+    const isScope = input.blockType === 'scope_violation_or_task_expansion';
+    return {
+        schemaVersion: 'neurcode.runtime-block.v1',
+        blockType: input.blockType,
+        filePath: input.filePath || null,
+        message: input.message || null,
+        runtimeMode: input.runtimeMode || null,
+        operatorActionKind: isApproval
+            ? 'exact_path_approval'
+            : isScope
+                ? 'scope_amendment'
+                : input.blockType === 'profile_or_runtime_health_block'
+                    ? 'runtime_health_recovery'
+                    : 'split_tool_call',
+        operatorActionLabel: isApproval
+            ? 'Approve exact path / Deny'
+            : isScope
+                ? 'Approve task expansion / Amend scope / Deny'
+                : input.blockType === 'profile_or_runtime_health_block'
+                    ? 'Refresh or restart runtime'
+                    : 'Split into one file per tool call',
+        suggestedApprovalPath: isApproval ? input.suggestedApprovalPath || input.filePath || null : null,
+        owners: input.owners || [],
+        proposalId: input.proposalId || null,
+        nextAction: input.nextAction || (isApproval
+            ? 'Approve only the exact path for this session, or deny the write.'
+            : isScope
+                ? 'Accept the pending scope amendment or re-plan locally, then retry the write.'
+                : input.blockType === 'profile_or_runtime_health_block'
+                    ? 'Refresh the governance profile or restart the active governed session.'
+                    : 'Retry as separate single-file edits so each path can be governed.'),
+    };
+}
+function blockTypeFromEvent(event) {
+    const detail = event.detail || {};
+    const context = detail.blockContext;
+    if (context && typeof context === 'object') {
+        const value = context.blockType;
+        if (value === 'approval_required_boundary' ||
+            value === 'scope_violation_or_task_expansion' ||
+            value === 'profile_or_runtime_health_block' ||
+            value === 'multi_file_or_tool_shape_block') {
+            return value;
+        }
+    }
+    if (detail.approvalContext)
+        return 'approval_required_boundary';
+    if (detail.profileFreshness)
+        return 'profile_or_runtime_health_block';
+    if (detail.reason === 'multi_file_tool_call_requires_split')
+        return 'multi_file_or_tool_shape_block';
+    return 'scope_violation_or_task_expansion';
+}
+function latestUnresolvedActionableBlock(session) {
     for (let i = session.events.length - 1; i >= 0; i -= 1) {
         const event = session.events[i];
+        if (event.type === 'check_ok' || event.type === 'check_warn' || event.type === 'plan_amended') {
+            return null;
+        }
         if (event.type !== 'check_block')
             continue;
-        const context = event.detail?.approvalContext;
+        const detail = event.detail;
+        const context = detail?.approvalContext;
         const blockedPath = event.filePath || context?.blockedPath || context?.suggestedApprovalPath;
         if (!blockedPath)
             continue;
+        const blockType = blockTypeFromEvent(event);
+        if (blockType !== 'approval_required_boundary') {
+            return {
+                filePath: blockedPath,
+                blockType,
+                suggestedApprovalPath: detail?.blockContext?.suggestedApprovalPath || null,
+                proposalId: detail?.blockContext?.proposalId || null,
+                message: event.message || null,
+            };
+        }
         const verdict = (0, governance_runtime_1.checkFileBoundary)({
             filePath: blockedPath,
             allowedGlobs: session.contract.allowedGlobs,
@@ -369,11 +445,14 @@ function latestUnresolvedApprovalBlock(session) {
             approvedPaths: session.contract.approvedPaths,
             approvalGrants: session.contract.approvalGrants,
             scopeMode: session.contract.scopeMode,
+            localMode: runtimeMode(session),
         });
         if (verdict.verdict === 'block' && verdict.approvalContext) {
             return {
                 filePath: blockedPath,
+                blockType: 'approval_required_boundary',
                 suggestedApprovalPath: verdict.approvalContext.suggestedApprovalPath || context?.suggestedApprovalPath || blockedPath,
+                message: event.message || null,
             };
         }
         return null;
@@ -383,6 +462,9 @@ function latestUnresolvedApprovalBlock(session) {
 function shouldKeepSessionActiveForPendingApproval(session, pendingApproval) {
     if (!pendingApproval)
         return false;
+    if (pendingApproval.blockType && pendingApproval.blockType !== 'approval_required_boundary') {
+        return true;
+    }
     const hasRecordedApproval = session.contract.approvedPaths.length > 0 ||
         (session.contract.approvalGrants ?? []).some((grant) => !grant.revokedAt) ||
         session.events.some((event) => event.type === 'approval_decision' && event.decision === 'approved');
@@ -397,6 +479,7 @@ async function recordBashCheck(repoRoot, session, args) {
         message: args.message,
         detail: {
             ...(args.approvalContext ? { approvalContext: args.approvalContext } : {}),
+            ...(args.blockContext ? { blockContext: args.blockContext } : {}),
             toolName: 'Bash',
             bash: {
                 operation: args.operation,
@@ -445,6 +528,7 @@ async function handleBashCheck(repoRoot, session, command) {
             approvedPaths: session.contract.approvedPaths,
             approvalGrants: session.contract.approvalGrants,
             scopeMode: session.contract.scopeMode,
+            localMode: runtimeMode(session),
         }),
     }));
     for (const { filePath, result } of results) {
@@ -457,13 +541,37 @@ async function handleBashCheck(repoRoot, session, command) {
             commandFingerprint: analysis.commandFingerprint,
             boundaryVerdict: result.verdict,
             approvalContext: result.approvalContext,
+            blockContext: result.blockType
+                ? blockContext({
+                    blockType: result.blockType,
+                    filePath,
+                    message: result.message,
+                    suggestedApprovalPath: result.approvalContext?.suggestedApprovalPath,
+                    owners: result.owners,
+                    runtimeMode: runtimeMode(session),
+                })
+                : undefined,
         });
     }
     const blocking = results.find(({ result }) => result.verdict === 'block');
     if (blocking) {
         const message = `⏸ Neurcode: Bash ${analysis.operation} targets ${blocking.filePath}. ` +
             blocking.result.message.replace(/^⏸ Neurcode:\s*/, '');
-        denyPreToolUse(message, blocking.result.approvalContext ? { approvalContext: blocking.result.approvalContext } : undefined);
+        denyPreToolUse(message, {
+            ...(blocking.result.approvalContext ? { approvalContext: blocking.result.approvalContext } : {}),
+            ...(blocking.result.blockType
+                ? {
+                    blockContext: blockContext({
+                        blockType: blocking.result.blockType,
+                        filePath: blocking.filePath,
+                        message,
+                        suggestedApprovalPath: blocking.result.approvalContext?.suggestedApprovalPath,
+                        owners: blocking.result.owners,
+                        runtimeMode: runtimeMode(session),
+                    }),
+                }
+                : {}),
+        });
     }
     const warning = results.find(({ result }) => result.verdict === 'warn');
     if (warning) {
@@ -728,7 +836,7 @@ async function handleCheck(cmdCwd) {
         const hasPriorBlock = session.events.some((event) => event.type === 'check_block');
         if (hasPriorBlock) {
             const pending = await (0, runtime_live_1.applyPendingRuntimeLiveApprovals)(repoRoot, session.sessionId);
-            if (pending.applied > 0 || pending.revoked > 0) {
+            if (pending.applied > 0 || pending.revoked > 0 || pending.scopeAmended > 0 || pending.scopeDenied > 0) {
                 const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
                 if (refreshed)
                     session = refreshed;
@@ -738,6 +846,12 @@ async function handleCheck(cmdCwd) {
             }
             if (pending.revoked > 0) {
                 diagnostic(`revoked ${pending.revoked} dashboard approval${pending.revoked === 1 ? '' : 's'}`);
+            }
+            if (pending.scopeAmended > 0) {
+                diagnostic(`applied ${pending.scopeAmended} dashboard scope amendment${pending.scopeAmended === 1 ? '' : 's'}`);
+            }
+            if (pending.scopeDenied > 0) {
+                diagnostic(`recorded ${pending.scopeDenied} denied dashboard scope amendment${pending.scopeDenied === 1 ? '' : 's'}`);
             }
         }
     }
@@ -802,6 +916,12 @@ async function handleCheck(cmdCwd) {
                 verdict: 'block',
                 message,
                 detail: {
+                    blockContext: blockContext({
+                        blockType: 'multi_file_or_tool_shape_block',
+                        filePath: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)).join(','),
+                        message,
+                        runtimeMode: runtimeMode(session),
+                    }),
                     reason: 'multi_file_tool_call_requires_split',
                     paths: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)),
                     toolName,
@@ -815,6 +935,12 @@ async function handleCheck(cmdCwd) {
             // Recording failure must not weaken the deny.
         }
         denyPreToolUse(message, {
+            blockContext: blockContext({
+                blockType: 'multi_file_or_tool_shape_block',
+                filePath: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)).join(','),
+                message,
+                runtimeMode: runtimeMode(session),
+            }),
             reason: 'multi_file_tool_call_requires_split',
             paths: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)),
         });
@@ -864,7 +990,15 @@ async function handleCheck(cmdCwd) {
                     filePath,
                     verdict: 'block',
                     message,
-                    detail: { profileFreshness },
+                    detail: {
+                        profileFreshness,
+                        blockContext: blockContext({
+                            blockType: 'profile_or_runtime_health_block',
+                            filePath,
+                            message,
+                            runtimeMode: runtimeMode(session),
+                        }),
+                    },
                 });
                 const refreshedSession = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
                 if (refreshedSession) {
@@ -874,7 +1008,15 @@ async function handleCheck(cmdCwd) {
             catch {
                 // Recording failure must not weaken the deny.
             }
-            denyPreToolUse(message, { profileFreshness });
+            denyPreToolUse(message, {
+                profileFreshness,
+                blockContext: blockContext({
+                    blockType: 'profile_or_runtime_health_block',
+                    filePath,
+                    message,
+                    runtimeMode: runtimeMode(session),
+                }),
+            });
         }
         if (staleness.status !== 'fresh') {
             const refreshedProfile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot);
@@ -899,6 +1041,12 @@ async function handleCheck(cmdCwd) {
                 verdict: 'block',
                 message,
                 detail: {
+                    blockContext: blockContext({
+                        blockType: 'profile_or_runtime_health_block',
+                        filePath,
+                        message,
+                        runtimeMode: runtimeMode(session),
+                    }),
                     profileFreshness: {
                         status: 'unreadable',
                         refreshed: false,
@@ -919,7 +1067,14 @@ async function handleCheck(cmdCwd) {
         catch {
             // Recording failure must not weaken the deny.
         }
-        denyPreToolUse(message);
+        denyPreToolUse(message, {
+            blockContext: blockContext({
+                blockType: 'profile_or_runtime_health_block',
+                filePath,
+                message,
+                runtimeMode: runtimeMode(session),
+            }),
+        });
     }
     // ── Run the boundary + intent-coherence checks ───────────────────────────
     let result;
@@ -933,6 +1088,7 @@ async function handleCheck(cmdCwd) {
             approvedPaths: session.contract.approvedPaths,
             approvalGrants: session.contract.approvalGrants,
             scopeMode: session.contract.scopeMode,
+            localMode: runtimeMode(session),
         });
     }
     catch (err) {
@@ -963,19 +1119,50 @@ async function handleCheck(cmdCwd) {
         graph: session.contract.architectureGraph,
         obligations: session.contract.architectureObligations ?? [],
     });
-    if (result.verdict === 'ok' && planCoherencePolicy.action === 'block') {
+    let pendingScopeAmendmentProposalId = null;
+    if (result.verdict === 'ok' && planCoherencePolicy.action === 'block' && runtimeMode(session) !== 'strict') {
+        result = {
+            ...result,
+            verdict: 'warn',
+            blockType: 'scope_violation_or_task_expansion',
+            message: `⚠️ Neurcode: ${filePath} is not justified by the agent's stated plan. ` +
+                `${planCoherencePolicy.reason} Proceeding in ${runtimeMode(session)} mode — recorded as task expansion evidence. ` +
+                `Re-plan with neurcode_session_replan if this path should become part of the task.`,
+        };
+    }
+    else if (result.verdict === 'ok' && planCoherencePolicy.action === 'block') {
+        try {
+            const amendment = (0, governance_runtime_1.amendAgentPlan)(repoRoot, {
+                sessionId: session.sessionId,
+                addExpectedFiles: [filePath],
+                addSteps: [`Expand governed task scope to include ${filePath}`],
+                reason: `scope expansion requested for ${filePath}`,
+                source: 'unknown',
+                proposedBy: 'agent',
+                amendedAt: new Date().toISOString(),
+            });
+            pendingScopeAmendmentProposalId = amendment.proposal?.proposalId || amendment.eventId || null;
+            const amendedSession = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
+            if (amendedSession)
+                session = amendedSession;
+        }
+        catch (error) {
+            diagnostic(`scope amendment proposal could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+        }
         result = {
             ...result,
             verdict: 'block',
+            blockType: 'scope_violation_or_task_expansion',
             message: `⏸ Neurcode: ${filePath} is not justified by the agent's stated plan. ` +
-                `${planCoherencePolicy.reason} Re-plan or update the plan before editing this path. ` +
-                `Use neurcode_session_replan or \`neurcode session replan --add-file ${filePath}\`.`,
+                `${planCoherencePolicy.reason} Approve task expansion / amend scope, then retry this path. ` +
+                `Use neurcode_session_replan_decide${pendingScopeAmendmentProposalId ? ` for ${pendingScopeAmendmentProposalId}` : ''} or \`neurcode session replan --add-file ${filePath}\`.`,
         };
     }
     else if (result.verdict === 'ok' && architectureObligationFeedback.action === 'block') {
         result = {
             ...result,
             verdict: 'block',
+            blockType: 'scope_violation_or_task_expansion',
             message: `⏸ Neurcode: ${filePath} is blocked by ${architectureObligationFeedback.blocking.length} ` +
                 `architecture obligation${architectureObligationFeedback.blocking.length === 1 ? '' : 's'}. ` +
                 `${architectureObligationFeedback.reasons[0]} Satisfy the obligation, re-plan, or ask the human to waive it with ` +
@@ -1024,6 +1211,19 @@ async function handleCheck(cmdCwd) {
             message: result.message,
             detail: {
                 ...(result.approvalContext ? { approvalContext: result.approvalContext } : {}),
+                ...(result.blockType
+                    ? {
+                        blockContext: blockContext({
+                            blockType: result.blockType,
+                            filePath,
+                            message: result.message,
+                            suggestedApprovalPath: result.approvalContext?.suggestedApprovalPath,
+                            owners: result.owners,
+                            proposalId: pendingScopeAmendmentProposalId,
+                            runtimeMode: runtimeMode(session),
+                        }),
+                    }
+                    : {}),
                 intentCoherence,
                 planCoherence,
                 planCoherencePolicy,
@@ -1056,7 +1256,22 @@ async function handleCheck(cmdCwd) {
     if (result.verdict === 'block') {
         // Include machine-readable approvalContext when the block is approval-required,
         // so the agent can surface a structured approval request to the human.
-        denyPreToolUse(result.message, result.approvalContext ? { approvalContext: result.approvalContext } : undefined);
+        denyPreToolUse(result.message, {
+            ...(result.approvalContext ? { approvalContext: result.approvalContext } : {}),
+            ...(result.blockType
+                ? {
+                    blockContext: blockContext({
+                        blockType: result.blockType,
+                        filePath,
+                        message: result.message,
+                        suggestedApprovalPath: result.approvalContext?.suggestedApprovalPath,
+                        owners: result.owners,
+                        proposalId: pendingScopeAmendmentProposalId,
+                        runtimeMode: runtimeMode(session),
+                    }),
+                }
+                : {}),
+        });
     }
     if (result.verdict === 'warn') {
         const reason = consequenceNudge
@@ -1168,11 +1383,17 @@ async function handleFinish(cmdCwd) {
         diagnostic(`Claude session_id ${requestedSessionId} did not match a Neurcode session; finishing active session ${session.sessionId}`);
     }
     try {
-        const pendingApproval = latestUnresolvedApprovalBlock(session);
-        if (shouldKeepSessionActiveForPendingApproval(session, pendingApproval)) {
+        const pendingActionableBlock = latestUnresolvedActionableBlock(session);
+        if (shouldKeepSessionActiveForPendingApproval(session, pendingActionableBlock)) {
+            const actionLabel = pendingActionableBlock.blockType === 'approval_required_boundary'
+                ? `exact approval of ${pendingActionableBlock.suggestedApprovalPath || pendingActionableBlock.filePath}`
+                : pendingActionableBlock.blockType === 'scope_violation_or_task_expansion'
+                    ? `scope amendment for ${pendingActionableBlock.filePath}`
+                    : pendingActionableBlock.blockType === 'profile_or_runtime_health_block'
+                        ? 'runtime/profile recovery'
+                        : 'a split single-file retry';
             process.stdout.write(JSON.stringify({
-                message: `⏸ Neurcode session ${session.sessionId} remains active; waiting for exact approval of ` +
-                    `${pendingApproval.suggestedApprovalPath}.`,
+                message: `⏸ Neurcode session ${session.sessionId} remains active; waiting for operator action: ${actionLabel}.`,
             }) + '\n');
             await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
             try {
@@ -1185,10 +1406,20 @@ async function handleFinish(cmdCwd) {
             }
             return;
         }
-        const finished = (0, governance_runtime_1.finishSession)(repoRoot, session.sessionId, pendingApproval
+        const finished = (0, governance_runtime_1.finishSession)(repoRoot, session.sessionId, pendingActionableBlock
             ? {
-                reason: 'finished_with_unresolved_approval_blocks',
-                unresolvedApprovalBlocks: [pendingApproval],
+                reason: pendingActionableBlock.blockType === 'approval_required_boundary'
+                    ? 'finished_with_unresolved_approval_blocks'
+                    : 'finished_with_unresolved_actionable_blocks',
+                unresolvedActionableBlocks: [pendingActionableBlock],
+                ...(pendingActionableBlock.blockType === 'approval_required_boundary'
+                    ? {
+                        unresolvedApprovalBlocks: [{
+                                filePath: pendingActionableBlock.filePath,
+                                suggestedApprovalPath: pendingActionableBlock.suggestedApprovalPath || pendingActionableBlock.filePath,
+                            }],
+                    }
+                    : {}),
             }
             : undefined);
         if (!finished)
@@ -1199,11 +1430,11 @@ async function handleFinish(cmdCwd) {
         }
         const blockCount = finished.events.filter((e) => e.type === 'check_block').length;
         const warnCount = finished.events.filter((e) => e.type === 'check_warn').length;
-        const unresolvedLine = pendingApproval
-            ? `   Unresolved: 1 approval block left recorded (${pendingApproval.suggestedApprovalPath})`
+        const unresolvedLine = pendingActionableBlock
+            ? `   Unresolved: 1 ${pendingActionableBlock.blockType} left recorded (${pendingActionableBlock.suggestedApprovalPath || pendingActionableBlock.filePath})`
             : null;
         const summary = [
-            pendingApproval
+            pendingActionableBlock
                 ? `✅ Neurcode session ${finished.sessionId} complete with unresolved block evidence`
                 : `✅ Neurcode session ${finished.sessionId} complete`,
             `   Scope mode: ${finished.contract.scopeMode}`,

@@ -25,9 +25,18 @@ export declare function flushRuntimeLiveOutbox(repoRoot: string, options?: {
     timeoutMs?: number;
     force?: boolean;
 }): Promise<RuntimeLiveOutboxFlushResult>;
+export declare function applyPendingRuntimeLiveActions(repoRoot: string, sessionId: string): Promise<{
+    applied: number;
+    revoked: number;
+    scopeAmended: number;
+    scopeDenied: number;
+    failed: number;
+}>;
 export declare function applyPendingRuntimeLiveApprovals(repoRoot: string, sessionId: string): Promise<{
     applied: number;
     revoked: number;
+    scopeAmended: number;
+    scopeDenied: number;
     failed: number;
 }>;
 //# sourceMappingURL=runtime-live.d.ts.map

@@ -4,6 +4,7 @@ exports.MAX_RUNTIME_DELIVERY_ATTEMPTS = exports.MAX_RUNTIME_DEAD_LETTER_EVENTS =
 exports.runtimeOutboxPath = runtimeOutboxPath;
 exports.enqueueRuntimeSessionSnapshot = enqueueRuntimeSessionSnapshot;
 exports.enqueueRuntimeApprovalAck = enqueueRuntimeApprovalAck;
+exports.enqueueRuntimeScopeAmendmentAck = enqueueRuntimeScopeAmendmentAck;
 exports.runtimeDeliveryEnvelope = runtimeDeliveryEnvelope;
 exports.pendingRuntimeOutboxEvents = pendingRuntimeOutboxEvents;
 exports.markRuntimeOutboxDelivered = markRuntimeOutboxDelivered;
@@ -125,7 +126,7 @@ function isRuntimeOutboxEvent(event) {
         && typeof candidate.eventId === 'string'
         && typeof candidate.sessionId === 'string'
         && Number.isFinite(candidate.sequence)
-        && (candidate.eventType === 'session_snapshot' || candidate.eventType === 'approval_ack')
+        && (candidate.eventType === 'session_snapshot' || candidate.eventType === 'approval_ack' || candidate.eventType === 'scope_amendment_ack')
         && Boolean(candidate.payload)
         && typeof candidate.payload === 'object'
         && !Array.isArray(candidate.payload);
@@ -189,14 +190,14 @@ function trimOutbox(events) {
     if (events.length <= exports.MAX_RUNTIME_OUTBOX_EVENTS)
         return events;
     const sorted = [...events].sort((left, right) => left.generatedAt.localeCompare(right.generatedAt));
-    const approvalAcks = sorted.filter((event) => event.eventType === 'approval_ack');
-    if (approvalAcks.length >= exports.MAX_RUNTIME_OUTBOX_EVENTS) {
-        return approvalAcks.slice(-exports.MAX_RUNTIME_OUTBOX_EVENTS);
+    const actionAcks = sorted.filter((event) => event.eventType === 'approval_ack' || event.eventType === 'scope_amendment_ack');
+    if (actionAcks.length >= exports.MAX_RUNTIME_OUTBOX_EVENTS) {
+        return actionAcks.slice(-exports.MAX_RUNTIME_OUTBOX_EVENTS);
     }
     const snapshots = sorted.filter((event) => event.eventType === 'session_snapshot');
-    const snapshotBudget = exports.MAX_RUNTIME_OUTBOX_EVENTS - approvalAcks.length;
+    const snapshotBudget = exports.MAX_RUNTIME_OUTBOX_EVENTS - actionAcks.length;
     const retainedSnapshots = snapshotBudget > 0 ? snapshots.slice(-snapshotBudget) : [];
-    return [...approvalAcks, ...retainedSnapshots]
+    return [...actionAcks, ...retainedSnapshots]
         .sort((left, right) => left.generatedAt.localeCompare(right.generatedAt));
 }
 function trimDeadLetters(events) {
@@ -208,23 +209,24 @@ function enqueue(repoRoot, sessionId, eventType, payload) {
     assertSourceFree(payload);
     return withOutboxLock(repoRoot, () => {
         const outbox = readOutbox(repoRoot);
-        const approvalId = eventType === 'approval_ack' && typeof payload.approvalId === 'string'
-            ? payload.approvalId
+        const actionId = (eventType === 'approval_ack' || eventType === 'scope_amendment_ack')
+            && (typeof payload.approvalId === 'string' || typeof payload.amendmentId === 'string')
+            ? String(payload.approvalId || payload.amendmentId)
             : null;
-        const approvalStatus = eventType === 'approval_ack'
+        const actionStatus = (eventType === 'approval_ack' || eventType === 'scope_amendment_ack')
             && typeof payload.body === 'object'
             && payload.body !== null
             && typeof payload.body.status === 'string'
             ? payload.body.status
             : null;
-        if (approvalId) {
-            const existing = outbox.events.find((event) => event.eventType === 'approval_ack'
+        if (actionId) {
+            const existing = outbox.events.find((event) => event.eventType === eventType
                 && event.sessionId === sessionId
-                && event.payload.approvalId === approvalId
-                && (approvalStatus === null
+                && (event.payload.approvalId === actionId || event.payload.amendmentId === actionId)
+                && (actionStatus === null
                     || (typeof event.payload.body === 'object'
                         && event.payload.body !== null
-                        && event.payload.body.status === approvalStatus)));
+                        && event.payload.body.status === actionStatus)));
             if (existing)
                 return existing;
         }
@@ -257,6 +259,9 @@ function enqueueRuntimeSessionSnapshot(repoRoot, sessionId, payload) {
 }
 function enqueueRuntimeApprovalAck(repoRoot, sessionId, payload) {
     return enqueue(repoRoot, sessionId, 'approval_ack', payload);
+}
+function enqueueRuntimeScopeAmendmentAck(repoRoot, sessionId, payload) {
+    return enqueue(repoRoot, sessionId, 'scope_amendment_ack', payload);
 }
 function runtimeDeliveryEnvelope(event) {
     return {
@@ -389,11 +394,11 @@ function inspectRuntimeOutbox(repoRoot) {
                     : 'healthy',
         pendingEvents: sorted.length,
         pendingSessionSnapshots: sorted.filter((event) => event.eventType === 'session_snapshot').length,
-        pendingApprovalAcks: sorted.filter((event) => event.eventType === 'approval_ack').length,
+        pendingApprovalAcks: sorted.filter((event) => event.eventType === 'approval_ack' || event.eventType === 'scope_amendment_ack').length,
         retryingEvents: retryingEvents.length,
         deadLetterEvents: deadLetters.length,
         deadLetterSessionSnapshots: deadLetters.filter((event) => event.eventType === 'session_snapshot').length,
-        deadLetterApprovalAcks: deadLetters.filter((event) => event.eventType === 'approval_ack').length,
+        deadLetterApprovalAcks: deadLetters.filter((event) => event.eventType === 'approval_ack' || event.eventType === 'scope_amendment_ack').length,
         oldestPendingAt: sorted[0]?.generatedAt || null,
         nextRetryAt: retries[0] || null,
         lastEnqueuedAt: outbox.state.lastEnqueuedAt,

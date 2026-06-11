@@ -79,6 +79,7 @@ export interface CursorGateInstallBatchResult {
     hooksPathConfigured: boolean;
     message: string;
 }
+export declare function stripNeurcodeHookFragment(existing: string, marker: string, endMarker: string): string;
 export declare function installCursorGateHook(input: {
     dir?: string;
     force?: boolean;

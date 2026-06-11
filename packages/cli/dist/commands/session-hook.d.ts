@@ -18,7 +18,7 @@
  *   plan-coherence policy returns 'block', we deny — intentional enforcement.
  */
 import type { Command } from 'commander';
-import { type GovernanceSession } from '@neurcode-ai/governance-runtime';
+import { type GovernanceSession, type RuntimeBlockType } from '@neurcode-ai/governance-runtime';
 export interface HookSessionResolution {
     session: GovernanceSession | null;
     requestedSessionId?: string;
@@ -29,7 +29,8 @@ export declare function normalizeHookFilePathForRepo(rawPath: string, repoRoot: 
 export declare function hookFilePathCandidates(hookInput: Record<string, unknown>): string[];
 export declare function shouldKeepSessionActiveForPendingApproval(session: GovernanceSession, pendingApproval: {
     filePath: string;
-    suggestedApprovalPath: string;
+    suggestedApprovalPath?: string | null;
+    blockType?: RuntimeBlockType;
 } | null): boolean;
 export declare function sessionHookCommand(program: Command): void;
 //# sourceMappingURL=session-hook.d.ts.map

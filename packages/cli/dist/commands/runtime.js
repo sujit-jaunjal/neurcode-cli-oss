@@ -3,12 +3,18 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.runtimeCloudStatusCommand = runtimeCloudStatusCommand;
 exports.runtimeHygieneCommand = runtimeHygieneCommand;
 exports.runtimeResetStaleCloudCommand = runtimeResetStaleCloudCommand;
+exports.runtimeActionsListCommand = runtimeActionsListCommand;
+exports.runtimeActionsApplyCommand = runtimeActionsApplyCommand;
+exports.runtimeEnforcementModeCommand = runtimeEnforcementModeCommand;
 exports.runtimeCommand = runtimeCommand;
+const fs_1 = require("fs");
+const path_1 = require("path");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const api_client_1 = require("../api-client");
 const config_1 = require("../config");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
+const runtime_live_1 = require("../utils/runtime-live");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_identity_1 = require("./runtime-identity");
 let chalk;
@@ -30,6 +36,21 @@ function firstString(value) {
 }
 function safeStatus(value) {
     return typeof value === 'string' && value.trim() ? value.trim() : 'unknown';
+}
+function parseRuntimeActionNumber(value, fallback, max) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed))
+        return fallback;
+    return Math.max(0, Math.min(max, Math.floor(parsed)));
+}
+function parseRuntimeActionLimit(value) {
+    const parsed = parseRuntimeActionNumber(value, 50, 100);
+    return parsed < 1 ? 50 : parsed;
+}
+function normalizeRuntimeActionStatus(value) {
+    const status = firstString(value) || 'pending';
+    const allowed = new Set(['all', 'requested', 'pending', 'applied', 'denied', 'revoked', 'failed', 'expired']);
+    return allowed.has(status) ? status : 'pending';
 }
 function unique(values) {
     return [...new Set(values.filter((value) => value.trim().length > 0))];
@@ -98,7 +119,14 @@ async function fetchCloudStatus(repoRoot, connection, activeSession, options) {
         status: 'all',
         limit: 50,
     });
+    const scopeAmendmentsResponse = await client.getRuntimeControlPlaneScopeAmendments({
+        repoKey,
+        sessionId: sessionId || undefined,
+        status: 'all',
+        limit: 50,
+    });
     const approvals = approvalsResponse.approvals || [];
+    const scopeAmendments = scopeAmendmentsResponse.scopeAmendments || [];
     const approvalsForSession = sessionId ? approvals : [];
     const exactApprovalPath = latestApprovalPath(liveSession, approvalsForSession);
     const approvalStatuses = unique(approvalsForSession
@@ -121,6 +149,7 @@ async function fetchCloudStatus(repoRoot, connection, activeSession, options) {
         dashboard,
         liveSession,
         approvals,
+        scopeAmendments,
         operationsStatus,
         bulkEvidence: {
             localAutoSync: connection.autoSync || null,
@@ -162,6 +191,10 @@ function printCloudStatus(payload) {
     if (payload.dashboard.approvalStatuses.length > 0) {
         console.log(chalk.dim(`Approvals:  ${payload.dashboard.approvalStatuses.join(', ')}`));
     }
+    const openAmendments = payload.scopeAmendments.filter((item) => item.status === 'requested' || item.status === 'pending');
+    if (openAmendments.length > 0) {
+        console.log(chalk.dim(`Scope:      ${openAmendments.map((item) => `${item.blockedPath || item.scopeFiles[0] || 'scope'}:${item.status}`).join(', ')}`));
+    }
     console.log(chalk.dim(`Live state: ${sessionStatus}${sessionReason ? ` · ${sessionReason}` : ''}`));
     console.log(chalk.dim(`Transport:  ${payload.liveTransport.health} · pending ${payload.liveTransport.pendingEvents} · dead letters ${payload.liveTransport.deadLetterEvents}`));
     console.log(chalk.dim(`Bulk sync:  local ${payload.bulkEvidence.localAutoSync?.lastStatus || 'unknown'} · cloud ${ingestionStatus}${ingestionReason ? ` · ${ingestionReason}` : ''}`));
@@ -182,6 +215,23 @@ function buildClientForConnection(connection) {
     config.projectId = connection.projectId || config.projectId;
     config.apiKey = (0, config_1.requireApiKey)(connection.organizationId);
     return new api_client_1.ApiClient(config);
+}
+function writeRuntimeLocalMode(repoRoot, mode) {
+    const path = (0, v0_governance_1.governanceConfigPath)(repoRoot);
+    let existing = {};
+    if ((0, fs_1.existsSync)(path)) {
+        try {
+            const parsed = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+                existing = parsed;
+        }
+        catch {
+            existing = {};
+        }
+    }
+    (0, fs_1.mkdirSync)((0, path_1.dirname)(path), { recursive: true });
+    (0, fs_1.writeFileSync)(path, JSON.stringify({ ...existing, localMode: mode }, null, 2) + '\n', 'utf8');
+    return { path, mode };
 }
 async function runtimeCloudStatusCommand(options = {}) {
     try {
@@ -387,6 +437,197 @@ async function runtimeResetStaleCloudCommand(options = {}) {
         process.exitCode = 1;
     }
 }
+async function runtimeActionsListCommand(options = {}) {
+    try {
+        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+        const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+        if (!connection) {
+            const payload = {
+                ok: false,
+                error: 'Repository is not paired with the Runtime Control Plane.',
+                next: 'Run `neurcode activate claude --connect <token>` or connect the repo from the dashboard.',
+                privacy: { sourceUploaded: false, commandMode: 'read_only' },
+            };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else
+                console.error(chalk.red(payload.error));
+            process.exitCode = 1;
+            return;
+        }
+        const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+        const client = buildClientForConnection(connection);
+        const repoKey = options.repoKey || connection.repo.repoKey;
+        const sessionId = firstString(options.sessionId) || activeSession?.sessionId || null;
+        const status = normalizeRuntimeActionStatus(options.status);
+        const limit = parseRuntimeActionLimit(options.limit);
+        const offset = parseRuntimeActionNumber(options.offset, 0, 10_000);
+        const [approvals, scopeAmendments] = await Promise.all([
+            client.getRuntimeControlPlaneApprovals({ repoKey, sessionId: sessionId || undefined, status, limit, offset }),
+            client.getRuntimeControlPlaneScopeAmendments({ repoKey, sessionId: sessionId || undefined, status, limit, offset }),
+        ]);
+        const payload = {
+            ok: true,
+            repoRoot,
+            repo: connection.repo,
+            sessionId,
+            approvals: approvals.approvals,
+            scopeAmendments: scopeAmendments.scopeAmendments,
+            pageInfo: {
+                approvals: approvals.pageInfo || null,
+                scopeAmendments: scopeAmendments.pageInfo || null,
+            },
+            fallbackCommand: 'neurcode runtime actions apply',
+            privacy: {
+                sourceUploaded: false,
+                commandMode: 'read_only',
+                uploadedFields: ['session ids', 'approval paths', 'scope paths', 'scope globs', 'timestamps'],
+            },
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        console.log(chalk.bold(status === 'pending' ? 'Pending runtime actions' : 'Runtime actions'));
+        console.log(chalk.dim(`Repo:     ${connection.repo.name} (${connection.repo.repoKey})`));
+        console.log(chalk.dim(`Session:  ${sessionId || 'all visible sessions'}`));
+        console.log(chalk.dim(`Filter:   status=${status} limit=${limit} offset=${offset}`));
+        if (payload.approvals.length === 0 && payload.scopeAmendments.length === 0) {
+            console.log(chalk.green(status === 'pending' ? 'No pending local runtime actions.' : 'No runtime actions matched the filter.'));
+            return;
+        }
+        for (const approval of payload.approvals) {
+            console.log(`- exact approval · ${approval.sessionId} · ${approval.path} · ${approval.status}`);
+        }
+        for (const amendment of payload.scopeAmendments) {
+            const target = amendment.blockedPath || amendment.scopeFiles[0] || amendment.scopeGlobs[0] || 'scope';
+            console.log(`- scope amendment · ${amendment.sessionId} · ${target} · ${amendment.status}`);
+        }
+        console.log(chalk.dim('Apply:    neurcode runtime actions apply'));
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json)
+            console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+        else
+            console.error(chalk.red(`Runtime actions list failed: ${message}`));
+        process.exitCode = 1;
+    }
+}
+async function runtimeActionsApplyCommand(options = {}) {
+    try {
+        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+        const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+        if (!connection) {
+            const payload = {
+                ok: false,
+                error: 'Repository is not paired with the Runtime Control Plane.',
+                next: 'Run `neurcode activate claude --connect <token>` or connect the repo from the dashboard.',
+                privacy: { sourceUploaded: false, commandMode: 'local_action_apply' },
+            };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else
+                console.error(chalk.red(payload.error));
+            process.exitCode = 1;
+            return;
+        }
+        const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+        const sessionId = firstString(options.sessionId) || activeSession?.sessionId || null;
+        if (!sessionId) {
+            const payload = {
+                ok: false,
+                error: 'No active local session found. Pass --session-id to apply actions for a specific session.',
+                privacy: { sourceUploaded: false, commandMode: 'local_action_apply' },
+            };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else
+                console.error(chalk.yellow(payload.error));
+            process.exitCode = 1;
+            return;
+        }
+        const flushedBefore = await (0, runtime_live_1.flushRuntimeLiveOutbox)(repoRoot, { force: options.force === true, maxEvents: 50 });
+        const result = await (0, runtime_live_1.applyPendingRuntimeLiveActions)(repoRoot, sessionId);
+        const flushedAfter = await (0, runtime_live_1.flushRuntimeLiveOutbox)(repoRoot, { force: options.force === true, maxEvents: 50 });
+        const payload = {
+            ok: result.failed === 0,
+            repoRoot,
+            repo: connection.repo,
+            sessionId,
+            result,
+            transport: {
+                before: flushedBefore.status,
+                after: flushedAfter.status,
+            },
+            privacy: {
+                sourceUploaded: false,
+                commandMode: 'local_action_apply',
+                uploadedFields: ['session ids', 'approval paths', 'scope paths', 'scope globs', 'delivery ids', 'payload hashes'],
+            },
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        console.log(chalk.bold('Runtime actions applied'));
+        console.log(chalk.dim(`Session:           ${sessionId}`));
+        console.log(chalk.green(`Exact approvals:   ${result.applied}`));
+        console.log(chalk.green(`Scope amendments:  ${result.scopeAmended}`));
+        if (result.revoked > 0)
+            console.log(chalk.yellow(`Revoked approvals: ${result.revoked}`));
+        if (result.scopeDenied > 0)
+            console.log(chalk.yellow(`Denied amendments: ${result.scopeDenied}`));
+        if (result.failed > 0)
+            console.log(chalk.red(`Failed actions:    ${result.failed}`));
+        console.log(chalk.dim(`Transport:         ${flushedAfter.status.health} · pending ${flushedAfter.status.pendingEvents}`));
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json)
+            console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+        else
+            console.error(chalk.red(`Runtime actions apply failed: ${message}`));
+        process.exitCode = 1;
+    }
+}
+async function runtimeEnforcementModeCommand(mode, options = {}) {
+    try {
+        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+        const result = writeRuntimeLocalMode(repoRoot, mode);
+        const payload = {
+            ok: true,
+            repoRoot,
+            mode,
+            path: result.path,
+            description: mode === 'paused'
+                ? 'Local hard-hook task-expansion blocks are paused for demos/material prep; sensitive and approval-required paths still require exact approval.'
+                : mode === 'strict'
+                    ? 'Local hard-hook task-expansion blocks are enforced.'
+                    : 'Harmless task expansion warns and records evidence; sensitive and approval-required paths still require exact approval.',
+            privacy: {
+                sourceUploaded: false,
+                commandMode: 'local_enforcement_mode',
+            },
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        console.log(chalk.bold('Runtime local enforcement mode'));
+        console.log(chalk.green(`Mode: ${mode}`));
+        console.log(chalk.dim(payload.description));
+        console.log(chalk.dim(`Config: ${result.path}`));
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json)
+            console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+        else
+            console.error(chalk.red(`Runtime enforcement mode failed: ${message}`));
+        process.exitCode = 1;
+    }
+}
 function runtimeCommand(program) {
     const runtime = program
         .command('runtime')
@@ -435,6 +676,70 @@ function runtimeCommand(program) {
             repoKey: options.repoKey,
             reason: options.reason,
             force: options.force === true,
+            dir: options.dir,
+            json: options.json === true,
+        });
+    });
+    const actions = runtime
+        .command('actions')
+        .description('List and apply pending dashboard runtime actions for the local session');
+    actions
+        .command('list')
+        .description('List pending exact approvals and scope amendments for this repo')
+        .option('--session-id <id>', 'Governance session ID (default: active local session)')
+        .option('--repo-key <key>', 'Runtime repo key (default: paired repo)')
+        .option('--status <status>', 'Action status filter (default: pending; use all for the bounded ledger)')
+        .option('--limit <n>', 'Max actions per kind to list (default: 50, max: 100)')
+        .option('--offset <n>', 'Pagination offset per kind (default: 0)')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        await runtimeActionsListCommand({
+            sessionId: options.sessionId,
+            repoKey: options.repoKey,
+            status: options.status,
+            limit: options.limit,
+            offset: options.offset,
+            dir: options.dir,
+            json: options.json === true,
+        });
+    });
+    actions
+        .command('apply')
+        .description('Apply pending exact approvals and scope amendments to the local runtime')
+        .option('--session-id <id>', 'Governance session ID (default: active local session)')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--force', 'Flush queued runtime transport events before and after applying')
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        await runtimeActionsApplyCommand({
+            sessionId: options.sessionId,
+            dir: options.dir,
+            force: options.force === true,
+            json: options.json === true,
+        });
+    });
+    const enforcement = runtime
+        .command('enforcement')
+        .description('Pause or resume local hard-hook task-expansion enforcement for demos');
+    enforcement
+        .command('pause')
+        .description('Pause local hard-hook blocks for harmless task expansion; approval-required paths still require exact approval')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        await runtimeEnforcementModeCommand('paused', {
+            dir: options.dir,
+            json: options.json === true,
+        });
+    });
+    enforcement
+        .command('resume')
+        .description('Resume strict local hard-hook task-expansion enforcement')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--json', 'Output machine-readable JSON')
+        .action(async (options) => {
+        await runtimeEnforcementModeCommand('strict', {
             dir: options.dir,
             json: options.json === true,
         });

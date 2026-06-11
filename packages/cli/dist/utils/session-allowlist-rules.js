@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.STRICT_CURSOR_RULES_MARKER = exports.SESSION_SCOPE_RULES_RELATIVE = void 0;
+exports.inspectSessionScopeRules = inspectSessionScopeRules;
 exports.buildSessionScopeRulesBody = buildSessionScopeRulesBody;
 exports.writeSessionScopeRules = writeSessionScopeRules;
 exports.refreshSessionScopeRules = refreshSessionScopeRules;
@@ -14,6 +15,45 @@ exports.SESSION_SCOPE_RULES_RELATIVE = '.cursor/rules/neurcode-session-scope.mdc
 exports.STRICT_CURSOR_RULES_MARKER = 'neurcode-enterprise-strict-mode';
 function ensureParent(path) {
     (0, node_fs_1.mkdirSync)((0, node_path_1.join)(path, '..'), { recursive: true });
+}
+function inspectSessionScopeRules(repoRoot, activeSessionId) {
+    const filePath = (0, node_path_1.join)(repoRoot, exports.SESSION_SCOPE_RULES_RELATIVE);
+    if (!(0, node_fs_1.existsSync)(filePath)) {
+        return { exists: false, filePath, sessionId: null, generatedAt: null, expiresAt: null, stale: false, reasons: [] };
+    }
+    const content = (0, node_fs_1.readFileSync)(filePath, 'utf8');
+    const sessionId = content.match(/neurcode-session-id:\s*([^\s]+)/)?.[1]?.trim()
+        || content.match(/# Neurcode session scope \(([^)]+)\)/)?.[1]?.trim()
+        || null;
+    const generatedAt = content.match(/neurcode-generated-at:\s*([^\s]+)/)?.[1]?.trim() || null;
+    const expiresAt = content.match(/neurcode-expires-at:\s*([^\s]+)/)?.[1]?.trim() || null;
+    const reasons = [];
+    if (!generatedAt)
+        reasons.push('missing generated-at metadata');
+    if (!expiresAt)
+        reasons.push('missing expiry metadata');
+    if (activeSessionId && sessionId && sessionId !== activeSessionId) {
+        reasons.push(`scope belongs to session ${sessionId}, active session is ${activeSessionId}`);
+    }
+    if (!activeSessionId && sessionId) {
+        reasons.push(`scope belongs to old session ${sessionId}; no active session is present`);
+    }
+    if (expiresAt) {
+        const expiresAtMs = Date.parse(expiresAt);
+        if (!Number.isFinite(expiresAtMs))
+            reasons.push('expiry metadata is invalid');
+        else if (expiresAtMs <= Date.now())
+            reasons.push(`scope expired at ${expiresAt}`);
+    }
+    return {
+        exists: true,
+        filePath,
+        sessionId,
+        generatedAt,
+        expiresAt,
+        stale: reasons.length > 0,
+        reasons,
+    };
 }
 function planTargetLines(session) {
     const plan = session.contract.agentPlan;
@@ -38,12 +78,18 @@ function buildSessionScopeRulesBody(session) {
     const globs = session.contract.allowedGlobs.slice(0, 50);
     const planLines = planTargetLines(session);
     const approvalLines = planApprovalObligationLines(session);
+    const generatedAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
     return `---
 description: Neurcode active session scope (auto-generated — do not edit manually)
 globs:
   - "**/*"
 alwaysApply: true
 ---
+
+<!-- neurcode-session-id: ${session.sessionId} -->
+<!-- neurcode-generated-at: ${generatedAt} -->
+<!-- neurcode-expires-at: ${expiresAt} -->
 
 # Neurcode session scope (${session.sessionId})
 
@@ -81,9 +127,23 @@ function refreshSessionScopeRules(input) {
         ? (0, governance_runtime_1.loadSession)(repoRoot, input.sessionId)
         : (0, governance_runtime_1.loadActiveSession)(repoRoot);
     if (!session) {
+        const filePath = (0, node_path_1.join)(repoRoot, exports.SESSION_SCOPE_RULES_RELATIVE);
+        const inspection = inspectSessionScopeRules(repoRoot, null);
+        if (inspection.exists && inspection.stale) {
+            (0, node_fs_1.rmSync)(filePath, { force: true });
+            return {
+                ok: true,
+                filePath,
+                sessionId: null,
+                allowedGlobs: [],
+                stale: true,
+                removed: true,
+                message: `Removed stale session scope rules from ${exports.SESSION_SCOPE_RULES_RELATIVE}: ${inspection.reasons.join('; ')}.`,
+            };
+        }
         return {
             ok: false,
-            filePath: (0, node_path_1.join)(repoRoot, exports.SESSION_SCOPE_RULES_RELATIVE),
+            filePath,
             sessionId: null,
             allowedGlobs: [],
             message: 'No active governed session found. Start one with neurcode cursor onboard or agent guard start.',

@@ -13,7 +13,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_PLAN_COHERENCE_MODE = void 0;
+exports.DEFAULT_RUNTIME_LOCAL_MODE = exports.DEFAULT_PLAN_COHERENCE_MODE = void 0;
 exports.ownersForPath = ownersForPath;
 exports.buildRepoGovernanceProfile = buildRepoGovernanceProfile;
 exports.checkFileBoundary = checkFileBoundary;
@@ -22,6 +22,7 @@ const micromatch_1 = __importDefault(require("micromatch"));
 const architecture_obligations_1 = require("./architecture-obligations");
 const architecture_graph_1 = require("./architecture-graph");
 exports.DEFAULT_PLAN_COHERENCE_MODE = 'warn';
+exports.DEFAULT_RUNTIME_LOCAL_MODE = 'advisory';
 // ── Security token map ────────────────────────────────────────────────────────
 //
 // Conservative: tokens are matched WHOLE against path-segment parts only.
@@ -353,6 +354,14 @@ function normalizePlanCoherenceMode(value) {
         ? value
         : exports.DEFAULT_PLAN_COHERENCE_MODE;
 }
+function normalizeRuntimeLocalMode(value) {
+    if (value === undefined || value === null || value === '') {
+        return exports.DEFAULT_RUNTIME_LOCAL_MODE;
+    }
+    return value === 'strict' || value === 'advisory' || value === 'paused'
+        ? value
+        : exports.DEFAULT_RUNTIME_LOCAL_MODE;
+}
 function normalizeRuntimeConfig(input) {
     return {
         approvalRequiredGlobs: normalizeGlobList(input?.approvalRequiredGlobs),
@@ -360,6 +369,7 @@ function normalizeRuntimeConfig(input) {
         safeSupportGlobs: normalizeGlobList(input?.safeSupportGlobs),
         ignoredGlobs: normalizeGlobList(input?.ignoredGlobs),
         planCoherence: normalizePlanCoherenceMode(input?.planCoherence),
+        localMode: normalizeRuntimeLocalMode(input?.localMode),
         architectureObligations: (0, architecture_obligations_1.normalizeArchitectureObligationPolicy)(input?.architectureObligations),
     };
 }
@@ -372,6 +382,9 @@ function canonicalRuntimeConfig(config) {
         ignoredGlobs: normalized.ignoredGlobs,
         ...(normalized.planCoherence && normalized.planCoherence !== exports.DEFAULT_PLAN_COHERENCE_MODE
             ? { planCoherence: normalized.planCoherence }
+            : {}),
+        ...(normalized.localMode && normalized.localMode !== exports.DEFAULT_RUNTIME_LOCAL_MODE
+            ? { localMode: normalized.localMode }
             : {}),
         ...(normalized.architectureObligations
             && (normalized.architectureObligations.mode !== 'warn'
@@ -470,7 +483,7 @@ function buildRepoGovernanceProfile(input) {
     };
 }
 function checkFileBoundary(input) {
-    const { filePath, allowedGlobs, ownershipRules, sensitiveGlobs, approvalRequiredGlobs, approvedPaths = [], approvalGrants = [], checkedAt, scopeMode = 'inferred', } = input;
+    const { filePath, allowedGlobs, ownershipRules, sensitiveGlobs, approvalRequiredGlobs, approvedPaths = [], approvalGrants = [], checkedAt, scopeMode = 'inferred', localMode = 'strict', } = input;
     // ── Scope check ──────────────────────────────────────────────────────────────
     const inScope = allowedGlobs.length === 0
         ? true
@@ -530,6 +543,7 @@ function checkFileBoundary(input) {
                 `Use neurcode_session_approve to approve this path, or narrow the task.` +
                 expiredNote,
             options: ['narrow', 'replan'],
+            blockType: 'approval_required_boundary',
             approvalContext: {
                 blockedPath: filePath,
                 approvalRequired: true,
@@ -553,6 +567,7 @@ function checkFileBoundary(input) {
             owners,
             message: `⏸ Neurcode: ${filePath} is owned by ${owners.join(', ')} and outside the declared scope.`,
             options: ['narrow', 'replan'],
+            blockType: 'scope_violation_or_task_expansion',
         };
     }
     if (!effectivelyInScope && isSensitive) {
@@ -565,9 +580,34 @@ function checkFileBoundary(input) {
             owners,
             message: `⏸ Neurcode: ${filePath} is a sensitive boundary (${matchedGlob}) and outside the declared scope.`,
             options: ['narrow', 'replan'],
+            blockType: 'approval_required_boundary',
+            approvalContext: {
+                blockedPath: filePath,
+                approvalRequired: true,
+                owners,
+                suggestedApprovalPath: filePath,
+            },
         };
     }
     if (!effectivelyInScope) {
+        const advisory = localMode === 'advisory'
+            ? 'advisory mode'
+            : localMode === 'paused'
+                ? 'paused local hard-hook mode'
+                : '';
+        if (advisory) {
+            return {
+                verdict: 'warn',
+                inScope,
+                isSensitive,
+                isApprovalRequired,
+                owners,
+                message: `⚠️ Neurcode: ${filePath} is outside the declared task scope. ` +
+                    `Allowed in ${advisory}; record this as a task expansion and re-plan if it is intentional.`,
+                options: ['continue', 'replan'],
+                blockType: 'scope_violation_or_task_expansion',
+            };
+        }
         return {
             verdict: 'block',
             inScope,
@@ -576,6 +616,7 @@ function checkFileBoundary(input) {
             owners,
             message: `⏸ Neurcode: ${filePath} is outside the declared scope for this task.`,
             options: ['narrow', 'replan'],
+            blockType: 'scope_violation_or_task_expansion',
         };
     }
     // ── In-scope but sensitive — advisory warning ─────────────────────────────

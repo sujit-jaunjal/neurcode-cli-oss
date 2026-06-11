@@ -4,7 +4,7 @@
  * One session per .neurcode/sessions/<id>.json.
  * No daemon required; CLI commands and hooks read/write directly.
  */
-import { type OwnershipBoundary, type PlanCoherenceMode, type RepoGovernanceProfile } from './profile';
+import { type OwnershipBoundary, type PlanCoherenceMode, type RepoGovernanceProfile, type RuntimeBlockType, type RuntimeLocalMode } from './profile';
 import { type AgentPlan, type AgentPlanSource, type PlanCoherenceResult } from './agent-plan';
 import { type ArchitectureObligation, type ArchitectureObligationPolicy, type ArchitectureObligationWaiver, type ArchitectureObligationWaiverSource } from './architecture-obligations';
 import type { RepoArchitectureGraph } from './architecture-graph';
@@ -97,6 +97,8 @@ export interface SessionContract {
     intentContract?: IntentContract;
     /** Repo policy for edits that the captured agent plan did not justify. */
     planCoherenceMode?: PlanCoherenceMode;
+    /** Local in-flow enforcement posture for harmless out-of-scope task expansion. */
+    runtimeMode?: RuntimeLocalMode;
     /**
      * Source-free model of the agent's *own stated plan* (steps + expected files),
      * captured from Claude Code hook payloads when the agent exposes one.
@@ -250,12 +252,21 @@ export interface GovernanceSession {
     finishedAt?: string;
     status: 'active' | 'finished';
 }
+export type { RuntimeBlockType, RuntimeLocalMode };
 export interface UnresolvedApprovalBlock {
     filePath: string;
     suggestedApprovalPath: string;
 }
+export interface UnresolvedActionableBlock {
+    filePath: string;
+    blockType: RuntimeBlockType;
+    suggestedApprovalPath?: string | null;
+    proposalId?: string | null;
+    message?: string | null;
+}
 export interface FinishSessionOptions {
     unresolvedApprovalBlocks?: UnresolvedApprovalBlock[];
+    unresolvedActionableBlocks?: UnresolvedActionableBlock[];
     reason?: string;
 }
 export declare function sessionsDir(projectRoot: string): string;

@@ -3,7 +3,7 @@ export declare const RUNTIME_DELIVERY_SCHEMA_VERSION: "neurcode.runtime-delivery
 export declare const MAX_RUNTIME_OUTBOX_EVENTS = 1000;
 export declare const MAX_RUNTIME_DEAD_LETTER_EVENTS = 100;
 export declare const MAX_RUNTIME_DELIVERY_ATTEMPTS = 5;
-export type RuntimeOutboxEventType = 'session_snapshot' | 'approval_ack';
+export type RuntimeOutboxEventType = 'session_snapshot' | 'approval_ack' | 'scope_amendment_ack';
 export interface RuntimeDeliveryEnvelope {
     schemaVersion: typeof RUNTIME_DELIVERY_SCHEMA_VERSION;
     eventId: string;
@@ -57,6 +57,7 @@ export interface RuntimeOutboxStatus {
 export declare function runtimeOutboxPath(repoRoot: string): string;
 export declare function enqueueRuntimeSessionSnapshot(repoRoot: string, sessionId: string, payload: Record<string, unknown>): RuntimeOutboxEvent;
 export declare function enqueueRuntimeApprovalAck(repoRoot: string, sessionId: string, payload: Record<string, unknown>): RuntimeOutboxEvent;
+export declare function enqueueRuntimeScopeAmendmentAck(repoRoot: string, sessionId: string, payload: Record<string, unknown>): RuntimeOutboxEvent;
 export declare function runtimeDeliveryEnvelope(event: RuntimeOutboxEvent): RuntimeDeliveryEnvelope;
 export declare function pendingRuntimeOutboxEvents(repoRoot: string, options?: {
     limit?: number;

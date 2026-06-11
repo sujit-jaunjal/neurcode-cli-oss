@@ -133,6 +133,7 @@ function createSession(projectRoot, profile, goal) {
             approvalGrants: [],
             intentContract,
             planCoherenceMode: profile.runtimeConfig?.planCoherence ?? profile_1.DEFAULT_PLAN_COHERENCE_MODE,
+            runtimeMode: profile.runtimeConfig?.localMode ?? profile_1.DEFAULT_RUNTIME_LOCAL_MODE,
             architectureObligations,
             architectureObligationPolicy,
             architectureObligationWaivers: [],
@@ -148,6 +149,7 @@ function createSession(projectRoot, profile, goal) {
                     scopeMode,
                     intentContract,
                     planCoherenceMode: profile.runtimeConfig?.planCoherence ?? profile_1.DEFAULT_PLAN_COHERENCE_MODE,
+                    runtimeMode: profile.runtimeConfig?.localMode ?? profile_1.DEFAULT_RUNTIME_LOCAL_MODE,
                     architectureObligations,
                     architectureObligationPolicy,
                 },
@@ -711,6 +713,9 @@ function finishSession(projectRoot, sessionId, options = {}) {
             ...(options.reason ? { reason: options.reason } : {}),
             ...(options.unresolvedApprovalBlocks?.length
                 ? { unresolvedApprovalBlocks: options.unresolvedApprovalBlocks }
+                : {}),
+            ...(options.unresolvedActionableBlocks?.length
+                ? { unresolvedActionableBlocks: options.unresolvedActionableBlocks }
                 : {}),
         },
     });

@@ -389,6 +389,29 @@ class ApiClient {
             },
         });
     }
+    async getRuntimeControlPlaneScopeAmendments(params) {
+        const queryParams = new URLSearchParams();
+        if (typeof params?.limit === 'number' && Number.isFinite(params.limit) && params.limit > 0) {
+            queryParams.set('limit', String(Math.floor(params.limit)));
+        }
+        if (typeof params?.offset === 'number' && Number.isFinite(params.offset) && params.offset >= 0) {
+            queryParams.set('offset', String(Math.floor(params.offset)));
+        }
+        if (params?.repoKey)
+            queryParams.set('repoKey', params.repoKey);
+        if (params?.sessionId)
+            queryParams.set('sessionId', params.sessionId);
+        if (params?.status)
+            queryParams.set('status', params.status);
+        const query = queryParams.toString();
+        const url = `${this.apiUrl}/api/v1/runtime/scope-amendments${query ? `?${query}` : ''}`;
+        return this.makeRequest(url, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+    }
     async getRuntimeEvidenceSummary(params) {
         const queryParams = new URLSearchParams();
         if (params?.repoKey)

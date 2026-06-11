@@ -15,6 +15,8 @@ const governance_health_1 = require("../utils/governance-health");
 const cursor_pilot_readiness_1 = require("../utils/cursor-pilot-readiness");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const node_crypto_1 = require("node:crypto");
+const node_fs_1 = require("node:fs");
+const node_path_1 = require("node:path");
 const api_client_1 = require("../api-client");
 const config_1 = require("../config");
 let chalk;
@@ -31,6 +33,33 @@ catch {
         cyan: (s) => s,
         white: (s) => s,
     };
+}
+function setLocalRuntimeMode(repoRoot, localMode) {
+    const path = (0, v0_governance_1.governanceConfigPath)(repoRoot);
+    let existing = {};
+    if ((0, node_fs_1.existsSync)(path)) {
+        try {
+            const parsed = JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+                existing = parsed;
+        }
+        catch {
+            existing = {};
+        }
+    }
+    const next = { ...existing, localMode };
+    (0, node_fs_1.mkdirSync)((0, node_path_1.dirname)(path), { recursive: true });
+    (0, node_fs_1.writeFileSync)(path, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    return { path, localMode };
+}
+function localModeDescription(localMode) {
+    if (localMode === 'strict') {
+        return 'enterprise strict: harmless out-of-scope edits hard-block as scope amendments; sensitive paths still require exact approval';
+    }
+    if (localMode === 'paused') {
+        return 'paused: local hard-hook task-expansion blocks are warnings with auditable evidence; sensitive paths still require exact approval';
+    }
+    return 'advisory: harmless task expansion warns and records evidence; sensitive paths still require exact approval';
 }
 function emitJson(payload) {
     console.log(JSON.stringify(payload, null, 2));
@@ -72,6 +101,7 @@ async function runCursorOnboard(options) {
     const strictMode = options.strict === true;
     const shouldInstallGate = options.installGate === true || strictMode;
     const shouldWriteScopeRules = options.scopeRules === true || strictMode;
+    const localModeWrite = strictMode ? setLocalRuntimeMode(repoRoot, 'strict') : undefined;
     const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: true });
     const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('cursor-mcp');
     const mcpWrite = shouldWrite
@@ -218,6 +248,10 @@ async function runCursorOnboard(options) {
         guard: guardPayload,
         gateInstall,
         strictRules,
+        localMode: localModeWrite || {
+            path: (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot).path,
+            localMode: profile.profile.runtimeConfig.localMode || 'advisory',
+        },
         scopeRules,
         next: [
             'Reload Cursor and enable Home MCP in Settings → MCP (required for Agent tool list).',
@@ -429,6 +463,44 @@ Exit codes (CI contract):
             }
             if (!result.ok)
                 process.exitCode = 1;
+        }
+        catch (error) {
+            emitError(error, options.json);
+        }
+    });
+    cmd
+        .command('mode <mode>')
+        .description('Set local runtime mode: strict, advisory, or paused')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--json', 'Output machine-readable JSON')
+        .action((mode, options) => {
+        try {
+            if (mode !== 'strict' && mode !== 'advisory' && mode !== 'paused') {
+                throw new Error('Invalid mode. Expected strict, advisory, or paused.');
+            }
+            const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+            const write = setLocalRuntimeMode(repoRoot, mode);
+            const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: true });
+            const payload = {
+                schemaVersion: 'neurcode.cursor-runtime-mode.v1',
+                ok: true,
+                repoRoot,
+                mode,
+                path: write.path,
+                profileHash: profile.profile.profileHash,
+                description: localModeDescription(mode),
+            };
+            if (options.json) {
+                emitJson(payload);
+            }
+            else {
+                console.log('');
+                console.log(chalk.bold('Neurcode local runtime mode'));
+                console.log(`Mode:    ${chalk.cyan(mode)}`);
+                console.log(`Config:  ${chalk.dim(write.path)}`);
+                console.log(chalk.dim(localModeDescription(mode)));
+                console.log('');
+            }
         }
         catch (error) {
             emitError(error, options.json);

@@ -9,6 +9,7 @@ exports.evaluateCursorGate = evaluateCursorGate;
 exports.formatCursorGateCiErrors = formatCursorGateCiErrors;
 exports.hookPinCliVersionsToTry = hookPinCliVersionsToTry;
 exports.ensureHookPinnedCli = ensureHookPinnedCli;
+exports.stripNeurcodeHookFragment = stripNeurcodeHookFragment;
 exports.installCursorGateHook = installCursorGateHook;
 exports.doctorCursorGateHook = doctorCursorGateHook;
 const node_crypto_1 = require("node:crypto");
@@ -371,14 +372,25 @@ function resolveCursorGateHookKinds(hook) {
         return ['pre-commit'];
     return ['pre-push'];
 }
+function stripNeurcodeHookFragment(existing, marker, endMarker) {
+    if (!existing.includes(marker))
+        return existing;
+    const pattern = new RegExp(`\\n?${escapeRegExp(marker)}[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`, 'g');
+    return existing.replace(pattern, '\n').trimEnd();
+}
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 function installSingleCursorGateHook(input) {
     const hooksDir = (0, node_path_1.resolve)(input.repoRoot, '.githooks');
     const hookPath = (0, node_path_1.resolve)(hooksDir, input.hookKind);
+    const preservedHookPath = (0, node_path_1.resolve)(hooksDir, `${input.hookKind}.neurcode-preserved`);
     const neurcodeHookPath = (0, node_path_1.resolve)(input.repoRoot, '.neurcode', 'hooks', input.hookKind);
     (0, node_fs_1.mkdirSync)((0, node_path_1.resolve)(input.repoRoot, '.neurcode', 'hooks'), { recursive: true });
     (0, node_fs_1.writeFileSync)(neurcodeHookPath, buildCursorGateHookScript(input.hookKind), 'utf8');
     (0, node_fs_1.chmodSync)(neurcodeHookPath, 0o755);
     const marker = '# >>> neurcode-cursor-gate >>>';
+    const endMarker = '# <<< neurcode-cursor-gate <<<';
     const existing = (0, node_fs_1.existsSync)(hookPath) ? (0, node_fs_1.readFileSync)(hookPath, 'utf8') : '';
     if (existing.includes(marker) && !input.force) {
         const hooksPathResult = runGit(['config', '--get', 'core.hooksPath'], input.repoRoot);
@@ -395,15 +407,30 @@ function installSingleCursorGateHook(input) {
         };
     }
     (0, node_fs_1.mkdirSync)(hooksDir, { recursive: true });
-    const fragment = `${marker}
+    const existingWithoutNeurcode = stripNeurcodeHookFragment(existing, marker, endMarker).trim();
+    if (existingWithoutNeurcode) {
+        (0, node_fs_1.writeFileSync)(preservedHookPath, existingWithoutNeurcode.endsWith('\n') ? existingWithoutNeurcode : `${existingWithoutNeurcode}\n`, 'utf8');
+        (0, node_fs_1.chmodSync)(preservedHookPath, 0o755);
+    }
+    const preservedBlock = existingWithoutNeurcode
+        ? `PRESERVED_HOOK="${preservedHookPath}"
+if [[ -x "$PRESERVED_HOOK" ]]; then
+  "$PRESERVED_HOOK" "$@"
+fi
+
+`
+        : '';
+    const merged = `#!/usr/bin/env bash
+set -euo pipefail
+
+# Neurcode-composed ${input.hookKind}. Existing hook logic runs first as a
+# subprocess so an internal "exit 0" cannot make the Neurcode gate unreachable.
+${preservedBlock}${marker}
 # Neurcode Cursor fail-closed ${input.hookKind === 'pre-push' ? 'push' : 'commit'} gate
-exec "${neurcodeHookPath}"
-# <<< neurcode-cursor-gate <<<
+exec "${neurcodeHookPath}" "$@"
+${endMarker}
 `;
-    const merged = existing.trim()
-        ? `${existing.trimEnd()}\n\n${fragment}`
-        : `#!/usr/bin/env bash\nset -euo pipefail\n\n${fragment}`;
-    (0, node_fs_1.writeFileSync)(hookPath, merged.endsWith('\n') ? merged : `${merged}\n`, 'utf8');
+    (0, node_fs_1.writeFileSync)(hookPath, merged, 'utf8');
     (0, node_fs_1.chmodSync)(hookPath, 0o755);
     return {
         ok: true,

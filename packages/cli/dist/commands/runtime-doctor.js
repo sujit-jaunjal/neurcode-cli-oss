@@ -8,6 +8,7 @@ const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
 const hook_heartbeat_1 = require("../utils/hook-heartbeat");
+const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 /** True when the goal produced an over-broad approval scope (e.g. `**`). */
 function hasOverBroadApprovalScope(session) {
     const globs = session.contract?.approvalRequiredGlobs ?? [];
@@ -53,6 +54,7 @@ function runtimeDoctorCommand(options = {}) {
     const activation = (0, v0_governance_1.inspectClaudeActivation)(repoRoot);
     const copilotActivation = (0, v0_governance_1.inspectCopilotActivation)(repoRoot);
     const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const cursorScopeRules = (0, session_allowlist_rules_1.inspectSessionScopeRules)(repoRoot, activeSession?.sessionId || null);
     const governanceConfig = (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot);
     const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
     const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
@@ -245,6 +247,19 @@ function runtimeDoctorCommand(options = {}) {
                 : 'Run `neurcode status` for live session details.',
     });
     checks.push({
+        id: 'cursor_session_scope_rules',
+        label: 'Cursor session scope rules',
+        status: !cursorScopeRules.exists ? 'skip' : cursorScopeRules.stale ? 'warn' : 'pass',
+        message: !cursorScopeRules.exists
+            ? 'No generated Cursor session scope file is present.'
+            : cursorScopeRules.stale
+                ? `Generated Cursor scope is stale: ${cursorScopeRules.reasons.join('; ')}.`
+                : `Generated Cursor scope is fresh for session ${cursorScopeRules.sessionId}.`,
+        recommendation: cursorScopeRules.exists && cursorScopeRules.stale
+            ? 'Run `neurcode cursor scope refresh`; with no active session it removes the stale generated file.'
+            : undefined,
+    });
+    checks.push({
         id: 'agent_compatibility',
         label: 'Agent compatibility / enforcement truth',
         status: activeCapability
@@ -313,10 +328,10 @@ function runtimeDoctorCommand(options = {}) {
         message: governanceConfig.error
             ? `Malformed config at ${governanceConfig.path}: ${governanceConfig.error}`
             : governanceConfig.exists
-                ? `Config loaded from ${governanceConfig.path}.`
-                : 'No .neurcode/governance.json file. Using detected CODEOWNERS/sensitive boundaries only.',
+                ? `Config loaded from ${governanceConfig.path}. Local mode: ${governanceConfig.config.localMode || 'advisory'}.`
+                : 'No .neurcode/governance.json file. Local mode defaults to advisory for harmless task expansion; detected CODEOWNERS/sensitive boundaries still block.',
         recommendation: governanceConfig.error
-            ? 'Fix .neurcode/governance.json. Expected arrays: approvalRequiredGlobs, sensitiveGlobs, safeSupportGlobs, ignoredGlobs; optional planCoherence: off|warn|block.'
+            ? 'Fix .neurcode/governance.json. Expected arrays: approvalRequiredGlobs, sensitiveGlobs, safeSupportGlobs, ignoredGlobs; optional planCoherence: off|warn|block; optional localMode: strict|advisory|paused.'
             : undefined,
     });
     checks.push({
@@ -376,6 +391,52 @@ function runtimeDoctorCommand(options = {}) {
                 : transport.lastRecoveredAt
                     ? `Transport recovered after a previous delivery failure at ${transport.lastRecoveredAt}.`
                     : undefined,
+    });
+    const latestBlock = activeSession
+        ? [...activeSession.events].reverse().find((event) => event.type === 'check_block')
+        : null;
+    const latestApprovalOrAmendment = activeSession
+        ? [...activeSession.events].reverse().find((event) => event.type === 'approval_decision' ||
+            event.type === 'plan_amended' ||
+            event.type === 'plan_amendment_decision')
+        : null;
+    checks.push({
+        id: 'runtime_pending_actions',
+        label: 'Pending dashboard actions',
+        status: !connection
+            ? 'skip'
+            : transport.pendingApprovalAcks > 0 || transport.deadLetterApprovalAcks > 0
+                ? transport.deadLetterApprovalAcks > 0 ? 'fail' : 'warn'
+                : latestBlock && (!latestApprovalOrAmendment || latestApprovalOrAmendment.ts < latestBlock.ts)
+                    ? 'warn'
+                    : 'pass',
+        message: !connection
+            ? 'Pending cloud actions are available after dashboard pairing.'
+            : transport.pendingApprovalAcks > 0 || transport.deadLetterApprovalAcks > 0
+                ? `${transport.pendingApprovalAcks} local action acknowledgement${transport.pendingApprovalAcks === 1 ? '' : 's'} pending; ${transport.deadLetterApprovalAcks} dead-lettered.`
+                : latestBlock && (!latestApprovalOrAmendment || latestApprovalOrAmendment.ts < latestBlock.ts)
+                    ? `Active session ${activeSession?.sessionId} has an unresolved block at ${latestBlock.filePath || 'unknown path'}.`
+                    : 'No locally visible unapplied dashboard actions.',
+        recommendation: !connection
+            ? undefined
+            : transport.pendingApprovalAcks > 0 || transport.deadLetterApprovalAcks > 0
+                ? 'Run `neurcode runtime actions apply --force`, then `neurcode runtime cloud-status`.'
+                : latestBlock && (!latestApprovalOrAmendment || latestApprovalOrAmendment.ts < latestBlock.ts)
+                    ? 'Run `neurcode runtime actions list`; if an operator has approved/amended scope, run `neurcode runtime actions apply` and retry the blocked path.'
+                    : undefined,
+    });
+    checks.push({
+        id: 'cursor_scope_rules',
+        label: 'Cursor session scope file',
+        status: !cursorScopeRules.exists ? 'skip' : cursorScopeRules.stale ? 'warn' : 'pass',
+        message: !cursorScopeRules.exists
+            ? 'No Cursor session scope file is present.'
+            : cursorScopeRules.stale
+                ? `Stale Cursor scope file at ${cursorScopeRules.filePath}: ${cursorScopeRules.reasons.join('; ')}.`
+                : `Cursor scope file matches active session ${cursorScopeRules.sessionId || activeSession?.sessionId || 'unknown'}.`,
+        recommendation: cursorScopeRules.exists && cursorScopeRules.stale
+            ? 'Run `neurcode runtime reset-stale-cloud --force` for stale cloud state, or restart/onboard Cursor strict mode to regenerate session scope.'
+            : undefined,
     });
     const summary = {
         pass: checks.filter((c) => c.status === 'pass').length,

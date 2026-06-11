@@ -93,11 +93,15 @@ export interface RuntimeGovernanceConfig {
     ignoredGlobs: string[];
     /** How strictly to enforce edits that are not justified by the agent's captured plan. */
     planCoherence?: PlanCoherenceMode;
+    /** Local in-flow enforcement posture for harmless task expansion. */
+    localMode?: RuntimeLocalMode;
     /** How strictly live architecture obligations are enforced while the agent edits. */
     architectureObligations?: ArchitectureObligationPolicy;
 }
 export type PlanCoherenceMode = 'off' | 'warn' | 'block';
 export declare const DEFAULT_PLAN_COHERENCE_MODE: PlanCoherenceMode;
+export type RuntimeLocalMode = 'strict' | 'advisory' | 'paused';
+export declare const DEFAULT_RUNTIME_LOCAL_MODE: RuntimeLocalMode;
 /** Return the owners for a path, applying GitHub CODEOWNERS semantics (last rule wins). */
 export declare function ownersForPath(path: string, rules: OwnershipBoundary[]): string[];
 export declare function buildRepoGovernanceProfile(input: ProfileInput): RepoGovernanceProfile;
@@ -131,8 +135,11 @@ export interface BoundaryCheckInput {
      * appear in-scope due to a broad glob.
      */
     scopeMode?: 'explicit' | 'inferred' | 'ambiguous';
+    /** Local hard-hook posture. Sessions pass their contract mode; direct callers default strict. */
+    localMode?: RuntimeLocalMode;
 }
 export type BoundaryVerdict = 'ok' | 'warn' | 'block';
+export type RuntimeBlockType = 'approval_required_boundary' | 'scope_violation_or_task_expansion' | 'profile_or_runtime_health_block' | 'multi_file_or_tool_shape_block';
 export interface BoundaryCheckResult {
     verdict: BoundaryVerdict;
     inScope: boolean;
@@ -142,6 +149,8 @@ export interface BoundaryCheckResult {
     message: string;
     /** Actions available to the agent/human at this decision point. */
     options: ('continue' | 'narrow' | 'replan')[];
+    /** Explicit block/warning category for runtime control-plane UX. */
+    blockType?: RuntimeBlockType;
     /**
      * Machine-readable fields populated only when verdict === 'block' due to an
      * approval-required boundary. The agent/hook uses these to surface a

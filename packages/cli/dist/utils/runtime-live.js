@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.publishRuntimeLiveStatus = publishRuntimeLiveStatus;
 exports.flushRuntimeLiveOutbox = flushRuntimeLiveOutbox;
+exports.applyPendingRuntimeLiveActions = applyPendingRuntimeLiveActions;
 exports.applyPendingRuntimeLiveApprovals = applyPendingRuntimeLiveApprovals;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const config_1 = require("../config");
@@ -228,10 +229,22 @@ async function flushRuntimeLiveOutbox(repoRoot, options = {}) {
                     }),
                 }, options.timeoutMs ?? 1_500);
             }
-            else {
+            else if (event.eventType === 'approval_ack') {
                 const approvalId = typeof event.payload.approvalId === 'string' ? event.payload.approvalId : '';
                 response = approvalId
                     ? await runtimeFetch(repoRoot, `/api/v1/runtime/live-sessions/${encodeURIComponent(event.sessionId)}/approvals/${encodeURIComponent(approvalId)}/applied`, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            ...event.payload.body,
+                            delivery: envelope,
+                        }),
+                    }, options.timeoutMs ?? 1_500)
+                    : null;
+            }
+            else {
+                const amendmentId = typeof event.payload.amendmentId === 'string' ? event.payload.amendmentId : '';
+                response = amendmentId
+                    ? await runtimeFetch(repoRoot, `/api/v1/runtime/live-sessions/${encodeURIComponent(event.sessionId)}/scope-amendments/${encodeURIComponent(amendmentId)}/applied`, {
                         method: 'POST',
                         body: JSON.stringify({
                             ...event.payload.body,
@@ -281,6 +294,21 @@ async function fetchPendingApprovals(repoRoot, sessionId) {
         return [];
     }
 }
+async function fetchPendingScopeAmendments(repoRoot, sessionId) {
+    const auth = runtimeAuth(repoRoot);
+    if (!auth)
+        return [];
+    try {
+        const response = await runtimeFetch(repoRoot, `/api/v1/runtime/live-sessions/${encodeURIComponent(sessionId)}/scope-amendments?repoKey=${encodeURIComponent(auth.repoKey)}`, { method: 'GET' }, 1500);
+        if (!response || !response.ok)
+            return [];
+        const body = await response.json();
+        return Array.isArray(body.scopeAmendments) ? body.scopeAmendments : [];
+    }
+    catch {
+        return [];
+    }
+}
 function queueApprovalAcknowledgement(repoRoot, sessionId, approval, body) {
     if (!approval.id)
         return;
@@ -289,11 +317,24 @@ function queueApprovalAcknowledgement(repoRoot, sessionId, approval, body) {
         body,
     });
 }
-async function applyPendingRuntimeLiveApprovals(repoRoot, sessionId) {
+function queueScopeAmendmentAcknowledgement(repoRoot, sessionId, amendment, body) {
+    if (!amendment.id)
+        return;
+    (0, runtime_outbox_1.enqueueRuntimeScopeAmendmentAck)(repoRoot, sessionId, {
+        amendmentId: amendment.id,
+        body,
+    });
+}
+async function applyPendingRuntimeLiveActions(repoRoot, sessionId) {
     await flushRuntimeLiveOutbox(repoRoot, { maxEvents: 20, timeoutMs: 750 });
-    const approvals = await fetchPendingApprovals(repoRoot, sessionId);
+    const [approvals, scopeAmendments] = await Promise.all([
+        fetchPendingApprovals(repoRoot, sessionId),
+        fetchPendingScopeAmendments(repoRoot, sessionId),
+    ]);
     let applied = 0;
     let revoked = 0;
+    let scopeAmended = 0;
+    let scopeDenied = 0;
     let failed = 0;
     for (const approval of approvals) {
         if (!approval.path)
@@ -355,7 +396,50 @@ async function applyPendingRuntimeLiveApprovals(repoRoot, sessionId) {
             });
         }
     }
+    for (const amendment of scopeAmendments) {
+        if (amendment.status === 'denied') {
+            scopeDenied += 1;
+            queueScopeAmendmentAcknowledgement(repoRoot, sessionId, amendment, {
+                status: 'denied',
+            });
+            continue;
+        }
+        if (amendment.status !== 'pending')
+            continue;
+        const scopeFiles = Array.isArray(amendment.scopeFiles) ? amendment.scopeFiles.filter(Boolean) : [];
+        const scopeGlobs = Array.isArray(amendment.scopeGlobs) ? amendment.scopeGlobs.filter(Boolean) : [];
+        try {
+            const result = (0, governance_runtime_1.amendAgentPlan)(repoRoot, {
+                sessionId,
+                summary: `Dashboard-approved scope amendment for ${amendment.blockedPath || scopeFiles[0] || scopeGlobs[0] || 'runtime session'}`,
+                addExpectedFiles: scopeFiles,
+                addExpectedGlobs: scopeGlobs,
+                addSteps: [
+                    `Include ${amendment.blockedPath || scopeFiles[0] || scopeGlobs[0] || 'the approved task expansion'} in the governed task scope`,
+                ],
+                reason: amendment.reason || 'dashboard scope amendment',
+                source: 'manual',
+                proposedBy: 'human',
+                decidedBy: amendment.requestedBy || 'dashboard-operator',
+            });
+            scopeAmended += 1;
+            queueScopeAmendmentAcknowledgement(repoRoot, sessionId, amendment, {
+                status: 'applied',
+                appliedRevision: result.revision,
+            });
+        }
+        catch (error) {
+            failed += 1;
+            queueScopeAmendmentAcknowledgement(repoRoot, sessionId, amendment, {
+                status: 'failed',
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
     await flushRuntimeLiveOutbox(repoRoot, { maxEvents: 20, timeoutMs: 750 });
-    return { applied, revoked, failed };
+    return { applied, revoked, scopeAmended, scopeDenied, failed };
+}
+async function applyPendingRuntimeLiveApprovals(repoRoot, sessionId) {
+    return applyPendingRuntimeLiveActions(repoRoot, sessionId);
 }
 //# sourceMappingURL=runtime-live.js.map

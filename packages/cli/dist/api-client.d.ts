@@ -152,6 +152,26 @@ export interface RuntimeLiveApproval {
     revokedAt?: string | null;
     revocationReason?: string | null;
 }
+export interface RuntimeLiveScopeAmendment {
+    id: string | null;
+    repoId?: string;
+    repoName?: string;
+    repoKey?: string;
+    sessionId: string;
+    blockedPath: string | null;
+    scopeFiles: string[];
+    scopeGlobs: string[];
+    reason?: string | null;
+    status: 'requested' | 'pending' | 'applied' | 'failed' | 'denied' | 'expired' | string;
+    expiresAt?: string | null;
+    appliedRevision?: number | null;
+    requestedAt?: string;
+    appliedAt?: string | null;
+    failedAt?: string | null;
+    failureMessage?: string | null;
+    deniedAt?: string | null;
+    denialReason?: string | null;
+}
 export interface RuntimeLiveSession {
     id: string;
     repoId: string;
@@ -220,6 +240,20 @@ export interface RuntimeLiveSessionsResponse {
 export interface RuntimeControlPlaneApprovalsResponse {
     generatedAt: string;
     approvals: RuntimeLiveApproval[];
+    pageInfo?: {
+        limit: number;
+        offset: number;
+        returned: number;
+        hasMore: boolean;
+    };
+    privacy: {
+        sourceUploaded: false;
+        uploadedFields: string[];
+    };
+}
+export interface RuntimeControlPlaneScopeAmendmentsResponse {
+    generatedAt: string;
+    scopeAmendments: RuntimeLiveScopeAmendment[];
     pageInfo?: {
         limit: number;
         offset: number;
@@ -313,13 +347,23 @@ export interface RuntimeOperationsStatusResponse {
         lastLiveSeenAt: string | null;
     };
     approvals?: {
+        requested?: number;
         pending: number;
+        actionablePending?: number;
         expired: number;
         applied: number;
         denied: number;
         revoked: number;
         failed: number;
         revocationPendingAck: number;
+    };
+    scopeAmendments?: {
+        requested?: number;
+        pending: number;
+        expired: number;
+        applied: number;
+        denied: number;
+        failed: number;
     };
     privacy: {
         sourceUploaded: false;
@@ -571,6 +615,13 @@ export declare class ApiClient {
         sessionId?: string;
         status?: string;
     }): Promise<RuntimeControlPlaneApprovalsResponse>;
+    getRuntimeControlPlaneScopeAmendments(params?: {
+        limit?: number;
+        offset?: number;
+        repoKey?: string;
+        sessionId?: string;
+        status?: string;
+    }): Promise<RuntimeControlPlaneScopeAmendmentsResponse>;
     getRuntimeEvidenceSummary(params?: {
         repoKey?: string;
     }): Promise<RuntimeEvidenceSummaryResponse>;
