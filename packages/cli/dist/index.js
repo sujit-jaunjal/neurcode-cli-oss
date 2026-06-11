@@ -1100,6 +1100,7 @@ sessionCmd
     .requiredOption('--path <path>', 'File path or glob to approve')
     .option('--reason <text>', 'Human-readable approval reason')
     .option('--session-id <id>', 'Session ID to approve against (default: active session)')
+    .option('--request-id <id>', 'Runtime Control Plane approval request id to reconcile when using local/demo fallback')
     .option('--dir <path>', 'Repository root (default: current directory)')
     .option('--json', 'Output machine-readable JSON')
     .action(async (options) => {
@@ -1107,6 +1108,7 @@ sessionCmd
         path: options.path,
         reason: options.reason,
         sessionId: options.sessionId,
+        requestId: options.requestId,
         dir: options.dir,
         json: options.json === true,
     });

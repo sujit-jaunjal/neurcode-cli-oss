@@ -21,6 +21,7 @@ interface SessionCommandOptions {
     local?: boolean;
     dir?: string;
     path?: string;
+    requestId?: string;
     obligationId?: string;
     reason?: string;
     expiresAt?: string;

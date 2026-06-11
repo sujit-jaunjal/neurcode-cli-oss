@@ -646,9 +646,21 @@ async function approveGovernanceSessionCommand(options = {}) {
     try {
         const sessionId = options.sessionId || (0, governance_runtime_1.loadActiveSession)(repoRoot)?.sessionId;
         const normalizedPath = normalizeApprovalPathForCloudMatch(repoRoot, path);
-        const matchingCloudApproval = sessionId
+        const discoveredCloudApproval = sessionId
             ? await (0, runtime_live_1.findRuntimeLiveApprovalRequest)(repoRoot, sessionId, normalizedPath)
             : null;
+        const explicitCloudApproval = options.requestId && sessionId
+            ? {
+                id: options.requestId,
+                sessionId,
+                path: normalizedPath,
+                reason: options.reason || 'Operator approved exact path',
+                status: 'requested',
+                requestedBy: 'local_operator',
+                expiresAt: undefined,
+            }
+            : null;
+        const matchingCloudApproval = discoveredCloudApproval || explicitCloudApproval;
         const result = (0, governance_runtime_1.approveSession)(repoRoot, path, {
             reason: options.reason,
             sessionId: options.sessionId,
@@ -669,13 +681,27 @@ async function approveGovernanceSessionCommand(options = {}) {
             await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
         }
         if (options.json) {
-            console.log(JSON.stringify({ ok: true, repoRoot, ...result }, null, 2));
+            console.log(JSON.stringify({
+                ok: true,
+                repoRoot,
+                ...result,
+                runtimeApprovalRequest: matchingCloudApproval?.id
+                    ? {
+                        id: matchingCloudApproval.id,
+                        source: discoveredCloudApproval ? 'matched' : 'explicit',
+                        acknowledgementQueued: true,
+                    }
+                    : null,
+            }, null, 2));
             return;
         }
         console.log('');
         console.log(chalk.green(`Approved: ${result.approvedPath}`));
         console.log(chalk.dim(`Session:  ${result.sessionId}`));
         console.log(chalk.dim(`Approved paths: ${compactList(result.approvedPaths, 12)}`));
+        if (matchingCloudApproval?.id) {
+            console.log(chalk.dim(`Runtime request: ${matchingCloudApproval.id} (${discoveredCloudApproval ? 'matched' : 'explicit'})`));
+        }
         console.log('');
     }
     catch (error) {
