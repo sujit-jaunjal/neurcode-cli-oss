@@ -14,7 +14,7 @@ export declare const CLAUDE_GOVERNANCE_HOOKS: {
         readonly matcher: "Bash|Edit|Write|MultiEdit";
         readonly hooks: readonly [{
             readonly type: "command";
-            readonly command: "neurcode session-hook check";
+            readonly command: "neurcode session-hook check --trusted-adapter claude-code-hooks --trusted-timing before_write";
         }];
     }];
     readonly Stop: readonly [{
@@ -45,18 +45,24 @@ export interface EnsureProfileResult extends ProfileStalenessResult {
     refreshed: boolean;
 }
 export type ProfileFreshnessAction = 'none' | 'auto_refreshed' | 'session_restart_required' | 'manual_refresh_required';
+export type SessionProfileCompatibility = 'not_applicable' | 'compatible' | 'incompatible' | 'unknown';
 export interface ProfileFreshnessSignal {
     status: ProfileFreshness;
     refreshed: boolean;
     action: ProfileFreshnessAction;
+    sessionCompatibility: SessionProfileCompatibility;
     checkedAt: string;
     profilePath: string;
     reasons: string[];
     cachedProfileHash?: string;
     cachedTopologyHash?: string;
+    sessionProfileHash?: string | null;
     currentProfileHash: string;
     currentTopologyHash: string;
     trackedFileCount: number;
+    recoveryReason?: 'active_session_profile_changed';
+    recoveryCommand?: string;
+    unresolvedHumanDecisions?: boolean;
 }
 export interface ClaudeHooksResult {
     settingsPath: string;
@@ -168,7 +174,12 @@ export declare function buildCurrentGovernanceProfile(repoRoot: string, options?
 export declare function profilePath(repoRoot: string): string;
 export declare function readGovernanceProfile(repoRoot: string): ProfileReadResult;
 export declare function writeGovernanceProfile(repoRoot: string, profile: RepoGovernanceProfile): string;
-export declare function buildProfileFreshnessSignal(result: ProfileStalenessResult | EnsureProfileResult, action?: ProfileFreshnessAction): ProfileFreshnessSignal;
+export declare function buildProfileFreshnessSignal(result: ProfileStalenessResult | EnsureProfileResult, action?: ProfileFreshnessAction, options?: {
+    sessionProfileHash?: string | null;
+    recoveryReason?: 'active_session_profile_changed';
+    recoveryCommand?: string;
+    unresolvedHumanDecisions?: boolean;
+}): ProfileFreshnessSignal;
 export declare function profileFreshnessActionForSession(result: ProfileStalenessResult | EnsureProfileResult, sessionProfileHash: string | null | undefined): ProfileFreshnessAction;
 export declare function getLastProfileCacheHit(): boolean;
 export declare function clearProfileStalenessCache(repoRoot?: string): void;
@@ -179,6 +190,13 @@ export declare function ensureFreshGovernanceProfile(repoRoot: string, options?:
     force?: boolean;
     bypassCache?: boolean;
 }): EnsureProfileResult;
+export declare function setRepoSymbolDuplicateMode(repoRoot: string, mode: NonNullable<RuntimeGovernanceConfig['repoSymbolDuplicateMode']>): {
+    mode: NonNullable<RuntimeGovernanceConfig['repoSymbolDuplicateMode']>;
+    source: 'governance_config';
+    configPath: string;
+    profilePath: string;
+    profileHash: string;
+};
 /**
  * Parse the node entrypoint path out of a pinned hook command.
  * Pinned form: `node "<entrypoint>" session-hook <sub>` (entrypoint may be quoted or bare).

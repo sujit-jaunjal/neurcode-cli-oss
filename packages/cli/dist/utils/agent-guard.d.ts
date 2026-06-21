@@ -72,6 +72,7 @@ export interface AgentGuardEvaluation {
     nextAction: string;
     privacy: AgentGuardArtifact['privacy'];
 }
+export declare function isNeurcodeManagedArtifactPath(path: string): boolean;
 export declare function captureAgentGuardSnapshot(repoRoot: string): AgentGuardFileSnapshot[];
 export declare function snapshotMapFromFiles(files: AgentGuardFileSnapshot[]): Map<string, AgentGuardFileSnapshot>;
 export declare function snapshotFilesFromMap(map: Map<string, AgentGuardFileSnapshot>): AgentGuardFileSnapshot[];

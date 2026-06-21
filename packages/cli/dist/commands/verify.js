@@ -136,7 +136,9 @@ function logCiPolicyOnlyOutcomeExplainability(params) {
     }
     const modeLine = params.source === 'ci'
         ? '`verify --ci` uses deterministic local governance (compiled/custom policy + structural rules). Remote plan-verify API is not used.'
-        : '`--policy-only` — local policy + structural governance without plan adherence.';
+        : params.source === 'local_only'
+            ? '`--local-only` uses deterministic local governance (compiled/custom policy + structural rules) without the remote API.'
+            : '`--policy-only` — local policy + structural governance without plan adherence.';
     const sev = (s) => String(s || '').toLowerCase();
     const sBlock = params.structuralViolations.filter((v) => v.severity === 'BLOCKING').length;
     const sAdv = params.structuralViolations.length - sBlock;
@@ -1465,8 +1467,28 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     // Structural violations are passed to the canonical pipeline via payload.structuralViolations
     // (see line ~2584). Do NOT merge them into policyViolations — that would create structural:*
     // duplicates that contaminate the canonical finding graph.
+    const structuralBlockingCount = policyOnlyStructural.violations
+        .filter((violation) => violation.severity === 'BLOCKING').length;
+    const structuralAdvisoryCount = policyOnlyStructural.violations.length - structuralBlockingCount;
+    const coverageNotEvaluated = policyOnlyStructural.coveragePosture === 'not_evaluated';
+    const coverageIncomplete = policyOnlyStructural.coveragePosture === 'partial';
+    const coverageViolations = [
+        ...policyOnlyStructural.filesSkipped.map((file) => ({
+            file: file.path,
+            rule: 'structural_coverage_incomplete',
+            severity: 'block',
+            message: `Structural analysis skipped (${file.reasonCode}); verification coverage is incomplete.`,
+        })),
+    ];
+    // Coverage blockers are added after exception processing: an exception may suppress
+    // a policy rule, but it cannot turn an unevaluated file into verified evidence.
+    policyViolations.push(...coverageViolations);
     policyDecision = (0, policy_decision_1.resolvePolicyDecisionFromViolations)(policyViolations);
-    const effectiveVerdict = policyDecision === 'block' ? 'FAIL' : policyDecision === 'warn' ? 'WARN' : 'PASS';
+    const effectiveVerdict = policyDecision === 'block' || structuralBlockingCount > 0 || coverageIncomplete || coverageNotEvaluated
+        ? 'FAIL'
+        : policyDecision === 'warn' || structuralAdvisoryCount > 0
+            ? 'WARN'
+            : 'PASS';
     const grade = effectiveVerdict === 'PASS' ? 'A' : effectiveVerdict === 'WARN' ? 'C' : 'F';
     const score = effectiveVerdict === 'PASS' ? 100 : effectiveVerdict === 'WARN' ? 50 : 0;
     const violationsOutput = policyViolations.map((v) => ({
@@ -1478,9 +1500,15 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     }));
     const message = effectiveVerdict === 'PASS'
         ? '✅ Policy check passed (General Governance mode)'
-        : policyViolations.length > 0
-            ? `Policy violations: ${policyViolations.map((v) => `${v.file}: ${v.message || v.rule}`).join('; ')}`
-            : 'Policy check completed';
+        : coverageIncomplete
+            ? `Verification coverage incomplete: ${policyOnlyStructural.filesAnalyzed}/${policyOnlyStructural.filesRequested} requested files structurally analyzed.`
+            : coverageNotEvaluated
+                ? `Structural verification not evaluated: no changed files are supported by the structural engine (${policyOnlyStructural.filesUnsupported.length} outside applicability).`
+                : policyViolations.length > 0
+                    ? `Policy violations: ${policyViolations.map((v) => `${v.file}: ${v.message || v.rule}`).join('; ')}`
+                    : structuralBlockingCount > 0
+                        ? `Structural violations: ${structuralBlockingCount} blocking finding(s).`
+                        : 'Policy check completed with advisory findings';
     const policyExceptionsSummary = {
         sourceMode: policyExceptionResolution.mode,
         sourceWarning: policyExceptionResolution.warning,
@@ -1544,6 +1572,23 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         mode: 'policy_only',
         policyOnly: true,
         policyOnlySource: source,
+        evaluationStatus: coverageNotEvaluated ? 'not_evaluated' : coverageIncomplete ? 'partial' : 'evaluated',
+        verificationCoverage: {
+            posture: policyOnlyStructural.coveragePosture,
+            context: options.staged
+                ? 'staged changes'
+                : options.base
+                    ? `working tree vs ${options.base}`
+                    : options.head
+                        ? 'working tree vs HEAD'
+                        : 'resolved default diff context',
+            filesRequested: policyOnlyStructural.filesRequested,
+            filesAnalyzed: policyOnlyStructural.filesAnalyzed,
+            filesSkipped: policyOnlyStructural.filesSkipped.length,
+            skipped: policyOnlyStructural.filesSkipped,
+            filesUnsupported: policyOnlyStructural.filesUnsupported.length,
+            unsupported: policyOnlyStructural.filesUnsupported,
+        },
         replayChecksum: policyOnlyReplayChecksum,
         replayMode: 'local-structural',
         ...governancePayload,
@@ -1569,7 +1614,7 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     const policyOnlyReplayCustody = (0, replay_custody_1.captureVerifyReplayCustody)({
         projectRoot,
         diffContext: `${options.base || 'HEAD'} vs working tree`,
-        filesAnalyzed: diffFiles.length,
+        filesAnalyzed: policyOnlyStructural.filesAnalyzed,
         planId: null,
         verificationSource: policyOnlyVerificationSource,
         policyLockFingerprint: (0, policy_packs_1.readPolicyLockFile)(projectRoot).lock?.effective.fingerprint || null,
@@ -1580,13 +1625,15 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         advisoryCount: policyViolations.filter((v) => v.severity !== 'block').length
             + policyOnlyStructural.violations.filter((v) => v.severity !== 'BLOCKING').length,
         suppressedCount: policyOnlyStructural.suppressedCount,
-        structuralBlockingCount: policyOnlyStructural.violations.filter((v) => v.severity === 'BLOCKING').length,
-        structuralAdvisoryCount: policyOnlyStructural.violations.filter((v) => v.severity !== 'BLOCKING').length,
+        structuralBlockingCount,
+        structuralAdvisoryCount,
         deterministicSignals: policyOnlyStructural.violations.filter((v) => v.determinism === 'deterministic-structural').length,
         heuristicSignals: policyOnlyStructural.violations.filter((v) => v.determinism === 'heuristic-advisory').length,
-        overallTrustScore: policyOnlyStructural.violations.length > 0
-            ? Math.round((policyOnlyStructural.violations.filter((v) => v.determinism === 'deterministic-structural').length / policyOnlyStructural.violations.length) * 100)
-            : 100,
+        overallTrustScore: coverageIncomplete || coverageNotEvaluated
+            ? 0
+            : policyOnlyStructural.violations.length > 0
+                ? Math.round((policyOnlyStructural.violations.filter((v) => v.determinism === 'deterministic-structural').length / policyOnlyStructural.violations.length) * 100)
+                : 100,
         verdict: effectiveVerdict,
         governanceDecision: governanceAnalysis.governanceDecision.summary || 'policy-only',
         actor: ciModeEnabled ? 'ci-runner' : 'local-user',
@@ -1609,12 +1656,19 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         if (effectiveVerdict === 'PASS') {
             console.log(chalk.green('✅ Policy check passed'));
         }
+        else if (effectiveVerdict === 'WARN') {
+            console.log(chalk.yellow(`⚠️  Policy verification completed with advisory findings: ${policyViolations.length + structuralAdvisoryCount}`));
+        }
         else {
-            console.log(chalk.red(`❌ Policy violations detected: ${policyViolations.length}`));
+            console.log(chalk.red(`❌ Verification failed: ${policyViolations.length + structuralBlockingCount} blocking signal(s)`));
             policyViolations.forEach((v) => {
                 console.log(chalk.red(`   • ${v.file}: ${v.message || v.rule}`));
             });
         }
+        policyOnlyStructural.violations.forEach((violation) => {
+            const render = violation.severity === 'BLOCKING' ? chalk.red : chalk.yellow;
+            console.log(render(`   • ${violation.filePath}:${violation.line || 1}: ${violation.ruleName} — ${violation.operationalRisk}`));
+        });
         console.log(chalk.dim(`   Policy exceptions source: ${describePolicyExceptionSource(policyExceptionsSummary.sourceMode)}`));
         if (policyExceptionsSummary.suppressed > 0) {
             console.log(chalk.yellow(`   Policy exceptions applied: ${policyExceptionsSummary.suppressed}`));
@@ -1652,6 +1706,8 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         jsonMode: Boolean(options.json),
         governance: governancePayload,
     });
+    if (coverageNotEvaluated && policyDecision !== 'block' && structuralBlockingCount === 0)
+        return 3;
     return effectiveVerdict === 'FAIL' ? 2 : effectiveVerdict === 'WARN' ? 1 : 0;
 }
 async function verifyCommand(options) {
@@ -2116,6 +2172,12 @@ async function verifyCommand(options) {
         // NEURCODE_VERIFY_LOCAL_ONLY=1 or --local-only: skip API entirely, run structural-only
         const localOnlyMode = isEnabledFlag(process.env.NEURCODE_VERIFY_LOCAL_ONLY)
             || options.localOnly === true;
+        // `--local-only` is a compatibility spelling for the supported deterministic
+        // policy engine. It must not enter the legacy structural-only success path.
+        if (localOnlyMode) {
+            options.policyOnly = true;
+            options.requirePlan = false;
+        }
         const enforceCompatibilityHandshake = !localOnlyMode
             && (isEnabledFlag(process.env.NEURCODE_VERIFY_ENFORCE_COMPAT_HANDSHAKE)
                 || strictArtifactMode
@@ -2321,6 +2383,7 @@ async function verifyCommand(options) {
         // Determine which diff to capture.
         let diffText;
         let diffContextLabel = '';
+        let includeUntracked = false;
         // Operational lifecycle guardrail: when the diff context requires a
         // HEAD reference but the repo has no initial commit yet, surface
         // structured guidance instead of leaking raw git stderr. (See
@@ -2339,10 +2402,12 @@ async function verifyCommand(options) {
         else if (options.base) {
             diffText = (0, git_1.getDiffFromBase)(options.base);
             diffContextLabel = `working tree vs ${options.base}`;
+            includeUntracked = true;
         }
         else if (options.head) {
             diffText = (0, child_process_1.execSync)('git diff HEAD', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
             diffContextLabel = 'working tree vs HEAD';
+            includeUntracked = true;
         }
         else {
             // Default: resolve a PR-like base context first (origin/main or origin/master).
@@ -2353,6 +2418,7 @@ async function verifyCommand(options) {
                 diffContextLabel = defaultContext.currentBranch
                     ? `${defaultContext.currentBranch} vs ${defaultContext.baseRef}`
                     : `working tree vs ${defaultContext.baseRef}`;
+                includeUntracked = true;
             }
             else {
                 diffText = (0, child_process_1.execSync)('git diff --cached', { maxBuffer: 1024 * 1024 * 1024, encoding: 'utf-8' });
@@ -2362,11 +2428,11 @@ async function verifyCommand(options) {
         if (!options.json && diffContextLabel) {
             console.log(chalk.dim(`   Diff context: ${diffContextLabel}`));
         }
-        const untrackedDiffFiles = getUntrackedDiffFiles(projectRoot);
+        const untrackedDiffFiles = includeUntracked ? getUntrackedDiffFiles(projectRoot) : [];
         if (!diffText.trim() && untrackedDiffFiles.length === 0) {
             if (!options.json) {
-                console.log(chalk.yellow('⚠️  No changes detected in current diff context.'));
-                console.log(chalk.dim('   Tip: Ensure changes are staged or run against a base branch.'));
+                console.log(chalk.yellow('⚠️  Verification not evaluated: no files in the selected diff context.'));
+                console.log(chalk.dim(`   Selected context: ${diffContextLabel || 'unresolved'}. No PASS was produced.`));
             }
             else {
                 // Surface runtime capabilities even on the empty-diff path so
@@ -2384,7 +2450,16 @@ async function verifyCommand(options) {
                     bloatFiles: [],
                     plannedFilesModified: 0,
                     totalPlannedFiles: 0,
-                    message: 'No changes detected in current diff context.',
+                    message: 'Verification not evaluated: no files in the selected diff context.',
+                    evaluationStatus: 'not_evaluated',
+                    verificationCoverage: {
+                        posture: 'not_evaluated',
+                        context: diffContextLabel,
+                        filesRequested: 0,
+                        filesAnalyzed: 0,
+                        filesSkipped: 0,
+                        filesUnsupported: 0,
+                    },
                     scopeGuardPassed: false,
                     runtimeCapabilities: {
                         schemaVersion: 'neurcode.runtime-capabilities.v1',
@@ -2407,7 +2482,7 @@ async function verifyCommand(options) {
                 });
             }
             recordVerifyEvent('NO_CHANGES', 'diff=empty');
-            exitWithEvidence(0);
+            exitWithEvidence(3);
         }
         // Parse tracked/staged diff and merge untracked files so plan adherence
         // correctly counts newly created files before they are git-added.
@@ -2438,7 +2513,7 @@ async function verifyCommand(options) {
         // ── Local-only mode (Part 8): run structural analysis and exit, no API calls ──
         // Triggered by NEURCODE_VERIFY_LOCAL_ONLY=1 or --local-only.
         // Deterministic structural governance MUST work offline, with zero API dependency.
-        if (localOnlyMode) {
+        if (localOnlyMode && options.policyOnly !== true) {
             if (!options.json) {
                 console.log(chalk.cyan('\n🔍 Local-only mode: deterministic intent-runtime verification (no API required)...'));
             }
@@ -2891,8 +2966,8 @@ async function verifyCommand(options) {
         const summary = (0, diff_parser_1.getDiffSummary)(diffFiles);
         if (diffFiles.length === 0) {
             if (!options.json) {
-                console.log(chalk.yellow('⚠️  No changes detected in current diff context.'));
-                console.log(chalk.dim('   Tip: Ensure changes are staged or run against a base branch.'));
+                console.log(chalk.yellow('⚠️  Verification not evaluated: all files in the selected diff context were excluded.'));
+                console.log(chalk.dim('   No PASS was produced. Review ignore rules or select a different diff context.'));
             }
             else {
                 emitVerifyJson({
@@ -2905,12 +2980,21 @@ async function verifyCommand(options) {
                     bloatFiles: [],
                     plannedFilesModified: 0,
                     totalPlannedFiles: 0,
-                    message: 'No changes detected in current diff context.',
+                    message: 'Verification not evaluated: all files in the selected diff context were excluded.',
+                    evaluationStatus: 'not_evaluated',
+                    verificationCoverage: {
+                        posture: 'not_evaluated',
+                        context: diffContextLabel,
+                        filesRequested: allDiffFiles.length,
+                        filesAnalyzed: 0,
+                        filesSkipped: allDiffFiles.length,
+                        filesUnsupported: 0,
+                    },
                     scopeGuardPassed: false,
                 });
             }
-            recordVerifyEvent('NO_CHANGES', 'diff_files=0');
-            exitWithEvidence(0);
+            recordVerifyEvent('NO_CHANGES', 'diff_files=0;status=not_evaluated');
+            exitWithEvidence(3);
         }
         const ignoreFilter = (0, ignore_1.loadIgnore)(projectRoot);
         const runtimeIgnoreSet = getRuntimeIgnoreSetFromEnv();
@@ -3148,7 +3232,7 @@ async function verifyCommand(options) {
         // --policy-only: General Governance (policy only, no plan enforcement)
         // ============================================
         if (options.policyOnly) {
-            await runPolicyOnlyModeAndExit(ciModeEnabled ? 'ci' : 'explicit');
+            await runPolicyOnlyModeAndExit(localOnlyMode ? 'local_only' : ciModeEnabled ? 'ci' : 'explicit');
         }
         const requirePlan = options.requirePlan === true
             || process.env.NEURCODE_VERIFY_REQUIRE_PLAN === '1'

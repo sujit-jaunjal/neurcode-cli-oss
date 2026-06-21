@@ -43,6 +43,7 @@ const profile_1 = require("./profile");
 const agent_plan_1 = require("./agent-plan");
 const architecture_obligations_1 = require("./architecture-obligations");
 const ai_change_record_1 = require("./ai-change-record");
+const intent_privacy_1 = require("./intent-privacy");
 exports.DEFAULT_APPROVAL_TTL_MS = 60 * 60 * 1000;
 exports.DEFAULT_OBLIGATION_WAIVER_TTL_MS = 60 * 60 * 1000;
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -54,6 +55,105 @@ function sessionPath(projectRoot, sessionId) {
 }
 function activePointerPath(projectRoot) {
     return (0, node_path_1.join)(projectRoot, '.neurcode', 'active-session.json');
+}
+function uniquePrivacyReasons(values) {
+    return Array.from(new Set(values)).sort((left, right) => left.localeCompare(right));
+}
+const MAX_LOCAL_PRIVATE_DEPTH = 12;
+const MAX_LOCAL_PRIVATE_ARRAY_ITEMS = 200;
+const MAX_LOCAL_PRIVATE_OBJECT_KEYS = 200;
+const MAX_LOCAL_PRIVATE_NODES = 20_000;
+const LOCAL_PRIVATE_PRIORITY_KEYS = new Set([
+    'approvalContext',
+    'blockContext',
+    'planAmendment',
+    'architectureEdit',
+    'obligation',
+    'continuityContext',
+]);
+function boundedLocalPrivateEntries(value) {
+    const entries = Object.entries(value);
+    if (entries.length <= MAX_LOCAL_PRIVATE_OBJECT_KEYS)
+        return entries;
+    const priority = entries.filter(([key]) => LOCAL_PRIVATE_PRIORITY_KEYS.has(key));
+    const remaining = entries.filter(([key]) => !LOCAL_PRIVATE_PRIORITY_KEYS.has(key));
+    return [...priority, ...remaining].slice(0, MAX_LOCAL_PRIVATE_OBJECT_KEYS);
+}
+function sanitizeLocalPrivateValue(value, reasonCodes, depth = 0, state = { nodes: 0 }) {
+    state.nodes += 1;
+    if (state.nodes > MAX_LOCAL_PRIVATE_NODES) {
+        reasonCodes.add('object_truncated');
+        return null;
+    }
+    if (depth > MAX_LOCAL_PRIVATE_DEPTH) {
+        reasonCodes.add('depth_exceeded');
+        return '[REDACTED:depth_exceeded]';
+    }
+    if (typeof value === 'string') {
+        const sanitized = (0, intent_privacy_1.sanitizeLocalPrivateText)(value);
+        sanitized.reasonCodes.forEach((reason) => reasonCodes.add(reason));
+        return sanitized.value;
+    }
+    if (Array.isArray(value)) {
+        if (value.length > MAX_LOCAL_PRIVATE_ARRAY_ITEMS)
+            reasonCodes.add('array_truncated');
+        return value
+            .slice(0, MAX_LOCAL_PRIVATE_ARRAY_ITEMS)
+            .map((item) => sanitizeLocalPrivateValue(item, reasonCodes, depth + 1, state));
+    }
+    if (!value || typeof value !== 'object')
+        return value;
+    const result = {};
+    const entries = Object.entries(value);
+    if (entries.length > MAX_LOCAL_PRIVATE_OBJECT_KEYS)
+        reasonCodes.add('object_truncated');
+    for (const [key, child] of boundedLocalPrivateEntries(value)) {
+        const sanitizedKey = (0, intent_privacy_1.sanitizeLocalPrivateText)(key, 200);
+        sanitizedKey.reasonCodes.forEach((reason) => reasonCodes.add(reason));
+        result[sanitizedKey.value || 'redacted_key'] = sanitizeLocalPrivateValue(child, reasonCodes, depth + 1, state);
+    }
+    return result;
+}
+function markLocalPrivateSession(session, reasons, updatedAt = new Date().toISOString()) {
+    session.privacy = {
+        policyVersion: intent_privacy_1.INTENT_PRIVACY_POLICY_VERSION,
+        classification: 'local_private',
+        bounded: true,
+        sensitivePatternRedaction: true,
+        reasonCodes: uniquePrivacyReasons([
+            ...(session.privacy?.reasonCodes ?? []),
+            ...reasons,
+        ]),
+        updatedAt,
+    };
+}
+function sanitizeAgentPlanForLocalPrivate(plan) {
+    const reasons = new Set();
+    const localPlan = sanitizeLocalPrivateValue(plan, reasons);
+    return {
+        plan: {
+            ...localPlan,
+            expectedFiles: (localPlan.expectedFiles ?? []).flatMap((candidate) => {
+                const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(candidate, { allowGlobs: false });
+                return sanitized.path ? [sanitized.path] : [];
+            }),
+            expectedGlobs: (localPlan.expectedGlobs ?? []).flatMap((candidate) => {
+                const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(candidate, {
+                    allowGlobs: true,
+                    requireGlob: true,
+                });
+                return sanitized.path ? [sanitized.path] : [];
+            }),
+        },
+        reasonCodes: uniquePrivacyReasons(reasons),
+    };
+}
+function sanitizeSessionEventForLocalPrivate(event) {
+    const reasons = new Set();
+    return {
+        event: sanitizeLocalPrivateValue(event, reasons),
+        reasonCodes: uniquePrivacyReasons(reasons),
+    };
 }
 const SESSION_EVENT_LOCK_TIMEOUT_MS = 2_000;
 const SESSION_EVENT_LOCK_STALE_MS = 30_000;
@@ -115,13 +215,17 @@ function createSession(projectRoot, profile, goal) {
         approvalRequiredGlobs: profile.approvalRequiredPaths,
         now: startedAt,
     });
+    const localGoal = (0, intent_privacy_1.sanitizeLocalPrivateText)(goal);
+    const localReasons = new Set(localGoal.reasonCodes);
+    const localIntentContract = sanitizeLocalPrivateValue(intentContract, localReasons);
+    const localArchitectureObligations = sanitizeLocalPrivateValue(architectureObligations, localReasons);
     const session = {
         schemaVersion: 1,
         sessionId,
         profileHash: profile.profileHash,
         repoName: profile.repo.name,
         contract: {
-            goal,
+            goal: localGoal.value,
             allowedGlobs,
             sensitiveGlobs: profile.sensitiveBoundaries.map((s) => s.glob),
             approvalRequiredGlobs: profile.approvalRequiredPaths,
@@ -131,10 +235,11 @@ function createSession(projectRoot, profile, goal) {
             ignoredGlobs: profile.runtimeConfig?.ignoredGlobs ?? [],
             approvedPaths: [],
             approvalGrants: [],
-            intentContract,
+            intentContract: localIntentContract,
             planCoherenceMode: profile.runtimeConfig?.planCoherence ?? profile_1.DEFAULT_PLAN_COHERENCE_MODE,
             runtimeMode: profile.runtimeConfig?.localMode ?? profile_1.DEFAULT_RUNTIME_LOCAL_MODE,
-            architectureObligations,
+            repoSymbolDuplicateMode: profile.runtimeConfig?.repoSymbolDuplicateMode ?? 'warn',
+            architectureObligations: localArchitectureObligations,
             architectureObligationPolicy,
             architectureObligationWaivers: [],
             ...(architectureGraph ? { architectureGraph } : {}),
@@ -143,20 +248,22 @@ function createSession(projectRoot, profile, goal) {
             {
                 type: 'session_start',
                 ts: startedAt,
-                message: `Goal: ${goal}`,
+                message: `Goal: ${localGoal.value}`,
                 detail: {
                     allowedGlobs,
                     scopeMode,
-                    intentContract,
+                    intentContract: localIntentContract,
                     planCoherenceMode: profile.runtimeConfig?.planCoherence ?? profile_1.DEFAULT_PLAN_COHERENCE_MODE,
                     runtimeMode: profile.runtimeConfig?.localMode ?? profile_1.DEFAULT_RUNTIME_LOCAL_MODE,
-                    architectureObligations,
+                    repoSymbolDuplicateMode: profile.runtimeConfig?.repoSymbolDuplicateMode ?? 'warn',
+                    architectureObligations: localArchitectureObligations,
                     architectureObligationPolicy,
                 },
             },
         ],
         status: 'active',
     };
+    markLocalPrivateSession(session, localReasons, startedAt);
     (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
     const neurcodeDir = (0, node_path_1.join)(projectRoot, '.neurcode');
     if (!(0, node_fs_1.existsSync)(neurcodeDir))
@@ -194,7 +301,9 @@ function appendEvent(projectRoot, sessionId, event) {
         const session = loadSession(projectRoot, sessionId);
         if (!session)
             return null;
-        session.events.push(event);
+        const sanitized = sanitizeSessionEventForLocalPrivate(event);
+        session.events.push(sanitized.event);
+        markLocalPrivateSession(session, sanitized.reasonCodes, sanitized.event.ts);
         (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
         return session;
     });
@@ -272,11 +381,23 @@ function normaliseApprovalPath(projectRoot, raw) {
     const trimmed = raw.trim();
     if (!trimmed)
         throw new Error('approvedPath must not be empty.');
+    if ((0, intent_privacy_1.detectCredentialText)(trimmed, 10_000).detected) {
+        throw new Error('approvedPath rejected (credential_shaped_path).');
+    }
+    const safeApprovalPath = (candidate) => {
+        const normalized = candidate.replace(/\\/g, '/');
+        const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(normalized, { allowGlobs: true });
+        if (!sanitized.path) {
+            const reason = sanitized.reasonCodes[0] || 'unsafe_path';
+            throw new Error(`approvedPath rejected (${reason}).`);
+        }
+        return sanitized.path;
+    };
     const isGlob = trimmed.includes('*') || trimmed.includes('?');
     if (isGlob) {
         if (!(0, node_path_1.isAbsolute)(trimmed)) {
             // Relative glob — strip a leading ./ if present, nothing else
-            return trimmed.replace(/^\.\//, '');
+            return safeApprovalPath(trimmed.replace(/^\.\//, ''));
         }
         // Absolute glob — resolve the repo root (symlinks), then check prefix.
         // Globs cannot be passed to realpathSync (file doesn't exist), so we
@@ -312,7 +433,7 @@ function normaliseApprovalPath(projectRoot, raw) {
         // Reattach the glob suffix; the concretePart may end with "/" which becomes
         // part of relConcrete already, so normalise double-slashes.
         const joined = relConcrete ? relConcrete + '/' + globSuffix : globSuffix;
-        return joined.replace(/\/\//g, '/');
+        return safeApprovalPath(joined.replace(/\/\//g, '/'));
     }
     // ── Exact (non-glob) path ─────────────────────────────────────────────────
     if ((0, node_path_1.isAbsolute)(trimmed)) {
@@ -342,10 +463,10 @@ function normaliseApprovalPath(projectRoot, raw) {
         if (!rel || rel.startsWith('..')) {
             throw new Error(`Could not make "${trimmed}" relative to repo root "${projectRoot}".`);
         }
-        return rel;
+        return safeApprovalPath(rel);
     }
     // Already relative — remove a leading ./ if present
-    return trimmed.replace(/^\.\//, '');
+    return safeApprovalPath(trimmed.replace(/^\.\//, ''));
 }
 function normaliseApprovalArgs(reasonOrOptions, sessionId) {
     if (reasonOrOptions && typeof reasonOrOptions === 'object') {
@@ -523,14 +644,16 @@ function waiveArchitectureObligation(projectRoot, obligationId, options = {}) {
     const waivedAt = options.waivedAt || new Date().toISOString();
     const expiresAt = resolveDecisionExpiry(options.expiresAt, options.ttlMs, waivedAt, exports.DEFAULT_OBLIGATION_WAIVER_TTL_MS, 'obligation waiver');
     const eventId = `obligation_waiver_${Date.now()}_${(0, node_crypto_1.randomBytes)(3).toString('hex')}`;
+    const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.reason?.trim() || 'human accepted obligation risk in session', 2_000);
+    const localWaivedBy = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.waivedBy || '', 200);
     const waiver = {
         obligationId: id,
-        reason: options.reason?.trim() || 'human accepted obligation risk in session',
+        reason: localReason.value,
         waivedAt,
         expiresAt,
         source: options.source || 'local_cli',
         eventId,
-        waivedBy: options.waivedBy || null,
+        waivedBy: localWaivedBy.value || null,
     };
     const existingWaivers = Array.isArray(session.contract.architectureObligationWaivers)
         ? session.contract.architectureObligationWaivers
@@ -552,6 +675,10 @@ function waiveArchitectureObligation(projectRoot, obligationId, options = {}) {
             waivedBy: waiver.waivedBy,
         },
     });
+    markLocalPrivateSession(session, [
+        ...localReason.reasonCodes,
+        ...localWaivedBy.reasonCodes,
+    ], waivedAt);
     const architectureObligations = recomputeArchitectureObligations(session, waivedAt);
     (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
     return {
@@ -582,15 +709,18 @@ function approveSession(projectRoot, approvedPath, reason, sessionId) {
         const approvedAt = options.approvedAt || new Date().toISOString();
         const expiresAt = resolveApprovalExpiry(options, approvedAt);
         const eventId = `approval_${Date.now()}_${(0, node_crypto_1.randomBytes)(3).toString('hex')}`;
+        const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.reason?.trim() || 'human approved in session', 2_000);
+        const localApprovedBy = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.approvedBy || '', 200);
+        const localRequestId = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.requestId || '', 200);
         const grant = {
             path: normalised,
-            reason: options.reason?.trim() || 'human approved in session',
+            reason: localReason.value,
             approvedAt,
             expiresAt,
             source: options.source || 'local_cli',
             eventId,
-            approvedBy: options.approvedBy || null,
-            requestId: options.requestId || null,
+            approvedBy: localApprovedBy.value || null,
+            requestId: localRequestId.value || null,
         };
         const grants = approvalGrants(session.contract).filter((existing) => existing.path !== normalised);
         grants.push(grant);
@@ -615,6 +745,11 @@ function approveSession(projectRoot, approvedPath, reason, sessionId) {
                 requestId: grant.requestId,
             },
         });
+        markLocalPrivateSession(session, [
+            ...localReason.reasonCodes,
+            ...localApprovedBy.reasonCodes,
+            ...localRequestId.reasonCodes,
+        ], approvedAt);
         recomputeArchitectureObligations(session, approvedAt);
         (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
         return {
@@ -656,9 +791,11 @@ function revokeSessionApproval(projectRoot, approvedPath, options = {}) {
         const revokedAt = options.revokedAt || new Date().toISOString();
         const target = grants[targetIndex];
         if (!target.revokedAt) {
+            const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.reason?.trim() || 'human revoked approval in session', 2_000);
+            const localRevokedBy = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.revokedBy || '', 200);
             target.revokedAt = revokedAt;
-            target.revokedBy = options.revokedBy || null;
-            target.revocationReason = options.reason?.trim() || 'human revoked approval in session';
+            target.revokedBy = localRevokedBy.value || null;
+            target.revocationReason = localReason.value;
             session.events.push({
                 type: 'approval_decision',
                 ts: revokedAt,
@@ -672,6 +809,10 @@ function revokeSessionApproval(projectRoot, approvedPath, options = {}) {
                     revokedBy: target.revokedBy,
                 },
             });
+            markLocalPrivateSession(session, [
+                ...localReason.reasonCodes,
+                ...localRevokedBy.reasonCodes,
+            ], revokedAt);
         }
         session.contract.approvalGrants = grants;
         session.contract.approvedPaths = activeApprovalPaths(session.contract, revokedAt);
@@ -687,45 +828,59 @@ function revokeSessionApproval(projectRoot, approvedPath, options = {}) {
     });
 }
 function finishSession(projectRoot, sessionId, options = {}) {
-    const session = loadSession(projectRoot, sessionId);
-    if (!session)
-        return null;
-    session.status = 'finished';
-    session.finishedAt = new Date().toISOString();
-    recomputeArchitectureObligations(session, session.finishedAt);
-    const canonical = JSON.stringify({
-        sessionId: session.sessionId,
-        profileHash: session.profileHash,
-        contract: session.contract,
-        events: session.events.map((e) => ({
-            type: e.type,
-            filePath: e.filePath,
-            verdict: e.verdict,
-            decision: e.decision,
-        })),
+    return withSessionEventLock(projectRoot, sessionId, () => {
+        const session = loadSession(projectRoot, sessionId);
+        if (!session)
+            return null;
+        session.status = 'finished';
+        session.finishedAt = new Date().toISOString();
+        const finishReasons = new Set();
+        const localFinishReason = options.reason
+            ? (0, intent_privacy_1.sanitizeLocalPrivateText)(options.reason, 2_000)
+            : null;
+        localFinishReason?.reasonCodes.forEach((reason) => finishReasons.add(reason));
+        const unresolvedApprovalBlocks = options.unresolvedApprovalBlocks?.length
+            ? sanitizeLocalPrivateValue(options.unresolvedApprovalBlocks, finishReasons)
+            : undefined;
+        const unresolvedActionableBlocks = options.unresolvedActionableBlocks?.length
+            ? sanitizeLocalPrivateValue(options.unresolvedActionableBlocks, finishReasons)
+            : undefined;
+        recomputeArchitectureObligations(session, session.finishedAt);
+        const canonical = JSON.stringify({
+            sessionId: session.sessionId,
+            profileHash: session.profileHash,
+            contract: session.contract,
+            events: session.events.map((e) => ({
+                type: e.type,
+                filePath: e.filePath,
+                verdict: e.verdict,
+                decision: e.decision,
+            })),
+        });
+        session.replayHash = (0, node_crypto_1.createHash)('sha256').update(canonical).digest('hex').slice(0, 24);
+        session.events.push({
+            type: 'session_finish',
+            ts: session.finishedAt,
+            detail: {
+                replayHash: session.replayHash,
+                ...(localFinishReason ? { reason: localFinishReason.value } : {}),
+                ...(unresolvedApprovalBlocks
+                    ? { unresolvedApprovalBlocks }
+                    : {}),
+                ...(unresolvedActionableBlocks
+                    ? { unresolvedActionableBlocks }
+                    : {}),
+            },
+        });
+        markLocalPrivateSession(session, finishReasons, session.finishedAt);
+        (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
+        (0, ai_change_record_1.writeAIChangeRecord)(projectRoot, session);
+        const ptr = activePointerPath(projectRoot);
+        if ((0, node_fs_1.existsSync)(ptr)) {
+            (0, node_fs_1.writeFileSync)(ptr, JSON.stringify({ sessionId: null }, null, 2) + '\n', 'utf8');
+        }
+        return session;
     });
-    session.replayHash = (0, node_crypto_1.createHash)('sha256').update(canonical).digest('hex').slice(0, 24);
-    session.events.push({
-        type: 'session_finish',
-        ts: session.finishedAt,
-        detail: {
-            replayHash: session.replayHash,
-            ...(options.reason ? { reason: options.reason } : {}),
-            ...(options.unresolvedApprovalBlocks?.length
-                ? { unresolvedApprovalBlocks: options.unresolvedApprovalBlocks }
-                : {}),
-            ...(options.unresolvedActionableBlocks?.length
-                ? { unresolvedActionableBlocks: options.unresolvedActionableBlocks }
-                : {}),
-        },
-    });
-    (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
-    (0, ai_change_record_1.writeAIChangeRecord)(projectRoot, session);
-    const ptr = activePointerPath(projectRoot);
-    if ((0, node_fs_1.existsSync)(ptr)) {
-        (0, node_fs_1.writeFileSync)(ptr, JSON.stringify({ sessionId: null }, null, 2) + '\n', 'utf8');
-    }
-    return session;
 }
 function replaySession(session) {
     const canonical = JSON.stringify({
@@ -774,7 +929,11 @@ function normalizePlanPath(pathValue) {
     return pathValue.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\//, '').trim();
 }
 function normalizePlanPaths(values) {
-    return uniqueTrimmed(Array.from(values, (value) => normalizePlanPath(String(value ?? ''))));
+    return uniqueTrimmed(Array.from(values).flatMap((value) => {
+        const normalized = normalizePlanPath(String(value ?? ''));
+        const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(normalized, { allowGlobs: true });
+        return sanitized.path ? [sanitized.path] : [];
+    }));
 }
 function normalizeGoal(goal) {
     return goal.replace(/\s+/g, ' ').trim().slice(0, 280);
@@ -851,6 +1010,10 @@ function isLikelyRepoScopePath(token, profile) {
 function extractPathTokens(goal, profile) {
     return unique((goal.match(/[a-z0-9_./-]+\/[a-z0-9_./-]+/gi) ?? [])
         .map(cleanScopePathToken)
+        .flatMap((token) => {
+        const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(token.replace(/\/+$/, ''), { allowGlobs: false });
+        return sanitized.path ? [sanitized.path] : [];
+    })
         .filter((token) => isLikelyRepoScopePath(token, profile)));
 }
 function deriveExcludedScopePrefixes(lowerGoal) {
@@ -1187,20 +1350,26 @@ function makePlanEventId(prefix = 'plan') {
     return `${prefix}_${Date.now()}_${(0, node_crypto_1.randomBytes)(3).toString('hex')}`;
 }
 function recordAgentPlanRevision(args) {
+    const localPlan = sanitizeAgentPlanForLocalPrivate(args.plan);
+    const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)(args.reason, 2_000);
+    const amendmentReasons = new Set();
+    const localAmendment = args.amendment
+        ? sanitizeLocalPrivateValue(args.amendment, amendmentReasons)
+        : undefined;
     const previousRevision = currentAgentPlanRevision(args.session.contract);
     const revision = previousRevision === 0 ? 1 : previousRevision + 1;
     const eventId = makePlanEventId(args.kind);
-    const capturedAt = args.plan.capturedAt || new Date().toISOString();
+    const capturedAt = localPlan.plan.capturedAt || new Date().toISOString();
     const ledger = planRevisionLedger(args.session.contract).filter((entry) => entry.revision < revision);
-    args.session.contract.agentPlan = args.plan;
+    args.session.contract.agentPlan = localPlan.plan;
     args.session.contract.agentPlanRevision = revision;
     args.session.contract.agentPlanRevisions = [
         ...ledger,
         {
             revision,
             kind: args.kind,
-            plan: args.plan,
-            reason: args.reason,
+            plan: localPlan.plan,
+            reason: localReason.value,
             source: args.source,
             capturedAt,
             eventId,
@@ -1210,34 +1379,39 @@ function recordAgentPlanRevision(args) {
         type: args.eventType,
         ts: capturedAt,
         message: args.kind === 'captured'
-            ? `Agent plan captured as revision ${revision} (${args.source}, confidence ${args.plan.confidence}, ${args.plan.steps.length} step${args.plan.steps.length === 1 ? '' : 's'})`
+            ? `Agent plan captured as revision ${revision} (${args.source}, confidence ${localPlan.plan.confidence}, ${localPlan.plan.steps.length} step${localPlan.plan.steps.length === 1 ? '' : 's'})`
             : `Agent plan amended to revision ${revision} (${args.source})`,
         detail: {
             eventId,
             previousRevision,
             revision,
-            agentPlan: args.plan,
-            ...(args.amendment
+            agentPlan: localPlan.plan,
+            ...(localAmendment
                 ? {
                     planAmendment: {
                         previousRevision,
                         revision,
                         amendedAt: capturedAt,
-                        activePlan: args.plan,
-                        ...args.amendment,
+                        activePlan: localPlan.plan,
+                        ...localAmendment,
                     },
                 }
                 : {}),
         },
     });
+    markLocalPrivateSession(args.session, [
+        ...localPlan.reasonCodes,
+        ...localReason.reasonCodes,
+        ...amendmentReasons,
+    ], capturedAt);
     recomputeArchitectureObligations(args.session, capturedAt);
     expandSessionScope(args.session, {
         text: [
-            args.plan.summary,
-            ...args.plan.steps,
+            localPlan.plan.summary,
+            ...localPlan.plan.steps,
         ].join('\n'),
-        expectedFiles: args.plan.expectedFiles,
-        expectedGlobs: args.plan.expectedGlobs,
+        expectedFiles: localPlan.plan.expectedFiles,
+        expectedGlobs: localPlan.plan.expectedGlobs,
     });
     (0, node_fs_1.writeFileSync)(sessionPath(args.projectRoot, args.session.sessionId), JSON.stringify(args.session, null, 2) + '\n', 'utf8');
     return args.session;
@@ -1505,9 +1679,11 @@ function persistSession(projectRoot, session) {
     (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
 }
 function createPendingPlanProposal(args) {
+    const localPlan = sanitizeAgentPlanForLocalPrivate(args.proposedPlan);
+    const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)(args.reason, 2_000);
     const existingPending = proposalLedger(args.session.contract).find((proposal) => proposal.status === 'pending' &&
         proposal.previousRevision === currentAgentPlanRevision(args.session.contract) &&
-        !planMateriallyChanged(proposal.proposedPlan, args.proposedPlan));
+        !planMateriallyChanged(proposal.proposedPlan, localPlan.plan));
     if (existingPending)
         return existingPending;
     const proposal = {
@@ -1517,8 +1693,8 @@ function createPendingPlanProposal(args) {
         action: args.action,
         proposedBy: args.proposedBy,
         source: args.source,
-        reason: args.reason,
-        proposedPlan: args.proposedPlan,
+        reason: localReason.value,
+        proposedPlan: localPlan.plan,
         risk: args.risk,
         status: 'pending',
         createdAt: args.createdAt,
@@ -1533,6 +1709,10 @@ function createPendingPlanProposal(args) {
         message: `Agent plan amendment proposed (${proposal.risk.level} risk, human decision required)`,
         detail: { planAmendmentProposal: proposal },
     });
+    markLocalPrivateSession(args.session, [
+        ...localPlan.reasonCodes,
+        ...localReason.reasonCodes,
+    ], args.createdAt);
     persistSession(args.projectRoot, args.session);
     return proposal;
 }
@@ -1691,8 +1871,10 @@ function decideAgentPlanAmendment(projectRoot, input) {
         throw new Error(`Plan amendment proposal ${input.proposalId} is already ${proposal.status}.`);
     }
     const decidedAt = input.decidedAt || new Date().toISOString();
-    const decidedBy = input.decidedBy?.trim() || 'human';
-    const reason = input.reason?.trim() || `human ${input.decision}ed plan amendment`;
+    const localDecidedBy = (0, intent_privacy_1.sanitizeLocalPrivateText)(input.decidedBy?.trim() || 'human', 200);
+    const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)(input.reason?.trim() || `human ${input.decision}ed plan amendment`, 2_000);
+    const decidedBy = localDecidedBy.value || 'human';
+    const reason = localReason.value;
     proposal.status = input.decision === 'accept' ? 'accepted' : 'rejected';
     proposal.decidedAt = decidedAt;
     proposal.decidedBy = decidedBy;
@@ -1705,6 +1887,10 @@ function decideAgentPlanAmendment(projectRoot, input) {
             message: `Plan amendment ${proposal.proposalId} rejected by ${decidedBy}`,
             detail: { planAmendmentProposal: proposal },
         });
+        markLocalPrivateSession(session, [
+            ...localDecidedBy.reasonCodes,
+            ...localReason.reasonCodes,
+        ], decidedAt);
         persistSession(projectRoot, session);
         return {
             sessionId: session.sessionId,
@@ -1747,6 +1933,10 @@ function decideAgentPlanAmendment(projectRoot, input) {
         message: `Plan amendment ${proposal.proposalId} accepted by ${decidedBy}`,
         detail: { planAmendmentProposal: proposal, appliedRevision: revision },
     });
+    markLocalPrivateSession(updated, [
+        ...localDecidedBy.reasonCodes,
+        ...localReason.reasonCodes,
+    ], decidedAt);
     persistSession(projectRoot, updated);
     return {
         sessionId: updated.sessionId,

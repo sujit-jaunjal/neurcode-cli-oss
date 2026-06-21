@@ -45,7 +45,10 @@ exports.brainCommand = brainCommand;
 const child_process_1 = require("child_process");
 const fs_1 = require("fs");
 const path_1 = require("path");
+const brain_1 = require("@neurcode-ai/brain");
 const brain_cache_1 = require("../utils/brain-cache");
+const local_repo_brain_1 = require("../utils/local-repo-brain");
+const repo_brain_impact_1 = require("../utils/repo-brain-impact");
 const config_1 = require("../config");
 const project_root_1 = require("../utils/project-root");
 const state_1 = require("../utils/state");
@@ -55,6 +58,8 @@ const messages_1 = require("../utils/messages");
 const brain_context_1 = require("../utils/brain-context");
 const semantic_1 = require("../semantic");
 const ask_cache_1 = require("../utils/ask-cache");
+const proposed_change_analysis_1 = require("../utils/proposed-change-analysis");
+const team_memory_path_hygiene_1 = require("../utils/team-memory-path-hygiene");
 // Import chalk with fallback
 let chalk;
 try {
@@ -122,6 +127,9 @@ function scanFiles(dir, baseDir, maxFiles = 600) {
                     continue;
             }
             const full = join(current, entry);
+            const relativePath = normalizeFsPath(relative(baseDir, full));
+            if (!(0, team_memory_path_hygiene_1.isTeamMemoryProjectPath)(relativePath))
+                continue;
             let st;
             try {
                 st = statSync(full);
@@ -140,7 +148,7 @@ function scanFiles(dir, baseDir, maxFiles = 600) {
             const ext = entry.split('.').pop()?.toLowerCase();
             if (ext && ignoreExts.has(ext))
                 continue;
-            files.push(relative(baseDir, full));
+            files.push(relativePath);
         }
     }
     walk(dir);
@@ -224,7 +232,7 @@ function collectGitAuthorship(cwd, sinceDays) {
         if (!currentAuthor)
             continue;
         const path = normalizeFsPath(line);
-        if (!path || path.startsWith('.git/') || path.startsWith('node_modules/'))
+        if (!path || path.startsWith('.git/') || path.startsWith('node_modules/') || !(0, team_memory_path_hygiene_1.isTeamMemoryProjectPath)(path))
             continue;
         authorTouches.set(currentAuthor, (authorTouches.get(currentAuthor) || 0) + 1);
         const byAuthor = fileTouches.get(path) || new Map();
@@ -260,6 +268,103 @@ function formatBytes(bytes) {
     if (bytes < 1024 * 1024)
         return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function gitChangedPaths(cwd, args) {
+    const result = (0, child_process_1.spawnSync)('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    if (result.status !== 0)
+        return [];
+    return String(result.stdout || '')
+        .split(/\r?\n/)
+        .map((path) => path.trim())
+        .filter(Boolean);
+}
+function splitChangedPathList(value) {
+    if (!value)
+        return [];
+    return value
+        .split(/[\n,\s]+/)
+        .map((path) => path.trim())
+        .filter(Boolean);
+}
+function parseRenameList(value) {
+    return splitChangedPathList(value)
+        .map((entry) => {
+        const delimiter = entry.includes('=>') ? '=>' : ':';
+        const [from, to] = entry.split(delimiter, 2).map((item) => item.trim());
+        return from && to ? { from, to } : null;
+    })
+        .filter((entry) => Boolean(entry));
+}
+function repositoryGraphError(error, json) {
+    const locked = error instanceof brain_1.RepositoryGraphLockedError;
+    const payload = {
+        ok: false,
+        code: locked ? 'repository_graph_locked' : 'repository_graph_failed',
+        message: error instanceof Error ? error.message : String(error),
+        exitCode: locked ? 3 : 1,
+    };
+    if (json) {
+        console.log(JSON.stringify(payload, null, 2));
+    }
+    else {
+        (0, messages_1.printError)('Repository Graph V2 operation failed', payload.message);
+    }
+    process.exitCode = payload.exitCode;
+}
+function printRepositoryGraphIndexResult(repoRoot, result, json) {
+    const payload = {
+        ok: true,
+        graphPath: (0, brain_1.repositoryGraphPath)(repoRoot),
+        schemaVersion: result.graph.schemaVersion,
+        graphId: result.graph.graphId,
+        generation: result.graph.generation,
+        freshness: result.graph.freshness,
+        coverage: result.graph.coverage,
+        stats: result.stats,
+        privacy: result.graph.privacy,
+    };
+    if (json) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+    }
+    console.log(chalk.bold('\n🧠 Repository Graph V2\n'));
+    console.log(chalk.dim(`Mode:              ${result.stats.mode}`));
+    console.log(chalk.dim(`Generation:        ${result.graph.generation}`));
+    console.log(chalk.dim(`Freshness:         ${result.graph.freshness.state}`));
+    console.log(chalk.dim(`Files indexed:     ${result.graph.coverage.filesIndexed}`));
+    console.log(chalk.dim(`Files parsed:      ${result.stats.filesParsed}`));
+    console.log(chalk.dim(`Files reused:      ${result.stats.filesReused}`));
+    console.log(chalk.dim(`Unsupported:       ${result.graph.coverage.unsupportedPercent}%`));
+    console.log(chalk.dim(`Nodes / edges:     ${result.graph.nodes.length} / ${result.graph.edges.length}`));
+    console.log(chalk.dim(`Graph size:        ${formatBytes(result.stats.graphBytes)}`));
+    console.log(chalk.dim(`Duration:          ${result.stats.durationMs}ms`));
+    console.log(chalk.dim(`Peak RSS:          ${result.stats.peakMemoryMb} MB`));
+    console.log(chalk.dim(`Artifact:          ${payload.graphPath}`));
+    console.log(chalk.dim('Privacy:           source-free local structural facts; raw source is not retained.'));
+}
+function normalizeAdvisoryTarget(repoRoot, input) {
+    const absolutePath = (0, path_1.isAbsolute)(input) ? (0, path_1.resolve)(input) : (0, path_1.resolve)(repoRoot, input);
+    const relativePath = (0, path_1.relative)(repoRoot, absolutePath).replace(/\\/g, '/');
+    if (!relativePath || relativePath === '..' || relativePath.startsWith('../')) {
+        throw new Error(`Path is outside repository root: ${input}`);
+    }
+    return { relativePath, absolutePath };
+}
+function advisoryCategory(value) {
+    const categories = [
+        'behavior_similarity',
+        'reuse_suggestion',
+        'duplicate_module',
+        'architecture_deviation',
+        'cross_service_consequence',
+        'reviewer_question',
+        'missing_test',
+        'ownership_review',
+    ];
+    if (!categories.includes(value)) {
+        throw new Error(`Unsupported advisory category: ${value}`);
+    }
+    return value;
 }
 function renderBrainExportMarkdown(input) {
     const lines = [];
@@ -509,6 +614,670 @@ function brainCommand(program) {
         else {
             console.log(chalk.dim('Architecture memory not found yet (it will be created automatically on plan runs).'));
         }
+    });
+    // -- brain index ------------------------------------------------------------
+    brain
+        .command('index')
+        .description('Build a source-free local repository brain from paths, symbols, imports, owners, and hashes')
+        .option('--max-files <n>', 'Maximum files to scan (default: 8000)', (v) => parseInt(v, 10))
+        .option('--max-bytes-per-file <n>', 'Maximum bytes per file (default: 350000)', (v) => parseInt(v, 10))
+        .option('--experimental-fingerprint-reuse', 'Include experimental signature-fingerprint reuse detection (noisy on large repos)')
+        .option('--json', 'Output as JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        const canonical = await (0, brain_1.indexRepositoryGraph)({
+            repoRoot: scope.cwd,
+            limits: {
+                ...(Number.isFinite(options.maxFiles) ? { maxFiles: options.maxFiles } : {}),
+                ...(Number.isFinite(options.maxBytesPerFile) ? { maxBytesPerFile: options.maxBytesPerFile } : {}),
+            },
+        });
+        const artifact = (0, local_repo_brain_1.buildLocalRepoBrain)(scope.cwd, {
+            maxFiles: options.maxFiles,
+            maxBytesPerFile: options.maxBytesPerFile,
+            experimentalFingerprintReuse: options.experimentalFingerprintReuse,
+        });
+        const paths = (0, local_repo_brain_1.writeLocalRepoBrain)(scope.cwd, artifact);
+        const payload = {
+            repoRoot: scope.cwd,
+            repositoryIntelligenceModel: {
+                canonicalLifecycle: 'repository_graph_v2',
+                surface: 'legacy_brain_compatibility_projection',
+                compatibilityOnly: true,
+            },
+            canonicalGraph: {
+                path: (0, brain_1.repositoryGraphPath)(scope.cwd),
+                graphId: canonical.graph.graphId,
+                schemaVersion: canonical.graph.schemaVersion,
+                freshness: canonical.graph.freshness,
+                coverage: canonical.graph.coverage,
+                nodeCount: canonical.graph.nodes.length,
+                edgeCount: canonical.graph.edges.length,
+            },
+            compatibilityProjection: {
+                artifactHash: artifact.artifactHash,
+                summary: artifact.summary,
+            },
+            jsonPath: paths.jsonPath,
+            markdownPath: paths.markdownPath,
+            artifactHash: artifact.artifactHash,
+            privacy: artifact.privacy,
+            summary: artifact.summary,
+            topHotspots: artifact.hotspots.slice(0, 8),
+            reuseFindings: artifact.reuseFindings.slice(0, 8),
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        await (0, messages_1.printSuccessBanner)('Canonical Repository Intelligence Indexed');
+        (0, messages_1.printSection)('Canonical lifecycle', '🧭');
+        console.log(chalk.dim(`Repository Graph: ${payload.canonicalGraph.graphId}`));
+        console.log(chalk.dim(`Posture:          ${canonical.graph.freshness.posture ?? canonical.graph.freshness.state}`));
+        console.log(chalk.dim(`Analyzed/skipped: ${canonical.graph.coverage.filesAnalyzed}/${canonical.graph.coverage.filesSkipped}`));
+        console.log(chalk.dim(`Recovery:         neurcode brain repo-recover`));
+        (0, messages_1.printSection)('Artifact', '🧠');
+        console.log(chalk.yellow('Legacy Brain is a compatibility projection; its counts are not canonical lifecycle health.'));
+        console.log(chalk.dim(`Repo Root:     ${scope.cwd}`));
+        console.log(chalk.dim(`JSON:          ${paths.jsonPath}`));
+        console.log(chalk.dim(`Summary:       ${paths.markdownPath}`));
+        console.log(chalk.dim(`Artifact Hash: ${artifact.artifactHash}`));
+        (0, messages_1.printSection)('Summary', '📊');
+        console.log(chalk.dim(`Files indexed:       ${artifact.summary.filesIndexed}`));
+        console.log(chalk.dim(`Declarations indexed:${artifact.summary.symbolsIndexed}`));
+        console.log(chalk.dim(`Import edges:        ${artifact.summary.importEdges}`));
+        console.log(chalk.dim(`Modules:             ${artifact.summary.modules}`));
+        console.log(chalk.dim(`Sensitive files:     ${artifact.summary.sensitiveFiles}`));
+        if (artifact.summary.ownerBoundaryStatus === 'not_found') {
+            console.log(chalk.dim(`Owner boundaries:    none (no CODEOWNERS found)`));
+        }
+        else {
+            console.log(chalk.dim(`Owner boundaries:    ${artifact.summary.ownerBoundaries}`));
+        }
+        console.log(chalk.dim(`Reuse advisories:    ${artifact.summary.reuseFindings}`));
+        console.log(chalk.dim(`Generated skipped:   ${artifact.summary.generatedFilesSkipped}`));
+        (0, messages_1.printSection)('Privacy', '🔒');
+        console.log(chalk.dim('No source code, raw diffs, raw prompts, or chat transcripts are stored.'));
+        console.log(chalk.dim(`Stored fields: ${artifact.privacy.storedFields.join(', ')}`));
+        if (artifact.reuseFindings.length > 0) {
+            (0, messages_1.printSection)('Top Reuse Advisories (same-name exports)', '♻️');
+            artifact.reuseFindings.slice(0, 6).forEach((finding, index) => {
+                console.log(chalk.white(`  ${index + 1}. ${finding.symbolName || finding.kind}: ${finding.confidence} confidence`));
+                console.log(chalk.dim(`     ${finding.files.slice(0, 4).join(', ')}`));
+            });
+        }
+        else {
+            (0, messages_1.printSection)('Reuse Advisories', '♻️');
+            console.log(chalk.dim('No duplicate exported symbol names found across non-test files.'));
+        }
+        (0, messages_1.printInfo)('Next', 'Run: neurcode brain inspect "<area or symbol>"');
+    });
+    // -- Repository Graph V2 ---------------------------------------------------
+    brain
+        .command('repo-index')
+        .description('Create or incrementally refresh the persistent Repository Graph V2')
+        .option('--changed <paths>', 'Changed paths separated by commas, spaces, or newlines')
+        .option('--deleted <paths>', 'Deleted paths separated by commas, spaces, or newlines')
+        .option('--rename <pairs>', 'Rename pairs as old:new or old=>new, separated by commas')
+        .option('--max-files <n>', 'Maximum files to inspect', (value) => parseInt(value, 10))
+        .option('--max-total-bytes <n>', 'Maximum total bytes to inspect', (value) => parseInt(value, 10))
+        .option('--max-bytes-per-file <n>', 'Maximum bytes per file', (value) => parseInt(value, 10))
+        .option('--json', 'Output stable machine-readable JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        try {
+            const limits = {
+                ...(Number.isFinite(options.maxFiles) ? { maxFiles: options.maxFiles } : {}),
+                ...(Number.isFinite(options.maxTotalBytes) ? { maxTotalBytes: options.maxTotalBytes } : {}),
+                ...(Number.isFinite(options.maxBytesPerFile) ? { maxBytesPerFile: options.maxBytesPerFile } : {}),
+            };
+            const result = await (0, brain_1.indexRepositoryGraph)({
+                repoRoot: scope.cwd,
+                changedPaths: splitChangedPathList(options.changed),
+                deletedPaths: splitChangedPathList(options.deleted),
+                renamedPaths: parseRenameList(options.rename),
+                limits,
+            });
+            printRepositoryGraphIndexResult(scope.cwd, result, options.json);
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('repo-refresh')
+        .description('Refresh stale Repository Graph V2 files using content hashes')
+        .option('--changed <paths>', 'Optional changed paths separated by commas, spaces, or newlines')
+        .option('--deleted <paths>', 'Optional deleted paths separated by commas, spaces, or newlines')
+        .option('--rename <pairs>', 'Optional rename pairs as old:new or old=>new')
+        .option('--json', 'Output stable machine-readable JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        try {
+            const result = await (0, brain_1.indexRepositoryGraph)({
+                repoRoot: scope.cwd,
+                changedPaths: splitChangedPathList(options.changed),
+                deletedPaths: splitChangedPathList(options.deleted),
+                renamedPaths: parseRenameList(options.rename),
+            });
+            printRepositoryGraphIndexResult(scope.cwd, result, options.json);
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('repo-status')
+        .description('Show Repository Graph V2 freshness, coverage, and parser depth')
+        .option('--json', 'Output stable machine-readable JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        try {
+            const freshness = await (0, brain_1.repositoryGraphStatus)(scope.cwd);
+            const graph = (0, brain_1.readRepositoryGraph)(scope.cwd);
+            const payload = {
+                ok: freshness.state !== 'corrupt',
+                repoRoot: scope.cwd,
+                graphPath: (0, brain_1.repositoryGraphPath)(scope.cwd),
+                freshness,
+                graph: graph ? {
+                    schemaVersion: graph.schemaVersion,
+                    graphId: graph.graphId,
+                    generation: graph.generation,
+                    updatedAt: graph.updatedAt,
+                    coverage: graph.coverage,
+                    nodeCount: graph.nodes.length,
+                    edgeCount: graph.edges.length,
+                    privacy: graph.privacy,
+                } : null,
+            };
+            if (options.json) {
+                console.log(JSON.stringify(payload, null, 2));
+                return;
+            }
+            console.log(chalk.bold('\n🧠 Repository Graph V2 Status\n'));
+            console.log(chalk.dim(`State:             ${freshness.state}`));
+            console.log(chalk.dim(`Indexed at:        ${freshness.indexedAt ?? 'never'}`));
+            console.log(chalk.dim(`Stale files:       ${freshness.staleFileCount}`));
+            console.log(chalk.dim(`Unsupported files: ${freshness.unsupportedFileCount}`));
+            console.log(chalk.dim(`Reason codes:      ${freshness.reasonCodes.join(', ') || 'none'}`));
+            if (graph) {
+                console.log(chalk.dim(`Generation:        ${graph.generation}`));
+                console.log(chalk.dim(`Nodes / edges:     ${graph.nodes.length} / ${graph.edges.length}`));
+                console.log(chalk.dim(`Unsupported:       ${graph.coverage.unsupportedPercent}%`));
+                for (const language of graph.coverage.languages) {
+                    console.log(chalk.dim(`  ${language.language}: ${language.depth}; ${language.filesAnalyzed}/${language.filesSeen} analyzed`));
+                }
+            }
+            else {
+                console.log(chalk.dim('Run `neurcode brain repo-index` to create the graph.'));
+            }
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('repo-explain <query...>')
+        .description('Explain a source-free path, symbol, package, service, or surface in Repository Graph V2')
+        .option('--limit <n>', 'Maximum matching nodes (default: 25)', (value) => parseInt(value, 10))
+        .option('--json', 'Output stable machine-readable JSON')
+        .action((queryParts, options) => {
+        const scope = getBrainScope();
+        const graph = (0, brain_1.readRepositoryGraph)(scope.cwd);
+        if (!graph) {
+            repositoryGraphError(new Error('Repository Graph V2 is missing or corrupt. Run `neurcode brain repo-index`.'), options.json);
+            return;
+        }
+        const query = queryParts.join(' ').trim();
+        const matches = (0, brain_1.explainRepositoryGraph)(graph, query, options.limit);
+        const matchIds = new Set(matches.map((node) => node.id));
+        const edges = graph.edges.filter((edge) => matchIds.has(edge.fromId) || matchIds.has(edge.toId));
+        const payload = { ok: true, query, matches, edges, freshness: graph.freshness };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        console.log(chalk.bold(`\n🧠 Repository Graph V2: ${query}\n`));
+        if (matches.length === 0) {
+            console.log(chalk.dim('No source-free graph facts matched.'));
+            return;
+        }
+        matches.forEach((node, index) => {
+            console.log(chalk.white(`  ${index + 1}. [${node.kind}] ${node.name ?? node.key}`));
+            if (node.path)
+                console.log(chalk.dim(`     path: ${node.path}`));
+            console.log(chalk.dim(`     parser: ${node.provenance.parserDepth}`));
+        });
+        console.log(chalk.dim(`Related edges: ${edges.length}`));
+    });
+    brain
+        .command('repo-query')
+        .description('Query deterministic Repository Graph V2 references, dependencies, imports, calls, tests, or boundaries')
+        .option('--path <path>', 'Seed path or path fragment')
+        .option('--symbol <name>', 'Seed symbol name or fragment')
+        .option('--relationship <type>', 'Edge type such as references, depends_on, imports, calls, tests, or crosses_boundary')
+        .option('--direction <direction>', 'in | out | both', 'both')
+        .option('--limit <n>', 'Maximum nodes and edges (default: 100)', (value) => parseInt(value, 10))
+        .option('--json', 'Output stable machine-readable JSON')
+        .action((options) => {
+        const scope = getBrainScope();
+        const graph = (0, brain_1.readRepositoryGraph)(scope.cwd);
+        if (!graph) {
+            repositoryGraphError(new Error('Repository Graph V2 is missing or corrupt. Run `neurcode brain repo-index`.'), options.json);
+            return;
+        }
+        const allowedRelationships = new Set([
+            'defines', 'references', 'imports', 'exports', 'calls', 'owns',
+            'belongs_to_package', 'belongs_to_service', 'tests', 'depends_on',
+            'structurally_resembles', 'crosses_boundary',
+        ]);
+        const relationship = options.relationship;
+        if (relationship && !allowedRelationships.has(relationship)) {
+            repositoryGraphError(new Error(`Unsupported relationship: ${relationship}`), options.json);
+            return;
+        }
+        const direction = options.direction === 'in' || options.direction === 'out' ? options.direction : 'both';
+        const result = (0, brain_1.queryRepositoryGraph)(graph, {
+            path: options.path,
+            symbol: options.symbol,
+            relationship,
+            direction,
+            limit: options.limit,
+        });
+        const payload = { ok: true, query: options, ...result, freshness: graph.freshness };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        console.log(chalk.bold('\n🧠 Repository Graph V2 Query\n'));
+        console.log(chalk.dim(`Total matches: ${result.totalMatches} | Returned: ${result.returnedMatches} | Limit: ${result.limit} | Truncated: ${result.truncated}`));
+        console.log(chalk.dim(`Seeds: ${result.seeds.length} | Nodes: ${result.nodes.length} | Edges: ${result.edges.length}`));
+        result.edges.forEach((edge) => {
+            const posture = edge.enforcementEligible === false
+                ? 'advisory/non-enforcement'
+                : 'enforcement-eligible';
+            console.log(chalk.dim(`  ${edge.type}: ${edge.fromId} -> ${edge.toId} [${posture}]`));
+        });
+    });
+    brain
+        .command('repo-rebuild')
+        .description('Rebuild Repository Graph V2 from local repository state')
+        .option('--json', 'Output stable machine-readable JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        try {
+            const result = await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, forceRebuild: true });
+            printRepositoryGraphIndexResult(scope.cwd, result, options.json);
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('repo-recover')
+        .description('Recover Repository Graph V2 from its last atomic backup or rebuild when unavailable')
+        .option('--json', 'Output stable machine-readable JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        try {
+            const result = await (0, brain_1.recoverRepositoryGraph)(scope.cwd);
+            printRepositoryGraphIndexResult(scope.cwd, result, options.json);
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('advisory <path>')
+        .description('Run local-only advisory semantic intelligence for a proposed or current file')
+        .option('--content-file <path>', 'Local proposed content file; raw content is parsed locally and not retained')
+        .option('--path-only', 'Run without proposed content and expose coverage limitations')
+        .option('--include-suppressed', 'Include findings suppressed by local feedback')
+        .option('--no-index', 'Do not create or refresh Repository Graph V2')
+        .option('--json', 'Output stable source-free JSON')
+        .action(async (path, options) => {
+        const scope = getBrainScope();
+        try {
+            let graph = (0, brain_1.readRepositoryGraph)(scope.cwd);
+            const status = await (0, brain_1.repositoryGraphStatus)(scope.cwd);
+            if (options.index !== false && (!graph || status.state !== 'fresh')) {
+                graph = (await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd })).graph;
+            }
+            else if (graph) {
+                graph = { ...graph, freshness: status };
+            }
+            if (!graph)
+                throw new Error('Repository Graph V2 is missing. Run `neurcode brain repo-index`.');
+            const target = normalizeAdvisoryTarget(scope.cwd, path);
+            let proposedSource = null;
+            let sourceKind = 'not_available';
+            if (!options.pathOnly) {
+                const contentPath = options.contentFile
+                    ? ((0, path_1.isAbsolute)(options.contentFile) ? options.contentFile : (0, path_1.resolve)(scope.cwd, options.contentFile))
+                    : target.absolutePath;
+                if ((0, fs_1.existsSync)(contentPath)) {
+                    proposedSource = (0, fs_1.readFileSync)(contentPath, 'utf8');
+                    sourceKind = options.contentFile ? 'write_content' : 'post_write_disk_read';
+                }
+            }
+            const analysis = (0, proposed_change_analysis_1.analyzeProposedChange)({
+                repoRoot: scope.cwd,
+                filePath: target.relativePath,
+                proposedSource,
+                sourceKind,
+                adapterId: 'neurcode-cli',
+                timing: sourceKind === 'post_write_disk_read' ? 'after_write' : 'before_write',
+                sessionId: null,
+                planRevision: null,
+            });
+            analysis.envelope.target.operation = (0, fs_1.existsSync)(target.absolutePath) ? 'update' : 'create';
+            const result = await (0, brain_1.runSemanticAdvisory)({
+                repoRoot: scope.cwd,
+                graph,
+                change: analysis.envelope,
+            });
+            const findings = options.includeSuppressed
+                ? result.findings
+                : result.findings.filter((finding) => !finding.suppressed);
+            const payload = {
+                ok: true,
+                truth: 'advisory',
+                blocking: false,
+                cacheHit: result.cacheHit,
+                cacheKey: result.cacheKey,
+                graph: {
+                    graphId: graph.graphId,
+                    generation: graph.generation,
+                    freshness: graph.freshness,
+                },
+                host: analysis.envelope.host,
+                findings,
+                suppressedCount: result.findings.filter((finding) => finding.suppressed).length,
+                privacy: analysis.envelope.privacy,
+            };
+            if (options.json) {
+                console.log(JSON.stringify(payload, null, 2));
+                return;
+            }
+            console.log(chalk.bold('\n🧠 Advisory Semantic Intelligence V2\n'));
+            console.log(chalk.dim('Truth: advisory · Blocking: never'));
+            console.log(chalk.dim(`Graph: ${graph.graphId} generation ${graph.generation} (${graph.freshness.state})`));
+            console.log(chalk.dim(`Cache: ${result.cacheHit ? 'hit' : 'miss'}`));
+            if (findings.length === 0) {
+                console.log(chalk.dim('No unsuppressed advisory findings.'));
+                return;
+            }
+            findings.forEach((finding, index) => {
+                console.log(chalk.white(`  ${index + 1}. ${finding.category} · ${(finding.confidence * 100).toFixed(0)}%`));
+                console.log(chalk.dim(`     ${finding.rationaleCategories.join(', ')}`));
+                console.log(chalk.dim(`     ${finding.related.map((item) => item.path || item.symbol || item.hash).filter(Boolean).join(', ')}`));
+                console.log(chalk.dim(`     limitations: ${finding.limitations.join(' ')}`));
+                console.log(chalk.dim(`     id: ${finding.findingId}`));
+            });
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('advisory-suppress <key>')
+        .description('Suppress a finding ID, category:<name>, path:<path>, or fingerprint:<hash> locally')
+        .option('--remove', 'Remove the suppression instead')
+        .option('--json', 'Output stable source-free JSON')
+        .action((key, options) => {
+        const scope = getBrainScope();
+        try {
+            const registry = new brain_1.SemanticAdvisoryRegistry(scope.cwd);
+            const status = options.remove ? registry.unsuppress(key) : registry.suppress(key);
+            if (options.json)
+                console.log(JSON.stringify({ ok: true, status }, null, 2));
+            else
+                console.log(chalk.green(`\n✅ Advisory suppression ${options.remove ? 'removed' : 'saved'}: ${key}\n`));
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('advisory-feedback <finding-id>')
+        .description('Record source-free advisory feedback: accepted, dismissed, duplicate, or useful')
+        .requiredOption('--category <category>', 'Advisory category')
+        .requiredOption('--outcome <outcome>', 'accepted | dismissed | duplicate | useful')
+        .option('--json', 'Output stable source-free JSON')
+        .action((findingId, options) => {
+        const scope = getBrainScope();
+        try {
+            const outcomes = ['accepted', 'dismissed', 'duplicate', 'useful'];
+            if (!outcomes.includes(options.outcome)) {
+                throw new Error(`Unsupported advisory feedback outcome: ${options.outcome}`);
+            }
+            const registry = new brain_1.SemanticAdvisoryRegistry(scope.cwd);
+            const status = registry.recordFeedback({
+                findingId,
+                category: advisoryCategory(options.category),
+                outcome: options.outcome,
+            });
+            if (options.json)
+                console.log(JSON.stringify({ ok: true, status }, null, 2));
+            else
+                console.log(chalk.green(`\n✅ Advisory feedback recorded: ${options.outcome}\n`));
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('advisory-status')
+        .description('Show local advisory cache, suppressions, feedback, and privacy mode')
+        .option('--json', 'Output stable source-free JSON')
+        .action((options) => {
+        const scope = getBrainScope();
+        const status = new brain_1.SemanticAdvisoryRegistry(scope.cwd).status();
+        if (options.json) {
+            console.log(JSON.stringify({ ok: true, status }, null, 2));
+            return;
+        }
+        console.log(chalk.bold('\n🧠 Advisory Semantic Intelligence Status\n'));
+        console.log(chalk.dim(`Registry:      ${status.path}`));
+        console.log(chalk.dim(`Cache entries: ${status.cacheEntries}`));
+        console.log(chalk.dim(`Suppressions:  ${status.suppressions.length}`));
+        console.log(chalk.dim(`Feedback IDs:  ${Object.keys(status.feedback).length}`));
+        console.log(chalk.dim('Privacy:       local-only; no source, diff, prompt, or chat upload.'));
+    });
+    // -- brain inspect ----------------------------------------------------------
+    brain
+        .command('inspect [query...]')
+        .description('Inspect the source-free local repository brain or search it by area/symbol')
+        .option('--limit <n>', 'Maximum results to show (default: 12)', (v) => parseInt(v, 10))
+        .option('--rebuild', 'Rebuild the local repo brain before inspecting')
+        .option('--experimental-fingerprint-reuse', 'Include experimental signature-fingerprint reuse detection')
+        .option('--json', 'Output as JSON')
+        .action(async (queryParts, options) => {
+        const scope = getBrainScope();
+        const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(50, options.limit)) : 12;
+        let artifact = options.rebuild ? null : (0, local_repo_brain_1.readLocalRepoBrain)(scope.cwd);
+        let rebuilt = false;
+        let canonicalGraph = (0, brain_1.readRepositoryGraph)(scope.cwd);
+        if (!canonicalGraph || options.rebuild) {
+            canonicalGraph = (await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, forceRebuild: options.rebuild === true })).graph;
+        }
+        const canonicalFreshness = await (0, brain_1.repositoryGraphStatus)(scope.cwd);
+        if (!artifact) {
+            artifact = (0, local_repo_brain_1.buildLocalRepoBrain)(scope.cwd, { experimentalFingerprintReuse: options.experimentalFingerprintReuse });
+            (0, local_repo_brain_1.writeLocalRepoBrain)(scope.cwd, artifact);
+            rebuilt = true;
+        }
+        const query = Array.isArray(queryParts) ? queryParts.join(' ').trim() : '';
+        const results = query ? (0, local_repo_brain_1.searchLocalRepoBrain)(artifact, query, limit) : [];
+        const payload = {
+            repoRoot: scope.cwd,
+            repositoryIntelligenceModel: {
+                canonicalLifecycle: 'repository_graph_v2',
+                surface: 'legacy_brain_compatibility_projection',
+                compatibilityOnly: true,
+            },
+            canonicalGraph: {
+                graphId: canonicalGraph.graphId,
+                schemaVersion: canonicalGraph.schemaVersion,
+                freshness: canonicalFreshness,
+                coverage: canonicalGraph.coverage,
+            },
+            jsonPath: (0, local_repo_brain_1.localRepoBrainPath)(scope.cwd),
+            markdownPath: (0, local_repo_brain_1.localRepoBrainMarkdownPath)(scope.cwd),
+            rebuilt,
+            query: query || null,
+            artifactHash: artifact.artifactHash,
+            privacy: artifact.privacy,
+            summary: artifact.summary,
+            results,
+            topModules: artifact.modules.slice(0, limit),
+            topHotspots: artifact.hotspots.slice(0, limit),
+            reuseFindings: artifact.reuseFindings.slice(0, limit),
+            limitations: artifact.limitations,
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        await (0, messages_1.printSuccessBanner)(query ? 'Local Repo Brain Search' : 'Local Repo Brain Inspect');
+        console.log(chalk.dim(`Repo Root:     ${scope.cwd}`));
+        console.log(chalk.dim(`Artifact:      ${(0, local_repo_brain_1.localRepoBrainPath)(scope.cwd)}`));
+        console.log(chalk.dim(`Artifact Hash: ${artifact.artifactHash}`));
+        console.log(chalk.yellow('Compatibility projection: use `brain repo-status` for canonical freshness and completeness.'));
+        if (rebuilt) {
+            (0, messages_1.printInfo)('Brain index created', 'No existing local repo brain was found, so Neurcode built one first.');
+        }
+        (0, messages_1.printSection)('Summary', '📊');
+        console.log(chalk.dim(`Files: ${artifact.summary.filesIndexed} | Declarations: ${artifact.summary.symbolsIndexed} | Imports: ${artifact.summary.importEdges} | Sensitive files: ${artifact.summary.sensitiveFiles}`));
+        if (query) {
+            (0, messages_1.printSection)(`Results for "${query}"`, '🔎');
+            if (results.length === 0) {
+                (0, messages_1.printWarning)('No source-free matches', 'Try a module, file area, sensitive surface, or symbol name.');
+            }
+            else {
+                results.forEach((result, index) => {
+                    console.log(chalk.white(`  ${index + 1}. [${result.kind}] ${result.title}`));
+                    if (result.file)
+                        console.log(chalk.dim(`     file: ${result.file}`));
+                    console.log(chalk.dim(`     ${result.detail}`));
+                });
+            }
+            return;
+        }
+        (0, messages_1.printSection)('Top Hotspots', '🔥');
+        if (artifact.hotspots.length === 0) {
+            console.log(chalk.dim('No hotspots found yet.'));
+        }
+        else {
+            artifact.hotspots.slice(0, limit).forEach((hotspot, index) => {
+                console.log(chalk.white(`  ${index + 1}. ${hotspot.file}`));
+                console.log(chalk.dim(`     score ${hotspot.score}; fan-in ${hotspot.importFanIn}; fan-out ${hotspot.importFanOut}; ${hotspot.reasons.join(', ')}`));
+            });
+        }
+        (0, messages_1.printSection)('Reuse Advisories', '♻️');
+        if (artifact.reuseFindings.length === 0) {
+            console.log(chalk.dim('No reuse advisories found.'));
+        }
+        else {
+            artifact.reuseFindings.slice(0, limit).forEach((finding, index) => {
+                console.log(chalk.white(`  ${index + 1}. ${finding.kind}: ${finding.symbolName || 'fingerprint'}`));
+                console.log(chalk.dim(`     ${finding.files.slice(0, 5).join(', ')} (${finding.confidence})`));
+            });
+        }
+    });
+    // -- brain impact -----------------------------------------------------------
+    brain
+        .command('impact [paths...]')
+        .description('Show the source-free change-impact map for a file or changed set (owners, consumers, sensitive surfaces, reviewer questions)')
+        .option('--path <file>', 'A single changed file path')
+        .option('--changed <list>', 'Comma-, space-, or newline-separated list of changed file paths')
+        .option('--staged', 'Use staged git changes (git diff --name-only --cached)')
+        .option('--unstaged', 'Use unstaged tracked changes (git diff --name-only)')
+        .option('--since <ref>', 'Use files changed since a git ref (git diff --name-only <ref>...HEAD)')
+        .option('--include-untracked', 'Also include untracked git files')
+        .option('--rebuild', 'Rebuild the local repo brain before computing impact')
+        .option('--no-index', 'Do not build the brain if it is missing (degraded output)')
+        .option('--summary', 'Print only the compact source-free impact summary')
+        .option('--json', 'Output as JSON (full report + compact summary)')
+        .action(async (positional, options) => {
+        const scope = getBrainScope();
+        const gitPaths = [
+            ...(options.staged ? gitChangedPaths(scope.cwd, ['diff', '--name-only', '--cached']) : []),
+            ...(options.unstaged ? gitChangedPaths(scope.cwd, ['diff', '--name-only']) : []),
+            ...(options.since ? gitChangedPaths(scope.cwd, ['diff', '--name-only', `${String(options.since).trim()}...HEAD`]) : []),
+            ...(options.includeUntracked ? gitChangedPaths(scope.cwd, ['ls-files', '--others', '--exclude-standard']) : []),
+        ];
+        const paths = Array.from(new Set([
+            ...(Array.isArray(positional) ? positional : []),
+            ...(options.path ? [options.path] : []),
+            ...splitChangedPathList(options.changed),
+            ...gitPaths,
+        ]
+            .map((p) => String(p || '').trim())
+            .filter(Boolean)));
+        if (paths.length === 0) {
+            (0, messages_1.printError)('No changed paths provided', 'Usage: neurcode brain impact --path <file>  |  --changed a,b,c  |  --staged  |  --unstaged  |  --since main');
+            process.exit(1);
+        }
+        if (options.rebuild) {
+            await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, forceRebuild: true });
+            const rebuilt = (0, local_repo_brain_1.buildLocalRepoBrain)(scope.cwd);
+            (0, local_repo_brain_1.writeLocalRepoBrain)(scope.cwd, rebuilt);
+        }
+        else if (options.index !== false && !(0, brain_1.readRepositoryGraph)(scope.cwd)) {
+            await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd });
+        }
+        const report = (0, repo_brain_impact_1.buildRepoBrainImpactForRepo)(scope.cwd, paths, { autoBuild: options.index !== false });
+        const summary = (0, repo_brain_impact_1.summarizeImpact)(report);
+        const canonicalGraph = (0, brain_1.readRepositoryGraph)(scope.cwd);
+        const canonicalFreshness = canonicalGraph ? await (0, brain_1.repositoryGraphStatus)(scope.cwd) : null;
+        if (options.json) {
+            console.log(JSON.stringify({
+                repoRoot: scope.cwd,
+                repositoryIntelligenceModel: {
+                    canonicalLifecycle: 'repository_graph_v2',
+                    surface: 'legacy_impact_compatibility_projection',
+                    compatibilityOnly: true,
+                },
+                canonicalGraph: canonicalGraph ? {
+                    graphId: canonicalGraph.graphId,
+                    schemaVersion: canonicalGraph.schemaVersion,
+                    freshness: canonicalFreshness,
+                    coverage: canonicalGraph.coverage,
+                } : null,
+                report,
+                summary,
+            }, null, 2));
+            return;
+        }
+        if (options.summary) {
+            await (0, messages_1.printSuccessBanner)('Repo Brain — Impact Summary');
+            console.log(chalk.dim(`Repo Root: ${scope.cwd}`));
+            console.log(chalk.dim(`Brain: ${report.brain.status} | files indexed: ${report.brain.filesIndexed ?? 'n/a'}`));
+            console.log(chalk.white(`Changed: ${summary.counts.changedFiles} | Consumers: ${summary.counts.directConsumers} | Sensitive: ${summary.counts.sensitiveSurfaces} | Owners: ${summary.owners.join(', ') || 'none'}`));
+            console.log(chalk.white(`Impact radius: ${summary.impactRadius.riskLevel} | ${summary.impactRadius.reasons.slice(0, 2).join('; ')}`));
+            console.log(chalk.white(`Route to: ${summary.reviewRouting.owners.join(', ') || 'no CODEOWNERS match'}`));
+            console.log(chalk.white(`Review first: ${summary.reviewRouting.reviewFirst.join(', ') || 'no elevated-risk surface detected'}`));
+            if (summary.impactRadius.advisory.likelyTests.length > 0) {
+                console.log(chalk.white(`Likely tests: ${summary.impactRadius.advisory.likelyTests.slice(0, 5).join(', ')}`));
+            }
+            if (summary.reviewQuestions.length > 0) {
+                console.log(chalk.bold('\nTop reviewer questions:'));
+                summary.reviewQuestions.slice(0, 5).forEach((q, i) => console.log(chalk.dim(`  ${i + 1}. ${q}`)));
+            }
+            return;
+        }
+        if (report.brain.status === 'missing') {
+            (0, messages_1.printWarning)('Brain not indexed', `Output is degraded. Run: ${report.brain.recoveryCommand}`);
+        }
+        else if (report.brain.status === 'built') {
+            (0, messages_1.printInfo)('Brain index created', 'No existing local repo brain was found, so Neurcode built one first.');
+        }
+        console.log(chalk.dim(`Repo Root: ${scope.cwd}\n`));
+        console.log(chalk.yellow('Impact is a compatibility projection; Repository Graph V2 owns canonical freshness/completeness.'));
+        console.log((0, repo_brain_impact_1.renderRepoBrainImpactText)(report));
+        (0, messages_1.printInfo)('Labels', 'Deterministic = compiled path/CODEOWNERS/import-graph facts. Advisory = heuristic reuse/proximity/reviewer guidance.');
     });
     brain
         .command('mode')
@@ -871,7 +1640,7 @@ function brainCommand(program) {
             updatedAt: entry.updatedAt,
             lastSeenAt: entry.lastSeenAt,
         }))
-            .filter((entry) => Boolean(entry.path));
+            .filter((entry) => Boolean(entry.path) && (0, team_memory_path_hygiene_1.isTeamMemoryProjectPath)(entry.path));
         const scopedFiles = scopedFilesRaw.length > 0
             ? scopedFilesRaw
             : scanFiles(scope.cwd, scope.cwd, 300).map((path) => ({
@@ -921,7 +1690,9 @@ function brainCommand(program) {
         const effectiveAuthorTouches = focusAuthorTouches.size > 0 ? focusAuthorTouches : authorTouches;
         const topContributors = rankTopEntries(effectiveAuthorTouches.entries(), ([, count]) => count, limit)
             .map(([author, touches]) => ({ author, touches }));
-        const events = Array.isArray(scopeStore.events) ? scopeStore.events : [];
+        const events = Array.isArray(scopeStore.events)
+            ? scopeStore.events.filter((event) => !event.filePath || (0, team_memory_path_hygiene_1.isTeamMemoryProjectPath)(event.filePath))
+            : [];
         const recentDecisions = [...events]
             .sort((a, b) => sortIsoDesc(a.timestamp, b.timestamp))
             .slice(0, Math.max(limit, 12))

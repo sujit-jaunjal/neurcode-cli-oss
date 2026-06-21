@@ -1,6 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.policyCommand = policyCommand;
+const node_fs_1 = require("node:fs");
+const node_path_1 = require("node:path");
+const brain_1 = require("@neurcode-ai/brain");
+const policy_engine_1 = require("@neurcode-ai/policy-engine");
 const project_root_1 = require("../utils/project-root");
 const config_1 = require("../config");
 const api_client_1 = require("../api-client");
@@ -11,6 +15,9 @@ const policy_audit_1 = require("../utils/policy-audit");
 const policy_packs_1 = require("../utils/policy-packs");
 const policy_compiler_1 = require("../utils/policy-compiler");
 const artifact_signature_1 = require("../utils/artifact-signature");
+const proposed_change_analysis_1 = require("../utils/proposed-change-analysis");
+const repo_intelligence_v2_1 = require("../utils/repo-intelligence-v2");
+const v0_governance_1 = require("../utils/v0-governance");
 // Import chalk with fallback
 let chalk;
 try {
@@ -88,6 +95,107 @@ function normalizeListLimit(value, fallback, min, max) {
     if (!Number.isFinite(value))
         return fallback;
     return Math.max(min, Math.min(max, Math.floor(Number(value))));
+}
+const STRUCTURAL_POLICY_DEFAULT_PATH = '.neurcode/structural-policy-v2.json';
+function resolveStructuralPolicyPath(cwd, input) {
+    const selected = input?.trim() || STRUCTURAL_POLICY_DEFAULT_PATH;
+    return (0, node_path_1.isAbsolute)(selected) ? selected : (0, node_path_1.join)(cwd, selected);
+}
+function readJsonValue(path) {
+    try {
+        return JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
+    }
+    catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Invalid JSON in ${path}: ${detail}`);
+    }
+}
+function normalizeRepositoryPath(cwd, input) {
+    const absolutePath = (0, node_path_1.isAbsolute)(input) ? (0, node_path_1.resolve)(input) : (0, node_path_1.resolve)(cwd, input);
+    const relativePath = (0, node_path_1.relative)(cwd, absolutePath).replace(/\\/g, '/');
+    if (!relativePath || relativePath === '..' || relativePath.startsWith('../')) {
+        throw new Error(`Path is outside repository root: ${input}`);
+    }
+    return { relativePath, absolutePath };
+}
+function structuralExitCode(verdict) {
+    if (verdict === 'block')
+        return 2;
+    if (verdict === 'not_evaluated')
+        return 3;
+    return 0;
+}
+function structuralStatements(value, previous) {
+    return [...previous, value];
+}
+async function evaluateStructuralPolicyPath(input) {
+    const target = normalizeRepositoryPath(input.cwd, input.targetPath);
+    let graph = (0, brain_1.readRepositoryGraph)(input.cwd);
+    let freshness = await (0, brain_1.repositoryGraphStatus)(input.cwd);
+    if (input.index !== false && (!graph || freshness.state !== 'fresh')) {
+        graph = (await (0, brain_1.indexRepositoryGraph)({ repoRoot: input.cwd })).graph;
+        freshness = graph.freshness;
+    }
+    else if (graph) {
+        graph = { ...graph, freshness };
+    }
+    const operation = input.operation
+        ?? ((0, node_fs_1.existsSync)(target.absolutePath) ? 'update' : 'create');
+    let proposedSource = null;
+    let sourceKind = 'not_available';
+    if (!input.pathOnly && operation !== 'delete') {
+        const contentPath = input.contentFile
+            ? ((0, node_path_1.isAbsolute)(input.contentFile) ? input.contentFile : (0, node_path_1.resolve)(input.cwd, input.contentFile))
+            : target.absolutePath;
+        if ((0, node_fs_1.existsSync)(contentPath)) {
+            proposedSource = (0, node_fs_1.readFileSync)(contentPath, 'utf8');
+            sourceKind = input.contentFile ? 'write_content' : 'post_write_disk_read';
+        }
+    }
+    const analysis = (0, proposed_change_analysis_1.analyzeProposedChange)({
+        repoRoot: input.cwd,
+        filePath: target.relativePath,
+        proposedSource,
+        sourceKind,
+        adapterId: 'neurcode-cli',
+        timing: sourceKind === 'post_write_disk_read' ? 'after_write' : 'before_write',
+        sessionId: null,
+        planRevision: null,
+    });
+    analysis.envelope.target.operation = operation;
+    const approvalsValue = input.approvalsFile
+        ? readJsonValue((0, node_path_1.isAbsolute)(input.approvalsFile) ? input.approvalsFile : (0, node_path_1.resolve)(input.cwd, input.approvalsFile))
+        : [];
+    if (!Array.isArray(approvalsValue))
+        throw new Error('Approvals file must contain a JSON array.');
+    const approvals = approvalsValue
+        .filter((value) => Boolean(value)
+        && typeof value === 'object'
+        && typeof value.path === 'string'
+        && Array.isArray(value.owners)
+        && typeof value.approvedBy === 'string')
+        .map((value) => ({
+        path: value.path,
+        owners: value.owners.filter((owner) => typeof owner === 'string'),
+        approvedBy: value.approvedBy,
+    }));
+    const repoIntelligence = await (0, repo_intelligence_v2_1.evaluateLocalRepoIntelligenceV2)({
+        repoRoot: input.cwd,
+        change: analysis.envelope,
+        approvals,
+        policyPath: input.artifactPath,
+    });
+    if (!repoIntelligence.policyConfigured) {
+        throw new Error(`Structural policy artifact is missing or invalid: ${repoIntelligence.policyPath}. ` +
+            'Run `neurcode policy structural-compile`.');
+    }
+    return {
+        artifactPath: resolveStructuralPolicyPath(input.cwd, input.artifactPath),
+        graphId: repoIntelligence.evidence.graph.graphId,
+        envelope: analysis.envelope,
+        evaluation: repoIntelligence.evaluation,
+        evidence: repoIntelligence.evidence,
+    };
 }
 async function resolveCustomPolicies(client, includeDashboardPolicies, requireDashboardPolicies) {
     if (!includeDashboardPolicies) {
@@ -486,6 +594,244 @@ function policyCommand(program) {
             console.log(chalk.dim('\nIf this policy drift is intentional, refresh baseline: neurcode policy lock\n'));
         }
         process.exit(pass ? 0 : 1);
+    });
+    policy
+        .command('duplicate-mode [mode]')
+        .description('Inspect or set deterministic duplicate-symbol enforcement: off | warn | block')
+        .option('--json', 'Output stable machine-readable JSON')
+        .action((mode, options) => {
+        const cwd = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+        try {
+            if (mode !== undefined && !['off', 'warn', 'block'].includes(mode)) {
+                throw new Error('Invalid duplicate mode. Use one of: off, warn, block.');
+            }
+            const updated = mode
+                ? (0, v0_governance_1.setRepoSymbolDuplicateMode)(cwd, mode)
+                : null;
+            const config = (0, v0_governance_1.readRuntimeGovernanceConfig)(cwd);
+            if (config.error)
+                throw new Error(`Invalid governance configuration: ${config.error}`);
+            const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(cwd).profile;
+            const payload = {
+                ok: true,
+                repoSymbolDuplicateMode: profile.runtimeConfig.repoSymbolDuplicateMode,
+                source: config.exists ? 'governance_config' : 'default',
+                configPath: config.path,
+                profilePath: (0, node_path_1.join)(cwd, '.neurcode', 'profile.json'),
+                profileHash: profile.profileHash,
+                updated: Boolean(updated),
+            };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else {
+                console.log(chalk.bold('\n🛡️  Duplicate Symbol Policy\n'));
+                console.log(chalk.dim(`Effective mode: ${payload.repoSymbolDuplicateMode}`));
+                console.log(chalk.dim(`Source:         ${payload.source}`));
+                console.log(chalk.dim(`Config:         ${payload.configPath}`));
+                console.log(chalk.dim('Evidence:       exact source-free symbol name/language facts only; semantic resemblance never blocks.'));
+            }
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (options.json)
+                console.log(JSON.stringify({ ok: false, error: message, exitCode: 1 }, null, 2));
+            else
+                console.error(chalk.red(`\n❌ ${message}\n`));
+            process.exitCode = 1;
+        }
+    });
+    policy
+        .command('structural-compile')
+        .description('Compile bounded Repository Policy V2 rules into a deterministic source-free artifact')
+        .option('--input <path>', 'JSON file containing organizationRules, repositoryRules, and naturalLanguageStatements')
+        .option('--statement <text>', 'Add a bounded natural-language statement', structuralStatements, [])
+        .option('--output <path>', `Output artifact (default: ${STRUCTURAL_POLICY_DEFAULT_PATH})`)
+        .option('--require-deterministic', 'Fail when any statement is advisory, not evaluated, or rejected')
+        .option('--json', 'Output stable machine-readable JSON')
+        .action((options) => {
+        const cwd = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+        try {
+            const fromFile = options.input
+                ? readJsonValue((0, node_path_1.isAbsolute)(options.input) ? options.input : (0, node_path_1.resolve)(cwd, options.input))
+                : {};
+            if (!fromFile || typeof fromFile !== 'object' || Array.isArray(fromFile)) {
+                throw new Error('Structural policy input must be a JSON object.');
+            }
+            const parsed = fromFile;
+            const naturalLanguageStatements = [
+                ...(Array.isArray(parsed.naturalLanguageStatements)
+                    ? parsed.naturalLanguageStatements.filter((value) => typeof value === 'string')
+                    : []),
+                ...(options.statement ?? []),
+            ];
+            const compilation = (0, policy_engine_1.compileStructuralPolicies)({
+                organizationRules: Array.isArray(parsed.organizationRules) ? parsed.organizationRules : [],
+                repositoryRules: Array.isArray(parsed.repositoryRules) ? parsed.repositoryRules : [],
+                naturalLanguageStatements,
+            });
+            const artifact = (0, policy_engine_1.createStructuralPolicyArtifact)(compilation);
+            const outputPath = resolveStructuralPolicyPath(cwd, options.output);
+            (0, node_fs_1.mkdirSync)((0, node_path_1.dirname)(outputPath), { recursive: true });
+            (0, node_fs_1.writeFileSync)(outputPath, `${JSON.stringify(artifact, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+            const incomplete = compilation.advisory.length
+                + compilation.notEvaluated.length
+                + compilation.rejected.length;
+            const exitCode = compilation.rejected.length > 0
+                || (options.requireDeterministic && incomplete > 0)
+                ? 4
+                : 0;
+            const payload = {
+                ok: exitCode === 0,
+                path: outputPath,
+                artifact,
+                counts: {
+                    compiled: compilation.compiled.length,
+                    advisory: compilation.advisory.length,
+                    notEvaluated: compilation.notEvaluated.length,
+                    rejected: compilation.rejected.length,
+                },
+                exitCode,
+            };
+            if (options.json) {
+                console.log(JSON.stringify(payload, null, 2));
+            }
+            else {
+                console.log(chalk.bold('\n🛡️  Structural Policy V2 Compilation\n'));
+                console.log(chalk.dim(`Artifact:       ${outputPath}`));
+                console.log(chalk.dim(`Compiled:       ${payload.counts.compiled}`));
+                console.log(chalk.dim(`Advisory:       ${payload.counts.advisory}`));
+                console.log(chalk.dim(`Not evaluated:  ${payload.counts.notEvaluated}`));
+                console.log(chalk.dim(`Rejected:       ${payload.counts.rejected}`));
+                for (const rule of compilation.compiled) {
+                    console.log(chalk.dim(`  ${rule.ruleId} · ${rule.family} · ${rule.mode}`));
+                }
+            }
+            process.exitCode = exitCode;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (options.json)
+                console.log(JSON.stringify({ ok: false, error: message, exitCode: 1 }, null, 2));
+            else
+                console.error(chalk.red(`\n❌ ${message}\n`));
+            process.exitCode = 1;
+        }
+    });
+    policy
+        .command('structural-test <path>')
+        .alias('check-change')
+        .description('Evaluate a proposed or current local file against Structural Policy V2')
+        .option('--artifact <path>', `Compiled artifact (default: ${STRUCTURAL_POLICY_DEFAULT_PATH})`)
+        .option('--content-file <path>', 'Local proposed content file; raw content is parsed locally and not retained')
+        .option('--operation <type>', 'create | update | delete | rename')
+        .option('--path-only', 'Evaluate the honest path-only host case without proposed content')
+        .option('--approvals <path>', 'JSON array of exact source-free approvals')
+        .option('--no-index', 'Do not create or refresh Repository Graph V2')
+        .option('--json', 'Output stable machine-readable JSON')
+        .action(async (path, options) => {
+        const cwd = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+        try {
+            const result = await evaluateStructuralPolicyPath({
+                cwd,
+                targetPath: path,
+                artifactPath: options.artifact,
+                contentFile: options.contentFile,
+                operation: options.operation,
+                pathOnly: options.pathOnly,
+                index: options.index,
+                approvalsFile: options.approvals,
+            });
+            const exitCode = structuralExitCode(result.evaluation.verdict);
+            const payload = { ok: exitCode === 0, ...result, exitCode };
+            if (options.json) {
+                console.log(JSON.stringify(payload, null, 2));
+            }
+            else {
+                console.log(chalk.bold('\n🛡️  Structural Policy V2 Test\n'));
+                console.log(chalk.dim(`Path:          ${result.envelope.target.path}`));
+                console.log(chalk.dim(`Verdict:       ${result.evaluation.verdict}`));
+                console.log(chalk.dim(`Truth:         ${result.evaluation.truth}`));
+                console.log(chalk.dim(`Host timing:   ${result.envelope.host.capability} / ${result.envelope.host.timing}`));
+                console.log(chalk.dim(`Evidence:      ${result.envelope.content.availabilityReason}`));
+                console.log(chalk.dim('Enforcement:   explicit CLI evaluation; observed result, not a hard host pre-write gate'));
+                console.log(chalk.dim(`Evaluated:     ${result.evaluation.evaluatedRuleIds.length}`));
+                console.log(chalk.dim(`Not evaluated: ${result.evaluation.notEvaluatedRuleIds.length}`));
+                console.log(chalk.dim(`Advisory:      ${result.evidence.advisory.length} (never blocking)`));
+                result.evaluation.findings.forEach((item) => {
+                    console.log(chalk.yellow(`  [${item.verdict}] ${item.ruleId}: ${item.explanation}`));
+                    console.log(chalk.dim(`    ${item.remediation}`));
+                });
+            }
+            process.exitCode = exitCode;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (options.json)
+                console.log(JSON.stringify({ ok: false, error: message, exitCode: 1 }, null, 2));
+            else
+                console.error(chalk.red(`\n❌ ${message}\n`));
+            process.exitCode = 1;
+        }
+    });
+    policy
+        .command('structural-explain <path>')
+        .description('Explain matched facts, deterministic rules, verdicts, and remediation for a path')
+        .option('--artifact <path>', `Compiled artifact (default: ${STRUCTURAL_POLICY_DEFAULT_PATH})`)
+        .option('--content-file <path>', 'Local proposed content file')
+        .option('--operation <type>', 'create | update | delete | rename')
+        .option('--path-only', 'Explain the path-only not-evaluated boundary')
+        .option('--approvals <path>', 'JSON array of exact source-free approvals')
+        .option('--no-index', 'Do not create or refresh Repository Graph V2')
+        .option('--json', 'Output stable machine-readable JSON')
+        .action(async (path, options) => {
+        const cwd = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+        try {
+            const result = await evaluateStructuralPolicyPath({
+                cwd,
+                targetPath: path,
+                artifactPath: options.artifact,
+                contentFile: options.contentFile,
+                operation: options.operation,
+                pathOnly: options.pathOnly,
+                index: options.index,
+                approvalsFile: options.approvals,
+            });
+            const exitCode = structuralExitCode(result.evaluation.verdict);
+            if (options.json) {
+                console.log(JSON.stringify({ ok: exitCode === 0, ...result, exitCode }, null, 2));
+            }
+            else {
+                console.log(chalk.bold(`\n🛡️  Structural Policy V2 Explain: ${result.envelope.target.path}\n`));
+                console.log(chalk.dim(`Classification: ${result.evaluation.truth}`));
+                console.log(chalk.dim(`Verdict:        ${result.evaluation.verdict}`));
+                console.log(chalk.dim(`Graph:          ${result.graphId ?? 'not available'} (${result.evaluation.graphFreshness.state})`));
+                console.log(chalk.dim(`Evidence:       ${result.envelope.content.availabilityReason}`));
+                console.log(chalk.dim('Enforcement:    explicit CLI evaluation; observed result, not a hard host pre-write gate'));
+                if (result.evaluation.findings.length === 0) {
+                    console.log(chalk.dim(result.evaluation.verdict === 'not_evaluated'
+                        ? 'Required facts were unavailable; no deterministic pass is claimed.'
+                        : 'No deterministic structural violations matched.'));
+                }
+                for (const item of result.evaluation.findings) {
+                    console.log(chalk.yellow(`\n${item.ruleId} · ${item.family} · ${item.verdict}`));
+                    console.log(`  ${item.explanation}`);
+                    console.log(chalk.dim(`  Matched facts: ${item.matchedFacts.map((fact) => fact.factId).join(', ')}`));
+                    console.log(chalk.dim(`  Remediation: ${item.remediation}`));
+                }
+                if (result.evaluation.notEvaluatedRuleIds.length > 0) {
+                    console.log(chalk.dim(`\nNot evaluated rules: ${result.evaluation.notEvaluatedRuleIds.join(', ')}`));
+                }
+            }
+            process.exitCode = exitCode;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (options.json)
+                console.log(JSON.stringify({ ok: false, error: message, exitCode: 1 }, null, 2));
+            else
+                console.error(chalk.red(`\n❌ ${message}\n`));
+            process.exitCode = 1;
+        }
     });
     policy
         .command('compile')

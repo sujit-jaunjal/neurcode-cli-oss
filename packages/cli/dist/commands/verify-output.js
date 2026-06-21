@@ -523,6 +523,10 @@ function toCanonicalVerifyOutput(payload) {
         // so enterprise CI never has to infer silent downgrades from absence
         // of fields.
         'runtimeCapabilities',
+        // Truthfulness envelope: distinguishes a completed evaluation from partial
+        // or absent coverage and preserves the exact skipped/unsupported custody.
+        'evaluationStatus',
+        'verificationCoverage',
     ];
     const canonicalMutable = canonical;
     for (const key of passthroughKeys) {

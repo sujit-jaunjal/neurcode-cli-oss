@@ -2,7 +2,7 @@
 
 Neurcode CLI is the local runtime brain for **in-flow governance of AI-assisted software delivery**.
 
-It derives repository governance profiles, starts governed AI coding sessions, captures source-free intent and plan revisions, checks edit boundaries before writes when the agent host supports it, applies exact-path approvals, and emits replayable evidence.
+It derives repository governance profiles, starts governed AI coding sessions, captures local-private intent and plan revisions, checks edit boundaries before writes when the agent host supports it, applies exact-path approvals, and emits replayable source-free evidence.
 
 Verification remains available, but it is one phase of the lifecycle, not the product. The canonical runtime loop is:
 
@@ -34,6 +34,17 @@ The launcher refreshes repo metadata, creates the governed session contract,
 prints the agent starter prompt, records a source-free launch event, and exposes
 the same state to the local daemon / Runtime Companion.
 
+Local session files are classified `local_private`, bounded, and secret-redacted before persistence. Cloud runtime payloads use `neurcode.intent-summary.v1` and exclude raw prompts, plan prose, chat, source, diffs, shell command bodies, absolute paths, and credentials.
+
+Audit the boundary without printing payload content:
+
+```bash
+neurcode runtime privacy-audit
+neurcode runtime privacy-audit --repair
+```
+
+Repair mode only rewrites pending local outbox entries after a restricted backup. Entries that cannot be proven safe are quarantined locally and are never uploaded.
+
 Current adapter guarantees:
 
 | Agent | Current guarantee |
@@ -51,13 +62,14 @@ session instead of creating a duplicate.
 For GitHub Copilot Agent Mode, run:
 
 ```bash
-neurcode activate copilot --connect <token>
+neurcode activate copilot --dir .
 ```
 
 The command writes `.github/hooks/neurcode.json` with `UserPromptSubmit`,
 `PreToolUse`, and `Stop` hooks that call the same local session-hook runtime.
 Copilot should be reloaded after activation so the workspace hooks are
-rediscovered.
+rediscovered. Pairing a repository to the dashboard for live evidence sync is a
+separate optional `neurcode activate <agent> --connect <dashboard-command>` flow.
 
 For compatibility modes, run:
 

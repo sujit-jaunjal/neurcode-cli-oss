@@ -1,5 +1,7 @@
-export declare const RUNTIME_OUTBOX_SCHEMA_VERSION: "neurcode.runtime-outbox.v1";
+export declare const RUNTIME_OUTBOX_SCHEMA_VERSION: "neurcode.runtime-outbox.v2";
+export declare const LEGACY_RUNTIME_OUTBOX_SCHEMA_VERSION: "neurcode.runtime-outbox.v1";
 export declare const RUNTIME_DELIVERY_SCHEMA_VERSION: "neurcode.runtime-delivery.v1";
+export declare const RUNTIME_PRIVACY_AUDIT_SCHEMA_VERSION: "neurcode.runtime-privacy-audit.v1";
 export declare const MAX_RUNTIME_OUTBOX_EVENTS = 1000;
 export declare const MAX_RUNTIME_DEAD_LETTER_EVENTS = 100;
 export declare const MAX_RUNTIME_DELIVERY_ATTEMPTS = 5;
@@ -31,6 +33,22 @@ export interface RuntimeDeadLetterEvent extends RuntimeOutboxEvent {
     deadLetteredAt: string;
     deadLetterReason: string;
 }
+export interface RuntimePrivacyAuditReport {
+    schemaVersion: typeof RUNTIME_PRIVACY_AUDIT_SCHEMA_VERSION;
+    filesScanned: number;
+    entriesScanned: number;
+    safe: number;
+    migrated: number;
+    quarantined: number;
+    quarantinedThisRun: number;
+    quarantinedTotal: number;
+    rejected: number;
+    schemaVersions: string[];
+    reasonCodeCounts: Record<string, number>;
+    repairApplied: boolean;
+    backupCreated: boolean;
+    nextRecoveryAction: string;
+}
 export type RuntimeOutboxHealth = 'healthy' | 'queued' | 'retrying' | 'degraded';
 export interface RuntimeOutboxStatus {
     schemaVersion: typeof RUNTIME_OUTBOX_SCHEMA_VERSION;
@@ -40,6 +58,7 @@ export interface RuntimeOutboxStatus {
     pendingApprovalAcks: number;
     retryingEvents: number;
     deadLetterEvents: number;
+    quarantinedEvents: number;
     deadLetterSessionSnapshots: number;
     deadLetterApprovalAcks: number;
     oldestPendingAt: string | null;
@@ -74,4 +93,7 @@ export declare function retryRuntimeDeadLetters(repoRoot: string, options?: {
     limit?: number;
 }): number;
 export declare function inspectRuntimeOutbox(repoRoot: string): RuntimeOutboxStatus;
+export declare function auditRuntimePrivacy(repoRoot: string, options?: {
+    repair?: boolean;
+}): RuntimePrivacyAuditReport;
 //# sourceMappingURL=runtime-outbox.d.ts.map

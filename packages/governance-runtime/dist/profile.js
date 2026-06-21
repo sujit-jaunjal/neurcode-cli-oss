@@ -13,7 +13,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_RUNTIME_LOCAL_MODE = exports.DEFAULT_PLAN_COHERENCE_MODE = void 0;
+exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE = exports.DEFAULT_RUNTIME_LOCAL_MODE = exports.DEFAULT_PLAN_COHERENCE_MODE = void 0;
 exports.ownersForPath = ownersForPath;
 exports.buildRepoGovernanceProfile = buildRepoGovernanceProfile;
 exports.checkFileBoundary = checkFileBoundary;
@@ -23,6 +23,7 @@ const architecture_obligations_1 = require("./architecture-obligations");
 const architecture_graph_1 = require("./architecture-graph");
 exports.DEFAULT_PLAN_COHERENCE_MODE = 'warn';
 exports.DEFAULT_RUNTIME_LOCAL_MODE = 'advisory';
+exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE = 'warn';
 // ── Security token map ────────────────────────────────────────────────────────
 //
 // Conservative: tokens are matched WHOLE against path-segment parts only.
@@ -362,6 +363,14 @@ function normalizeRuntimeLocalMode(value) {
         ? value
         : exports.DEFAULT_RUNTIME_LOCAL_MODE;
 }
+function normalizeRepoSymbolDuplicateMode(value) {
+    if (value === undefined || value === null || value === '') {
+        return exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE;
+    }
+    return value === 'off' || value === 'warn' || value === 'block'
+        ? value
+        : exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE;
+}
 function normalizeRuntimeConfig(input) {
     return {
         approvalRequiredGlobs: normalizeGlobList(input?.approvalRequiredGlobs),
@@ -370,6 +379,7 @@ function normalizeRuntimeConfig(input) {
         ignoredGlobs: normalizeGlobList(input?.ignoredGlobs),
         planCoherence: normalizePlanCoherenceMode(input?.planCoherence),
         localMode: normalizeRuntimeLocalMode(input?.localMode),
+        repoSymbolDuplicateMode: normalizeRepoSymbolDuplicateMode(input?.repoSymbolDuplicateMode),
         architectureObligations: (0, architecture_obligations_1.normalizeArchitectureObligationPolicy)(input?.architectureObligations),
     };
 }
@@ -385,6 +395,9 @@ function canonicalRuntimeConfig(config) {
             : {}),
         ...(normalized.localMode && normalized.localMode !== exports.DEFAULT_RUNTIME_LOCAL_MODE
             ? { localMode: normalized.localMode }
+            : {}),
+        ...(normalized.repoSymbolDuplicateMode && normalized.repoSymbolDuplicateMode !== exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE
+            ? { repoSymbolDuplicateMode: normalized.repoSymbolDuplicateMode }
             : {}),
         ...(normalized.architectureObligations
             && (normalized.architectureObligations.mode !== 'warn'

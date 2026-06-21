@@ -95,6 +95,11 @@ export interface RuntimeGovernanceConfig {
     planCoherence?: PlanCoherenceMode;
     /** Local in-flow enforcement posture for harmless task expansion. */
     localMode?: RuntimeLocalMode;
+    /**
+     * How strictly to handle deterministic duplicate symbol-name creation from
+     * source-free repo brain facts. Similarity/fingerprint reuse remains advisory.
+     */
+    repoSymbolDuplicateMode?: RepoSymbolDuplicateMode;
     /** How strictly live architecture obligations are enforced while the agent edits. */
     architectureObligations?: ArchitectureObligationPolicy;
 }
@@ -102,6 +107,8 @@ export type PlanCoherenceMode = 'off' | 'warn' | 'block';
 export declare const DEFAULT_PLAN_COHERENCE_MODE: PlanCoherenceMode;
 export type RuntimeLocalMode = 'strict' | 'advisory' | 'paused';
 export declare const DEFAULT_RUNTIME_LOCAL_MODE: RuntimeLocalMode;
+export type RepoSymbolDuplicateMode = 'off' | 'warn' | 'block';
+export declare const DEFAULT_REPO_SYMBOL_DUPLICATE_MODE: RepoSymbolDuplicateMode;
 /** Return the owners for a path, applying GitHub CODEOWNERS semantics (last rule wins). */
 export declare function ownersForPath(path: string, rules: OwnershipBoundary[]): string[];
 export declare function buildRepoGovernanceProfile(input: ProfileInput): RepoGovernanceProfile;
@@ -139,7 +146,7 @@ export interface BoundaryCheckInput {
     localMode?: RuntimeLocalMode;
 }
 export type BoundaryVerdict = 'ok' | 'warn' | 'block';
-export type RuntimeBlockType = 'approval_required_boundary' | 'scope_violation_or_task_expansion' | 'profile_or_runtime_health_block' | 'multi_file_or_tool_shape_block';
+export type RuntimeBlockType = 'approval_required_boundary' | 'scope_violation_or_task_expansion' | 'profile_or_runtime_health_block' | 'multi_file_or_tool_shape_block' | 'repo_symbol_duplicate_policy' | 'structural_policy_violation';
 export interface BoundaryCheckResult {
     verdict: BoundaryVerdict;
     inScope: boolean;

@@ -16,6 +16,7 @@ exports.getLastProfileCacheHit = getLastProfileCacheHit;
 exports.clearProfileStalenessCache = clearProfileStalenessCache;
 exports.getProfileStaleness = getProfileStaleness;
 exports.ensureFreshGovernanceProfile = ensureFreshGovernanceProfile;
+exports.setRepoSymbolDuplicateMode = setRepoSymbolDuplicateMode;
 exports.parseHookEntrypoint = parseHookEntrypoint;
 exports.installClaudeGovernanceHooks = installClaudeGovernanceHooks;
 exports.copilotHooksPath = copilotHooksPath;
@@ -23,6 +24,7 @@ exports.installCopilotGovernanceHooks = installCopilotGovernanceHooks;
 exports.installClaudeMcpConfig = installClaudeMcpConfig;
 exports.inspectClaudeActivation = inspectClaudeActivation;
 exports.inspectCopilotActivation = inspectCopilotActivation;
+const crypto_1 = require("crypto");
 const child_process_1 = require("child_process");
 const fs_1 = require("fs");
 const os_1 = require("os");
@@ -53,7 +55,7 @@ exports.CLAUDE_GOVERNANCE_HOOKS = {
             hooks: [
                 {
                     type: 'command',
-                    command: 'neurcode session-hook check',
+                    command: 'neurcode session-hook check --trusted-adapter claude-code-hooks --trusted-timing before_write',
                 },
             ],
         },
@@ -89,11 +91,17 @@ function resolveCliEntrypoint() {
     ];
     return candidates.find((candidate) => (0, fs_1.existsSync)(candidate)) ?? null;
 }
-function sessionHookCommand(subcommand) {
+function sessionHookCommand(subcommand, adapter) {
     const entrypoint = resolveCliEntrypoint();
+    // The host hook declares its own trusted adapter and timing explicitly. There
+    // is no implicit hard pre-write default: only an installed host hook claims
+    // the host-enforced posture, and it does so on the command line.
+    const suffix = subcommand === 'check' && adapter
+        ? ` --trusted-adapter ${adapter} --trusted-timing before_write`
+        : '';
     if (entrypoint)
-        return `node ${shellQuote(entrypoint)} session-hook ${subcommand}`;
-    return `neurcode session-hook ${subcommand}`;
+        return `node ${shellQuote(entrypoint)} session-hook ${subcommand}${suffix}`;
+    return `neurcode session-hook ${subcommand}${suffix}`;
 }
 function claudeGovernanceHooks() {
     return {
@@ -113,7 +121,7 @@ function claudeGovernanceHooks() {
                 hooks: [
                     {
                         type: 'command',
-                        command: sessionHookCommand('check'),
+                        command: sessionHookCommand('check', 'claude-code-hooks'),
                     },
                 ],
             },
@@ -143,8 +151,8 @@ function copilotGovernanceHooks() {
         PreToolUse: [
             {
                 type: 'command',
-                command: sessionHookCommand('check'),
-                bash: sessionHookCommand('check'),
+                command: sessionHookCommand('check', 'copilot-hooks'),
+                bash: sessionHookCommand('check', 'copilot-hooks'),
                 timeoutSec: 30,
             },
         ],
@@ -260,6 +268,7 @@ const EMPTY_GOVERNANCE_CONFIG = {
     ignoredGlobs: [],
     planCoherence: 'warn',
     localMode: 'advisory',
+    repoSymbolDuplicateMode: 'warn',
     architectureObligations: { mode: 'warn', ruleModes: {} },
 };
 function normalizeStringArray(value, field, errors) {
@@ -297,6 +306,14 @@ function normalizeLocalMode(value, errors) {
     errors.push('localMode must be one of: strict, advisory, paused');
     return 'advisory';
 }
+function normalizeRepoSymbolDuplicateMode(value, errors) {
+    if (value === undefined || value === null || value === '')
+        return 'warn';
+    if (value === 'off' || value === 'warn' || value === 'block')
+        return value;
+    errors.push('repoSymbolDuplicateMode must be one of: off, warn, block');
+    return 'warn';
+}
 function governanceConfigPath(repoRoot) {
     return (0, path_1.join)(repoRoot, '.neurcode', 'governance.json');
 }
@@ -329,6 +346,7 @@ function readRuntimeGovernanceConfig(repoRoot) {
         ignoredGlobs: normalizeStringArray(parsed.ignoredGlobs, 'ignoredGlobs', errors),
         planCoherence: normalizePlanCoherence(parsed.planCoherence, errors),
         localMode: normalizeLocalMode(parsed.localMode, errors),
+        repoSymbolDuplicateMode: normalizeRepoSymbolDuplicateMode(parsed.repoSymbolDuplicateMode, errors),
         architectureObligations: (0, governance_runtime_1.normalizeArchitectureObligationPolicy)(parsed.architectureObligations),
     };
     return {
@@ -337,6 +355,37 @@ function readRuntimeGovernanceConfig(repoRoot) {
         config,
         error: errors.length > 0 ? errors.join('; ') : undefined,
     };
+}
+function persistRepoSymbolDuplicateMode(repoRoot, mode) {
+    if (!['off', 'warn', 'block'].includes(mode)) {
+        throw new Error('repoSymbolDuplicateMode must be one of: off, warn, block');
+    }
+    const path = governanceConfigPath(repoRoot);
+    let parsed = {};
+    if ((0, fs_1.existsSync)(path)) {
+        try {
+            parsed = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
+        }
+        catch (error) {
+            throw new Error(`Cannot update ${path}: invalid JSON (${error instanceof Error ? error.message : String(error)})`);
+        }
+    }
+    parsed.repoSymbolDuplicateMode = mode;
+    (0, fs_1.mkdirSync)((0, path_1.dirname)(path), { recursive: true });
+    const temporaryPath = `${path}.tmp.${process.pid}`;
+    (0, fs_1.writeFileSync)(temporaryPath, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    (0, fs_1.renameSync)(temporaryPath, path);
+    clearProfileStalenessCache(repoRoot);
+    return path;
+}
+function migrateLegacyProfileDuplicateMode(repoRoot) {
+    const config = readRuntimeGovernanceConfig(repoRoot);
+    if (config.exists)
+        return;
+    const legacy = readGovernanceProfile(repoRoot).profile?.runtimeConfig?.repoSymbolDuplicateMode;
+    if (legacy === 'off' || legacy === 'block') {
+        persistRepoSymbolDuplicateMode(repoRoot, legacy);
+    }
 }
 // Architecture-graph import extraction is deterministic local analysis. To keep
 // `neurcode profile` / session start fast on large repos we cap the number of
@@ -382,8 +431,9 @@ function readModuleImports(repoRoot, paths) {
 exports.PROFILE_STALENESS_CACHE_TTL_MS = 5 * 60 * 1000;
 function buildCurrentGovernanceProfile(repoRoot, options = {}) {
     const root = resolveRepoRoot(repoRoot);
+    const stateFingerprint = profileCacheStateFingerprint(root);
     if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
-        const fileCached = readProfileBuildFileCache(root);
+        const fileCached = readProfileBuildFileCache(root, stateFingerprint);
         if (fileCached) {
             lastProfileCacheHit = true;
             return fileCached;
@@ -405,22 +455,24 @@ function buildCurrentGovernanceProfile(repoRoot, options = {}) {
         imports,
     });
     if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
-        writeProfileBuildFileCache(root, profile);
+        writeProfileBuildFileCache(root, profile, stateFingerprint);
     }
     return profile;
 }
 function profileBuildCachePath(repoRoot) {
     return (0, path_1.join)(repoRoot, '.neurcode', 'cache', 'profile-build.json');
 }
-function readProfileBuildFileCache(repoRoot) {
+function readProfileBuildFileCache(repoRoot, stateFingerprint) {
     const path = profileBuildCachePath(repoRoot);
     if (!(0, fs_1.existsSync)(path))
         return null;
     try {
         const parsed = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
-        if (!parsed.profile || !parsed.expiresAt)
+        if (!parsed.profile || !parsed.expiresAt || stateFingerprint === null || parsed.stateFingerprint === null)
             return null;
         if (Date.now() > Date.parse(parsed.expiresAt))
+            return null;
+        if (parsed.stateFingerprint !== stateFingerprint)
             return null;
         return parsed.profile;
     }
@@ -428,12 +480,13 @@ function readProfileBuildFileCache(repoRoot) {
         return null;
     }
 }
-function writeProfileBuildFileCache(repoRoot, profile) {
+function writeProfileBuildFileCache(repoRoot, profile, stateFingerprint) {
     const path = profileBuildCachePath(repoRoot);
     (0, fs_1.mkdirSync)((0, path_1.dirname)(path), { recursive: true });
     (0, fs_1.writeFileSync)(path, JSON.stringify({
         expiresAt: new Date(Date.now() + exports.PROFILE_STALENESS_CACHE_TTL_MS).toISOString(),
         profileHash: profile.profileHash,
+        stateFingerprint,
         profile,
     }, null, 2) + '\n', 'utf8');
 }
@@ -476,22 +529,36 @@ function topologyHash(profile) {
     const maybe = profile;
     return typeof maybe?.topology?.hash === 'string' ? maybe.topology.hash : null;
 }
-function buildProfileFreshnessSignal(result, action = 'none') {
+function buildProfileFreshnessSignal(result, action = 'none', options = {}) {
     const currentTopologyHash = topologyHash(result.currentProfile) || result.currentProfile.profileHash;
-    const cachedTopology = topologyHash(result.cachedProfile);
     const refreshed = 'refreshed' in result ? result.refreshed : false;
+    const effectiveCachedProfile = refreshed && 'profile' in result ? result.profile : result.cachedProfile;
+    const cachedTopology = topologyHash(effectiveCachedProfile);
+    const sessionProfileHash = options.sessionProfileHash || undefined;
+    const sessionCompatibility = !sessionProfileHash
+        ? 'not_applicable'
+        : sessionProfileHash === result.currentProfile.profileHash
+            ? 'compatible'
+            : 'incompatible';
     return {
-        status: result.status,
+        status: refreshed ? 'fresh' : result.status,
         refreshed,
         action: refreshed && action === 'none' ? 'auto_refreshed' : action,
+        sessionCompatibility,
         checkedAt: new Date().toISOString(),
         profilePath: result.profilePath,
         reasons: [...result.reasons],
-        cachedProfileHash: result.cachedProfile?.profileHash,
+        cachedProfileHash: effectiveCachedProfile?.profileHash,
         cachedTopologyHash: cachedTopology || undefined,
+        ...(sessionProfileHash ? { sessionProfileHash } : {}),
         currentProfileHash: result.currentProfile.profileHash,
         currentTopologyHash,
         trackedFileCount: result.currentProfile.topology.trackedFileCount,
+        ...(options.recoveryReason ? { recoveryReason: options.recoveryReason } : {}),
+        ...(options.recoveryCommand ? { recoveryCommand: options.recoveryCommand } : {}),
+        ...(options.unresolvedHumanDecisions !== undefined
+            ? { unresolvedHumanDecisions: options.unresolvedHumanDecisions }
+            : {}),
     };
 }
 function profileFreshnessActionForSession(result, sessionProfileHash) {
@@ -503,6 +570,47 @@ function profileFreshnessActionForSession(result, sessionProfileHash) {
 }
 const profileStalenessCache = new Map();
 let lastProfileCacheHit = false;
+function profileCacheStateFingerprint(root) {
+    try {
+        let head = 'unborn';
+        try {
+            head = (0, child_process_1.execSync)('git rev-parse HEAD', {
+                cwd: root,
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+            }).trim();
+        }
+        catch {
+            // `git status` remains authoritative before the first commit. Keep an
+            // explicit sentinel so staged topology changes still invalidate caches.
+        }
+        const status = (0, child_process_1.execSync)('git status --short --untracked-files=normal', {
+            cwd: root,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            maxBuffer: 4 * 1024 * 1024,
+        });
+        const stagedDiff = (0, child_process_1.execSync)('git diff --cached --no-ext-diff --binary', {
+            cwd: root,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            maxBuffer: 8 * 1024 * 1024,
+        });
+        const worktreeDiff = (0, child_process_1.execSync)('git diff --no-ext-diff --binary', {
+            cwd: root,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            maxBuffer: 8 * 1024 * 1024,
+        });
+        return (0, crypto_1.createHash)('sha256')
+            .update(`${head}\n${status}\n${stagedDiff}\n${worktreeDiff}`)
+            .digest('hex')
+            .slice(0, 24);
+    }
+    catch {
+        return null;
+    }
+}
 function getLastProfileCacheHit() {
     return lastProfileCacheHit;
 }
@@ -519,10 +627,15 @@ function clearProfileStalenessCache(repoRoot) {
 function getProfileStaleness(repoRoot, options = {}) {
     const root = resolveRepoRoot(repoRoot);
     const now = Date.now();
+    const stateFingerprint = profileCacheStateFingerprint(root);
     lastProfileCacheHit = false;
     if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
         const cached = profileStalenessCache.get(root);
-        if (cached && cached.expiresAt > now) {
+        if (cached &&
+            cached.expiresAt > now &&
+            stateFingerprint !== null &&
+            cached.stateFingerprint !== null &&
+            cached.stateFingerprint === stateFingerprint) {
             lastProfileCacheHit = true;
             return { ...cached.result, profileCacheHit: true };
         }
@@ -573,11 +686,16 @@ function getProfileStaleness(repoRoot, options = {}) {
     };
     profileStalenessCache.set(root, {
         expiresAt: now + exports.PROFILE_STALENESS_CACHE_TTL_MS,
+        stateFingerprint,
         result,
     });
     return result;
 }
 function ensureFreshGovernanceProfile(repoRoot, options = {}) {
+    // Older releases encouraged direct profile edits. Preserve an explicit
+    // off/block value by migrating it to the durable governance config before
+    // any forced regeneration replaces the derived profile.
+    migrateLegacyProfileDuplicateMode(repoRoot);
     if (options.force === true) {
         clearProfileStalenessCache(repoRoot);
     }
@@ -590,11 +708,23 @@ function ensureFreshGovernanceProfile(repoRoot, options = {}) {
         : staleness.cachedProfile ?? staleness.currentProfile;
     if (shouldRefresh) {
         writeGovernanceProfile(repoRoot, profile);
+        profileStalenessCache.delete(resolveRepoRoot(repoRoot));
     }
     return {
         ...staleness,
         profile,
         refreshed: shouldRefresh,
+    };
+}
+function setRepoSymbolDuplicateMode(repoRoot, mode) {
+    const configPath = persistRepoSymbolDuplicateMode(repoRoot, mode);
+    const profile = ensureFreshGovernanceProfile(repoRoot, { force: true, bypassCache: true }).profile;
+    return {
+        mode: profile.runtimeConfig.repoSymbolDuplicateMode ?? 'warn',
+        source: 'governance_config',
+        configPath,
+        profilePath: profilePath(repoRoot),
+        profileHash: profile.profileHash,
     };
 }
 function ensureDirOf(path) {
@@ -706,10 +836,12 @@ function entryHasAnyNeurcodeSessionHook(entry) {
     return hookCommands(entry).some(commandHasNeurcodeSessionHook);
 }
 function expectedSessionHookCommand(event) {
-    return sessionHookCommand(CLAUDE_EVENT_SESSION_HOOK[event]);
+    const subcommand = CLAUDE_EVENT_SESSION_HOOK[event];
+    return sessionHookCommand(subcommand, subcommand === 'check' ? 'claude-code-hooks' : undefined);
 }
 function expectedCopilotSessionHookCommand(event) {
-    return sessionHookCommand(COPILOT_EVENT_SESSION_HOOK[event]);
+    const subcommand = COPILOT_EVENT_SESSION_HOOK[event];
+    return sessionHookCommand(subcommand, subcommand === 'check' ? 'copilot-hooks' : undefined);
 }
 function entryHasCurrentNeurcodeSessionHook(entry, event) {
     const expected = expectedSessionHookCommand(event);

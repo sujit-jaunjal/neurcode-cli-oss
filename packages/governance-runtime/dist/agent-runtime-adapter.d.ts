@@ -5,6 +5,7 @@
  * companions, and future agent integrations. The adapter contract describes
  * agent lifecycle events; the CLI remains the local enforcement engine.
  */
+import { HostEnforcementCapability, ProposedChangeEnvelope } from '@neurcode-ai/contracts';
 export declare const AGENT_RUNTIME_ADAPTER_SCHEMA_VERSION: "neurcode.agent-runtime-event.v1";
 export declare const AGENT_RUNTIME_DECISION_SCHEMA_VERSION: "neurcode.agent-runtime-decision.v1";
 export type AgentRuntimeAdapterId = 'claude-code-hooks' | 'copilot-hooks' | 'generic-mcp' | 'codex-mcp' | 'cursor-mcp' | 'vscode-extension' | 'github-action';
@@ -30,6 +31,7 @@ export interface AgentRuntimeEventPayload {
     expiresAt?: string;
     ttlMinutes?: number;
     actor?: string;
+    proposedChange?: ProposedChangeEnvelope;
 }
 export interface AgentRuntimeEvent {
     schemaVersion: typeof AGENT_RUNTIME_ADAPTER_SCHEMA_VERSION;
@@ -45,6 +47,7 @@ export interface AgentRuntimeAdapterCapability {
     enforcementLevel: AgentRuntimeEnforcementLevel;
     controlLevel: AgentRuntimeControlLevel;
     compatibilityMode: AgentRuntimeCompatibilityMode;
+    hostCapability: HostEnforcementCapability;
     automatic: boolean;
     events: AgentRuntimeEventType[];
     enforceable: string[];

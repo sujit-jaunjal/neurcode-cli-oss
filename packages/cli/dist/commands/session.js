@@ -43,6 +43,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveUnderstandingDiffFiles = resolveUnderstandingDiffFiles;
 exports.buildLocalGovernanceStatus = buildLocalGovernanceStatus;
 exports.localGovernanceStatusCommand = localGovernanceStatusCommand;
 exports.resetStaleGovernanceSessionCommand = resetStaleGovernanceSessionCommand;
@@ -54,9 +55,14 @@ exports.waiveGovernanceObligationCommand = waiveGovernanceObligationCommand;
 exports.listRuntimeSessionsCommand = listRuntimeSessionsCommand;
 exports.showRuntimeSessionCommand = showRuntimeSessionCommand;
 exports.aiChangeRecordCommand = aiChangeRecordCommand;
+exports.collectChangeRecordImpactPaths = collectChangeRecordImpactPaths;
+exports.buildChangeRecordImpactSummary = buildChangeRecordImpactSummary;
+exports.exportAIChangeRecordForCli = exportAIChangeRecordForCli;
+exports.verifyAIChangeRecordForCli = verifyAIChangeRecordForCli;
 exports.structuralUnderstandingCommand = structuralUnderstandingCommand;
 exports.listSessionsCommand = listSessionsCommand;
 exports.endSessionCommand = endSessionCommand;
+exports.endSessionCommandWithDependencies = endSessionCommandWithDependencies;
 exports.sessionStatusCommand = sessionStatusCommand;
 exports.listLocalSessionsCommand = listLocalSessionsCommand;
 exports.currentLocalSessionCommand = currentLocalSessionCommand;
@@ -73,11 +79,15 @@ const session_continuity_1 = require("../utils/session-continuity");
 const runtime_evidence_1 = require("../utils/runtime-evidence");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
+const runtime_connection_2 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
+const repo_brain_impact_1 = require("../utils/repo-brain-impact");
 const structural_understanding_1 = require("../utils/structural-understanding");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
+const hook_heartbeat_1 = require("../utils/hook-heartbeat");
+const profile_drift_recovery_1 = require("../utils/profile-drift-recovery");
 const node_child_process_1 = require("node:child_process");
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
@@ -167,7 +177,79 @@ function approvalContextFrom(event) {
             : event?.filePath,
     };
 }
-function resolveUnderstandingDiff(repoRoot, options) {
+const UNTRACKED_UNDERSTANDING_EXCLUDED_DIRS = new Set([
+    '.git',
+    '.neurcode',
+    '.neurcode-admission',
+    '.neurcode-ai-record',
+    '.cache',
+    '.next',
+    'build',
+    'cache',
+    'coverage',
+    'dist',
+    'evidence',
+    'generated',
+    'node_modules',
+    'out',
+    'vendor',
+]);
+const UNTRACKED_UNDERSTANDING_SOURCE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i;
+const UNTRACKED_UNDERSTANDING_GENERATED_FILE = /(?:\.d\.ts|\.map|\.min\.js|\.bundle\.js|\.generated\.[cm]?[jt]sx?)$/i;
+function normalizeUnderstandingPath(value) {
+    return value.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+}
+function eligibleUntrackedUnderstandingPath(repoRoot, value) {
+    const normalized = normalizeUnderstandingPath(value);
+    if (!normalized || normalized.startsWith('/') || normalized === '..' || normalized.startsWith('../'))
+        return null;
+    const segments = normalized.split('/');
+    if (segments.includes('..') || segments.some((segment) => UNTRACKED_UNDERSTANDING_EXCLUDED_DIRS.has(segment.toLowerCase()))) {
+        return null;
+    }
+    if (UNTRACKED_UNDERSTANDING_GENERATED_FILE.test(normalized))
+        return null;
+    const absolutePath = (0, node_path_1.join)(repoRoot, normalized);
+    try {
+        const stat = (0, node_fs_1.lstatSync)(absolutePath);
+        if (!stat.isFile() || stat.isSymbolicLink())
+            return null;
+    }
+    catch {
+        return null;
+    }
+    return normalized;
+}
+function untrackedDiffFile(repoRoot, path) {
+    let lines = [];
+    if (UNTRACKED_UNDERSTANDING_SOURCE.test(path)) {
+        const text = (0, node_fs_1.readFileSync)((0, node_path_1.join)(repoRoot, path), 'utf8').replace(/\r\n/g, '\n');
+        lines = text ? text.split('\n') : [];
+        if (lines.at(-1) === '')
+            lines.pop();
+    }
+    return {
+        path,
+        changeType: 'add',
+        addedLines: lines.length,
+        removedLines: 0,
+        hunks: lines.length > 0
+            ? [{
+                    oldStart: 0,
+                    oldLines: 0,
+                    newStart: 1,
+                    newLines: lines.length,
+                    lines: lines.map((content, index) => ({
+                        type: 'added',
+                        content,
+                        lineNumber: index + 1,
+                    })),
+                }]
+            : [],
+        provenance: 'git-untracked',
+    };
+}
+function resolveUnderstandingDiffFiles(repoRoot, options = {}) {
     const args = ['diff'];
     if (options.staged) {
         args.push('--cached');
@@ -178,11 +260,27 @@ function resolveUnderstandingDiff(repoRoot, options) {
     else {
         args.push('HEAD');
     }
-    return (0, node_child_process_1.execFileSync)('git', args, {
+    const diffText = (0, node_child_process_1.execFileSync)('git', args, {
         cwd: repoRoot,
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
     });
+    const selected = (0, diff_parser_1.parseDiff)(diffText);
+    if (options.staged)
+        return selected;
+    const untrackedOutput = (0, node_child_process_1.execFileSync)('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+    });
+    const byPath = new Map(selected.map((file) => [normalizeUnderstandingPath(file.path), file]));
+    for (const rawPath of untrackedOutput.split('\0')) {
+        const path = eligibleUntrackedUnderstandingPath(repoRoot, rawPath);
+        if (!path || byPath.has(path))
+            continue;
+        byPath.set(path, untrackedDiffFile(repoRoot, path));
+    }
+    return [...byPath.values()].sort((a, b) => normalizeUnderstandingPath(a.path).localeCompare(normalizeUnderstandingPath(b.path)));
 }
 function loadLocalGovernanceSession(repoRoot, sessionId) {
     return sessionId ? (0, governance_runtime_1.loadSession)(repoRoot, sessionId) : (0, governance_runtime_1.loadActiveSession)(repoRoot);
@@ -245,6 +343,108 @@ function pendingApprovalBlock(session, now = new Date()) {
     }
     return null;
 }
+function activePointerInspection(repoRoot) {
+    const path = (0, node_path_1.join)(repoRoot, '.neurcode', 'active-session.json');
+    if (!(0, node_fs_1.existsSync)(path))
+        return { state: 'missing', sessionId: null, session: null };
+    try {
+        const parsed = JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
+        if (parsed.sessionId === null)
+            return { state: 'cleared', sessionId: null, session: null };
+        if (typeof parsed.sessionId !== 'string' || !parsed.sessionId.trim()) {
+            return { state: 'malformed', sessionId: null, session: null };
+        }
+        const session = (0, governance_runtime_1.loadSession)(repoRoot, parsed.sessionId);
+        if (!session || session.status !== 'active') {
+            return { state: 'stale', sessionId: parsed.sessionId, session };
+        }
+        return { state: 'valid', sessionId: parsed.sessionId, session };
+    }
+    catch {
+        return { state: 'malformed', sessionId: null, session: null };
+    }
+}
+function validGovernanceSessionRecord(value) {
+    if (!value || typeof value !== 'object')
+        return false;
+    const record = value;
+    return (typeof record.sessionId === 'string' &&
+        typeof record.profileHash === 'string' &&
+        (record.status === 'active' || record.status === 'finished') &&
+        Array.isArray(record.events) &&
+        Boolean(record.contract && typeof record.contract === 'object'));
+}
+function scanSessionRecords(repoRoot) {
+    const directory = (0, governance_runtime_1.sessionsDir)(repoRoot);
+    if (!(0, node_fs_1.existsSync)(directory))
+        return { active: [], malformed: [] };
+    const active = [];
+    const malformed = [];
+    for (const entry of (0, node_fs_1.readdirSync)(directory, { withFileTypes: true })
+        .filter((item) => item.isFile() && item.name.endsWith('.json') && !item.name.endsWith('.change-record.json'))
+        .sort((a, b) => a.name.localeCompare(b.name))) {
+        const relativePath = `.neurcode/sessions/${entry.name}`;
+        try {
+            const parsed = JSON.parse((0, node_fs_1.readFileSync)((0, node_path_1.join)(directory, entry.name), 'utf8'));
+            if (!validGovernanceSessionRecord(parsed)) {
+                malformed.push({ file: relativePath, reasonCode: 'invalid_session_record' });
+                continue;
+            }
+            if (entry.name !== `${parsed.sessionId}.json`) {
+                malformed.push({ file: relativePath, reasonCode: 'session_id_filename_mismatch' });
+                continue;
+            }
+            if (parsed.status === 'active')
+                active.push(parsed);
+        }
+        catch {
+            malformed.push({ file: relativePath, reasonCode: 'malformed_json' });
+        }
+    }
+    return {
+        active: active.sort((a, b) => a.sessionId.localeCompare(b.sessionId)),
+        malformed,
+    };
+}
+function recoveryReasonCode(pointer, sessionId) {
+    if (pointer.state === 'valid') {
+        return pointer.sessionId === sessionId
+            ? 'stale_referenced_active_session'
+            : 'orphan_unreferenced_active_record';
+    }
+    if (pointer.state === 'missing')
+        return 'orphan_missing_active_pointer';
+    if (pointer.state === 'cleared')
+        return 'orphan_cleared_active_pointer';
+    if (pointer.state === 'malformed')
+        return 'orphan_malformed_active_pointer';
+    return 'orphan_stale_active_pointer';
+}
+function activeSessionLiveness(repoRoot, sessionId, now) {
+    const reasons = [];
+    const supervisor = (0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, sessionId);
+    if (supervisor.state?.sessionId === sessionId &&
+        supervisor.alive &&
+        ['running', 'starting', 'stopping'].includes(supervisor.effectiveStatus)) {
+        reasons.push('live_supervisor_process');
+    }
+    const heartbeat = (0, hook_heartbeat_1.readHookHeartbeat)(repoRoot);
+    const heartbeatAt = Date.parse(heartbeat?.lastEvent.ts ?? '');
+    if (heartbeat?.lastEvent.sessionId === sessionId &&
+        Number.isFinite(heartbeatAt) &&
+        now.getTime() - heartbeatAt >= 0 &&
+        now.getTime() - heartbeatAt <= 5 * 60_000) {
+        reasons.push('fresh_hook_heartbeat');
+    }
+    return reasons;
+}
+function clearInvalidActivePointer(repoRoot, pointer) {
+    if (pointer.state === 'valid')
+        return;
+    const directory = (0, node_path_1.join)(repoRoot, '.neurcode');
+    (0, node_fs_1.mkdirSync)(directory, { recursive: true });
+    (0, node_fs_1.writeFileSync)((0, node_path_1.join)(directory, 'active-session.json'), JSON.stringify({ sessionId: null }, null, 2) + '\n', 'utf8');
+}
 function buildLocalGovernanceStatus(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const session = loadLocalGovernanceSession(repoRoot, options.sessionId);
@@ -261,6 +461,19 @@ function buildLocalGovernanceStatus(options = {}) {
         };
     }
     const recentEvents = session.events.slice(-10);
+    const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
+    const profileAction = (0, v0_governance_1.profileFreshnessActionForSession)(staleness, session.profileHash);
+    const pendingProfileDecisions = (0, profile_drift_recovery_1.pendingProfileDriftDecisions)(session);
+    const profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(staleness, profileAction, {
+        sessionProfileHash: session.profileHash,
+        ...(profileAction === 'session_restart_required'
+            ? {
+                recoveryReason: 'active_session_profile_changed',
+                recoveryCommand: profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND,
+                unresolvedHumanDecisions: pendingProfileDecisions.length > 0,
+            }
+            : {}),
+    });
     const latestBlock = [...session.events].reverse().find((event) => event.type === 'check_block');
     const latestApprovalContext = approvalContextFrom(latestBlock);
     const suggestedApprovalPath = latestApprovalContext?.suggestedApprovalPath ||
@@ -274,6 +487,7 @@ function buildLocalGovernanceStatus(options = {}) {
         status: session.status,
         goal: session.contract.goal,
         profileHash: session.profileHash,
+        profileFreshness,
         scopeMode: session.contract.scopeMode,
         planCoherenceMode: session.contract.planCoherenceMode ?? 'warn',
         agentPlan: session.contract.agentPlan ?? null,
@@ -335,6 +549,14 @@ function localGovernanceStatusCommand(options = {}) {
     console.log(`Session: ${chalk.white(activeStatus.sessionId)} ${activeStatus.active ? chalk.green('active') : chalk.dim(activeStatus.status)}`);
     console.log(`Goal:    ${chalk.white(truncate(activeStatus.goal))}`);
     console.log(`Scope:   ${chalk.white(activeStatus.scopeMode)}`);
+    console.log(`Profile: ${chalk.white(activeStatus.profileFreshness.status)} cache · ` +
+        `${chalk.white(activeStatus.profileFreshness.sessionCompatibility)} session`);
+    if (activeStatus.profileFreshness.sessionCompatibility === 'incompatible') {
+        console.log(chalk.yellow(`Hashes:  session ${activeStatus.profileHash.slice(0, 12)} · ` +
+            `current ${activeStatus.profileFreshness.currentProfileHash.slice(0, 12)}`));
+        console.log(chalk.yellow(`Recover: ${profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND} ` +
+            `(--force abandons unresolved operator state${activeStatus.profileFreshness.unresolvedHumanDecisions ? '; unresolved decisions are present' : ''})`));
+    }
     console.log(`Plan:    ${chalk.white(activeStatus.planCoherenceMode)}${activeStatus.agentPlanRevision ? chalk.dim(` · rev ${activeStatus.agentPlanRevision}`) : ''}`);
     console.log(`Agent:   ${chalk.white(activeStatus.agentInvocation.status.replace(/_/g, ' '))}` +
         chalk.dim(` · score ${activeStatus.agentInvocation.score}`) +
@@ -407,7 +629,8 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
     const maxAgeMinutes = Number.isFinite(options.maxAgeMinutes)
         ? Math.max(0, Number(options.maxAgeMinutes))
         : 120;
-    const active = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const pointer = activePointerInspection(repoRoot);
+    const records = scanSessionRecords(repoRoot);
     const output = (payload, statusCode = 0) => {
         if (options.json) {
             console.log(JSON.stringify(payload, null, 2));
@@ -427,92 +650,175 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
         }
         process.exitCode = statusCode;
     };
-    if (!active || active.status !== 'active') {
+    if (records.active.length === 0) {
         output({
             ok: true,
             reset: false,
             repoRoot,
             reason: 'no_active_session',
+            pointerState: pointer.state,
+            malformedRecords: records.malformed,
             message: 'No active in-flow governance session found.',
         });
         return;
     }
-    const ageMinutes = sessionAgeMinutes(active, now);
-    const pending = pendingApprovalBlock(active, now);
-    const stale = ageMinutes >= maxAgeMinutes;
-    if (!stale && options.force !== true) {
+    const recovered = [];
+    const skipped = [];
+    for (const active of records.active) {
+        const ageMinutes = sessionAgeMinutes(active, now);
+        const pending = pendingApprovalBlock(active, now);
+        const stale = ageMinutes >= maxAgeMinutes;
+        const liveness = activeSessionLiveness(repoRoot, active.sessionId, now);
+        const reasonCode = recoveryReasonCode(pointer, active.sessionId);
+        if (liveness.length > 0) {
+            skipped.push({
+                sessionId: active.sessionId,
+                reason: 'session_live',
+                reasonCode,
+                liveness,
+                ageMinutes: Number(ageMinutes.toFixed(2)),
+            });
+            continue;
+        }
+        if (!stale && options.force !== true) {
+            skipped.push({
+                sessionId: active.sessionId,
+                reason: 'session_not_stale',
+                reasonCode,
+                ageMinutes: Number(ageMinutes.toFixed(2)),
+                pendingApproval: pending,
+            });
+            continue;
+        }
+        if (pending && options.force !== true) {
+            skipped.push({
+                sessionId: active.sessionId,
+                reason: 'pending_approval',
+                reasonCode,
+                ageMinutes: Number(ageMinutes.toFixed(2)),
+                filePath: pending.filePath,
+                owners: pending.owners,
+                suggestedApprovalPath: pending.suggestedApprovalPath,
+            });
+            continue;
+        }
+        const pointerReferenced = pointer.state === 'valid' && pointer.sessionId === active.sessionId;
+        (0, governance_runtime_1.appendEvent)(repoRoot, active.sessionId, {
+            type: 'user_decision',
+            ts: now.toISOString(),
+            decision: pointerReferenced ? 'reset_stale_session' : 'recover_orphaned_session',
+            detail: {
+                source: 'local_cli',
+                recovery: true,
+                reasonCode,
+                pointerState: pointer.state,
+                force: options.force === true,
+                maxAgeMinutes,
+                ageMinutes: Number(ageMinutes.toFixed(2)),
+                pendingApproval: pending,
+                livenessChecks: ['bounded_event_age', 'guard_supervisor_process', 'hook_heartbeat'],
+            },
+        });
+        const livePointerPath = (0, node_path_1.join)(repoRoot, '.neurcode', 'active-session.json');
+        const preservedLivePointer = pointer.state === 'valid' && pointer.sessionId !== active.sessionId && (0, node_fs_1.existsSync)(livePointerPath)
+            ? (0, node_fs_1.readFileSync)(livePointerPath, 'utf8')
+            : null;
+        let finished = null;
+        try {
+            finished = (0, governance_runtime_1.finishSession)(repoRoot, active.sessionId, { reason: reasonCode });
+        }
+        finally {
+            if (preservedLivePointer !== null) {
+                (0, node_fs_1.writeFileSync)(livePointerPath, preservedLivePointer, 'utf8');
+            }
+        }
+        if (!finished) {
+            skipped.push({ sessionId: active.sessionId, reason: 'finish_failed', reasonCode });
+            continue;
+        }
+        const supervisor = (0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, finished.sessionId);
+        if (supervisor.state?.sessionId === finished.sessionId) {
+            (0, agent_guard_supervisor_1.stopSupervisorOnSessionCompletion)(repoRoot);
+        }
+        await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, finished);
+        const replay = (0, governance_runtime_1.replaySession)(finished);
+        recovered.push({
+            sessionId: finished.sessionId,
+            previousGoal: finished.contract.goal,
+            status: finished.status,
+            reasonCode,
+            replayHash: finished.replayHash,
+            replayVerified: replay.matchesOriginal,
+            ageMinutes: Number(ageMinutes.toFixed(2)),
+            forced: options.force === true,
+            recordPath: `.neurcode/sessions/${finished.sessionId}.json`,
+            evidencePath: (0, node_path_1.relative)(repoRoot, (0, governance_runtime_1.aiChangeRecordPath)(repoRoot, finished.sessionId)).replace(/\\/g, '/'),
+        });
+    }
+    if (recovered.length > 0) {
+        clearInvalidActivePointer(repoRoot, pointer);
+        const first = recovered[0];
         output({
             ok: true,
-            reset: false,
+            reset: true,
             repoRoot,
-            sessionId: active.sessionId,
-            reason: 'session_not_stale',
-            ageMinutes: Number(ageMinutes.toFixed(2)),
+            sessionId: recovered.length === 1 ? first.sessionId : undefined,
+            status: recovered.length === 1 ? first.status : 'finished',
+            replayHash: recovered.length === 1 ? first.replayHash : undefined,
+            ageMinutes: recovered.length === 1 ? first.ageMinutes : undefined,
             maxAgeMinutes,
-            pendingApproval: pending,
-            message: `Active session ${active.sessionId} is not stale yet (${ageMinutes.toFixed(1)}m < ${maxAgeMinutes}m).`,
+            forced: options.force === true,
+            pointerState: pointer.state,
+            recoveredCount: recovered.length,
+            recovered,
+            skipped,
+            malformedRecords: records.malformed,
+            message: `Recovered ${recovered.length} stale or orphaned active session record${recovered.length === 1 ? '' : 's'}.`,
         });
         return;
     }
-    if (pending && options.force !== true) {
+    const primary = skipped.find((item) => item.sessionId === pointer.sessionId) ?? skipped[0];
+    if (primary?.reason === 'pending_approval') {
         output({
             ok: false,
             reset: false,
             repoRoot,
-            sessionId: active.sessionId,
-            reason: 'pending_approval',
-            ageMinutes: Number(ageMinutes.toFixed(2)),
+            ...primary,
             maxAgeMinutes,
-            filePath: pending.filePath,
-            owners: pending.owners,
-            suggestedApprovalPath: pending.suggestedApprovalPath,
+            pointerState: pointer.state,
+            malformedRecords: records.malformed,
             message: 'Active session is waiting on an unresolved approval; refusing to reset without --force.',
             next: [
-                `Approve exactly ${pending.suggestedApprovalPath} from the dashboard or MCP.`,
+                `Approve exactly ${primary.suggestedApprovalPath} from the dashboard or MCP.`,
                 'Or run `neurcode session reset-stale --force` if this is abandoned rehearsal state.',
             ],
         }, 2);
         return;
     }
-    (0, governance_runtime_1.appendEvent)(repoRoot, active.sessionId, {
-        type: 'user_decision',
-        ts: now.toISOString(),
-        decision: 'reset_stale_session',
-        detail: {
-            source: 'local_cli',
-            force: options.force === true,
-            maxAgeMinutes,
-            ageMinutes: Number(ageMinutes.toFixed(2)),
-            pendingApproval: pending,
-        },
-    });
-    const finished = (0, governance_runtime_1.finishSession)(repoRoot, active.sessionId);
-    if (!finished) {
+    if (primary?.reason === 'finish_failed') {
         output({
             ok: false,
             reset: false,
             repoRoot,
-            sessionId: active.sessionId,
-            reason: 'finish_failed',
-            message: `Could not finish active session ${active.sessionId}.`,
+            ...primary,
+            pointerState: pointer.state,
+            malformedRecords: records.malformed,
+            message: `Could not finish active session ${primary.sessionId}.`,
         }, 1);
         return;
     }
-    (0, agent_guard_supervisor_1.stopSupervisorOnSessionCompletion)(repoRoot);
-    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, finished);
     output({
         ok: true,
-        reset: true,
+        reset: false,
         repoRoot,
-        sessionId: finished.sessionId,
-        previousGoal: finished.contract.goal,
-        status: finished.status,
-        replayHash: finished.replayHash,
-        ageMinutes: Number(ageMinutes.toFixed(2)),
+        ...primary,
         maxAgeMinutes,
-        forced: options.force === true,
-        recordPath: `.neurcode/sessions/${finished.sessionId}.json`,
-        message: `Finished active session ${finished.sessionId} and cleared the active pointer.`,
+        pointerState: pointer.state,
+        skipped,
+        malformedRecords: records.malformed,
+        message: primary?.reason === 'session_live'
+            ? `Session ${primary.sessionId} has current process or heartbeat liveness evidence and was preserved.`
+            : `Active session ${primary?.sessionId} is not stale yet (${Number(primary?.ageMinutes ?? 0).toFixed(1)}m < ${maxAgeMinutes}m).`,
     });
 }
 async function replanGovernanceSessionCommand(options = {}) {
@@ -951,6 +1257,7 @@ function renderAIChangeRecord(record, recordPath) {
     const pendingAmendments = record.plan.pendingAmendments.length;
     const consequenceImpacts = topConsequenceImpactsFromRecord(record.understanding.latest?.consequenceUnderstanding);
     const consequenceFindings = topConsequenceFindingsFromRecord(record.understanding.latest?.consequenceUnderstanding);
+    const reuseFindings = reuseFindingsFromRecord(record.understanding.latest);
     console.log('');
     console.log(chalk.bold(`AI Change Record ${record.session.sessionId}`));
     console.log(chalk.dim('-'.repeat(76)));
@@ -965,6 +1272,22 @@ function renderAIChangeRecord(record, recordPath) {
     console.log(`Checks:    ok=${counts.ok} warn=${counts.warn} block=${counts.block} approvals=${counts.approval}`);
     console.log(`Oblig:     ${record.architecture.summary.satisfied}/${record.architecture.summary.total} satisfied${record.architecture.summary.blockingPending ? chalk.yellow(` · ${record.architecture.summary.blockingPending} blocking`) : ''}`);
     console.log(`Approvals: ${activeApprovals.length} active · ${record.approvals.length} lifecycle entr${record.approvals.length === 1 ? 'y' : 'ies'}`);
+    if (record.accountability) {
+        const facts = record.accountability.facts;
+        console.log('');
+        console.log(chalk.bold('Change accountability'));
+        console.log(`Asked:    ${chalk.white(truncate(facts.agentGoal, 120))}`);
+        console.log(`Touched:  ${chalk.dim(compactList(facts.touchedPaths, 8))}`);
+        console.log(`Allowed:  ${chalk.dim(compactList(facts.allowedPaths, 6))}`);
+        console.log(`Blocked:  ${facts.blockedBoundaries.length > 0 ? chalk.yellow(compactList(facts.blockedBoundaries, 6)) : chalk.dim('none')}`);
+        console.log(`Owners:   ${facts.boundaryOwners.length > 0 ? chalk.white(compactList(facts.boundaryOwners, 6)) : chalk.dim('not recorded')}`);
+        console.log(`Approval: ${facts.approvalRequired ? chalk.yellow('required') : chalk.dim('not required')} · ${facts.exactPathApprovalOnly ? 'exact-path only' : 'no exact approval applied'}`);
+        console.log(`Neighbor: ${facts.neighboringSensitiveFilesBlocked ? chalk.green('contained') : chalk.dim('not observed')}`);
+        console.log(`Receipt:  ${chalk.dim(facts.evidenceReceipt)} · source excluded=${facts.sourceExcluded ? 'yes' : 'no'}`);
+        if (record.accountability.assumptions.length > 0) {
+            console.log(`Assume:   ${chalk.dim(compactList(record.accountability.assumptions, 2))}`);
+        }
+    }
     if (record.understanding.latest) {
         const understanding = record.understanding.latest;
         console.log(`Understand: ${understanding.changedSymbolCount} changed symbols · ` +
@@ -1006,6 +1329,13 @@ function renderAIChangeRecord(record, recordPath) {
                     : '';
                 const reasons = finding.reasonCodes.slice(0, 3).join(', ');
                 console.log(chalk.dim(`  ${finding.rank}. ${truncate(finding.summary, 140)}${consumers}${reasons ? ` · ${reasons}` : ''}`));
+            }
+        }
+        if (reuseFindings.length > 0) {
+            console.log(`Reuse:     ${reuseFindings.length} advisory finding${reuseFindings.length === 1 ? '' : 's'}`);
+            for (const finding of reuseFindings.slice(0, 5)) {
+                console.log(chalk.dim(`  ${finding.changed.file}#${finding.changed.name} resembles ` +
+                    `${finding.existing.file}#${finding.existing.name} · ${finding.matchType} · ${finding.confidence}`));
             }
         }
     }
@@ -1092,6 +1422,17 @@ function topConsequenceFindingsFromRecord(value) {
         return [{ rank, summary, consumerCount, nonTestConsumerCount, testConsumerCount, reasonCodes }];
     }).sort((a, b) => a.rank - b.rank || a.summary.localeCompare(b.summary));
 }
+function reuseFindingsFromRecord(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return [];
+    const raw = value.reuseFindings;
+    return Array.isArray(raw)
+        ? raw.filter((item) => Boolean(item) &&
+            typeof item === 'object' &&
+            !Array.isArray(item) &&
+            item.schemaVersion === 'neurcode.reuse-finding.v1')
+        : [];
+}
 function aiChangeRecordCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const session = resolveAIChangeRecordSession(repoRoot, options);
@@ -1125,6 +1466,189 @@ function aiChangeRecordCommand(options = {}) {
     }
     renderAIChangeRecord(record, path.replace(`${repoRoot}/`, ''));
 }
+const PUBLIC_AI_CHANGE_RECORD_DIR = '.neurcode-ai-record';
+function publicAIChangeRecordPath(repoRoot, sessionId) {
+    if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) {
+        throw new Error('AI Change Record session id is not safe for an artifact filename');
+    }
+    return (0, node_path_1.join)(repoRoot, PUBLIC_AI_CHANGE_RECORD_DIR, `${sessionId}.json`);
+}
+function writeJsonFile(path, value) {
+    const dir = (0, node_path_1.dirname)(path);
+    if (!(0, node_fs_1.existsSync)(dir))
+        (0, node_fs_1.mkdirSync)(dir, { recursive: true });
+    (0, node_fs_1.writeFileSync)(path, JSON.stringify(value, null, 2) + '\n', 'utf8');
+}
+function readJsonFile(path) {
+    return JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
+}
+function extractRecordAndReceipt(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return { record: null, receipt: null };
+    const obj = value;
+    const record = obj.record && typeof obj.record === 'object' && obj.record.recordType === 'ai-change-accountability-record'
+        ? obj.record
+        : obj.recordType === 'ai-change-accountability-record'
+            ? obj
+            : null;
+    const receipt = obj.receipt && typeof obj.receipt === 'object'
+        ? obj.receipt
+        : obj.backendReceipt && typeof obj.backendReceipt === 'object'
+            ? obj.backendReceipt
+            : obj.schemaVersion === 'neurcode.ai-change-record-receipt.v1'
+                ? obj
+                : null;
+    return { record, receipt };
+}
+/**
+ * Collect the real, source-free file paths that a change touched or intended to
+ * touch, for impact analysis. Approved/blocked paths are stored as hashes for
+ * privacy and are deliberately excluded; the filter drops any non-path token.
+ */
+function collectChangeRecordImpactPaths(record) {
+    const facts = record?.accountability?.facts ?? {};
+    const pathTokens = record?.intent?.contract?.target?.pathTokens ?? [];
+    const intentSummaryPaths = record?.intent?.summary?.paths ?? [];
+    const expectedPathGlobs = record?.intent?.expectedPathGlobs ?? [];
+    const candidates = [
+        ...(Array.isArray(facts.touchedPaths) ? facts.touchedPaths : []),
+        ...(Array.isArray(facts.allowedPaths) ? facts.allowedPaths : []),
+        ...(Array.isArray(facts.warnedPaths) ? facts.warnedPaths : []),
+        ...(Array.isArray(pathTokens) ? pathTokens : []),
+        ...(Array.isArray(intentSummaryPaths) ? intentSummaryPaths : []),
+        ...(Array.isArray(expectedPathGlobs) ? expectedPathGlobs : []),
+    ];
+    return Array.from(new Set(candidates
+        .filter((p) => typeof p === 'string' && p.trim().length > 0)
+        .map((p) => p.replace(/\\/g, '/'))
+        // Drop hashed/opaque tokens — keep only things that look like file paths.
+        .filter((p) => p.includes('/') || p.includes('.'))));
+}
+/**
+ * Build a source-free {@link ImpactSummary} for an AI Change Record. Advisory:
+ * never throws and never auto-builds the brain — when the brain is not indexed
+ * the summary is honestly degraded (brainStatus: 'missing') rather than absent.
+ */
+function buildChangeRecordImpactSummary(repoRoot, record) {
+    try {
+        const paths = collectChangeRecordImpactPaths(record);
+        if (paths.length === 0)
+            return null;
+        return (0, repo_brain_impact_1.summarizeImpact)((0, repo_brain_impact_1.buildRepoBrainImpactForRepo)(repoRoot, paths, { autoBuild: false }));
+    }
+    catch {
+        return null;
+    }
+}
+async function exportAIChangeRecordForCli(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const session = resolveAIChangeRecordSession(repoRoot, options);
+    if (!session) {
+        throw new Error(options.sessionId
+            ? `No local governance session found for ${options.sessionId}`
+            : 'No local governance sessions found');
+    }
+    const { record, path: localPath } = (0, governance_runtime_1.writeAIChangeRecord)(repoRoot, session);
+    let receipt = null;
+    let verification = null;
+    const warnings = [];
+    let trustLevel = record.integrity.trustLevel;
+    if (options.signed) {
+        try {
+            const config = (0, config_1.loadConfig)();
+            const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+            const metadata = (0, runtime_connection_2.collectRuntimeRepoMetadata)(repoRoot);
+            const client = new api_client_1.ApiClient(config);
+            const response = await client.signAIChangeRecord({
+                repoId: connection?.repo.id ?? null,
+                repoKey: connection?.repo.repoKey ?? metadata.remoteHash ?? metadata.rootHash,
+                sessionId: record.session.sessionId,
+                recordHash: record.integrity.recordHash,
+                recordSchemaVersion: record.schemaVersion,
+                recordGeneratedAt: record.generatedAt,
+            });
+            receipt = response.receipt || null;
+            verification = response.verification || null;
+            trustLevel = String(verification?.trustLevel || (response.ok ? 'backend_signed_verified' : 'backend_signed_invalid'));
+            if (!response.ok) {
+                warnings.push('Backend signing returned a non-valid verification result; exported as signed evidence needing review.');
+            }
+        }
+        catch (error) {
+            warnings.push(`Backend signing unavailable; exported self-attested record only: ${error instanceof Error ? error.message : String(error)}`);
+            trustLevel = 'self_attested';
+        }
+    }
+    // Source-free impact intelligence is advisory metadata alongside the signed
+    // record — it is a sibling of `record`, so it never changes the record hash
+    // or any backend receipt verification.
+    const impactSummary = buildChangeRecordImpactSummary(repoRoot, record);
+    const envelope = {
+        schemaVersion: 'neurcode.ai-change-record-export.v1',
+        generatedAt: new Date().toISOString(),
+        trustLevel,
+        record,
+        ...(impactSummary ? { impactSummary } : {}),
+        ...(receipt ? { receipt } : {}),
+        ...(verification ? { verification } : {}),
+        warnings,
+        privacy: {
+            sourceUploaded: false,
+            sourceFree: true,
+            excludes: ['source code', 'diff hunks', 'patch bodies', 'raw prompts', 'secrets', 'raw file contents'],
+        },
+    };
+    const publicPath = options.output ? (0, node_path_1.resolve)(repoRoot, options.output) : publicAIChangeRecordPath(repoRoot, record.session.sessionId);
+    writeJsonFile(publicPath, envelope);
+    return {
+        ok: true,
+        repoRoot,
+        sessionId: record.session.sessionId,
+        localPath,
+        publicPath,
+        publicRelativePath: (0, node_path_1.relative)(repoRoot, publicPath).replace(/\\/g, '/'),
+        recordHash: record.integrity.recordHash,
+        trustLevel,
+        receipt: {
+            present: Boolean(receipt),
+            receiptId: typeof receipt?.receiptId === 'string' ? receipt.receiptId : null,
+            keyId: typeof receipt?.signingKeyId === 'string' ? receipt.signingKeyId : null,
+            verificationStatus: String(verification?.trustLevel || verification?.status || (receipt ? 'backend_signed_unverified' : 'self_attested')),
+        },
+        warnings,
+    };
+}
+function verifyAIChangeRecordForCli(options = {}) {
+    if (!options.record)
+        throw new Error('--record is required');
+    const recordPayload = readJsonFile((0, node_path_1.resolve)(options.record));
+    const recordParts = extractRecordAndReceipt(recordPayload);
+    const receiptPayload = options.receipt ? readJsonFile((0, node_path_1.resolve)(options.receipt)) : recordPayload;
+    const receiptParts = extractRecordAndReceipt(receiptPayload);
+    const record = recordParts.record;
+    const receipt = receiptParts.receipt;
+    if (!record)
+        throw new Error('No AI Change Record found in --record JSON');
+    if (!receipt)
+        throw new Error('No AI Change Record receipt found; pass --receipt or provide an export envelope');
+    const verification = (0, governance_runtime_1.verifyAIChangeRecordReceipt)({
+        recordHash: record.integrity.recordHash,
+        receipt,
+        signingSecret: process.env.NEURCODE_AI_CHANGE_RECORD_SIGNING_SECRET || null,
+        expectedSigningKeyId: process.env.NEURCODE_AI_CHANGE_RECORD_SIGNING_KEY_ID || null,
+    });
+    return {
+        ok: verification.valid,
+        recordHash: record.integrity.recordHash,
+        receiptId: verification.receiptId,
+        trustLevel: verification.trustLevel,
+        verification,
+        privacy: {
+            sourceUploaded: false,
+            sourceFree: true,
+        },
+    };
+}
 function referenceLabel(ref) {
     const owner = ref.referencingSymbol
         ? `${ref.referencingFile}#${ref.referencingSymbol}:${ref.line}`
@@ -1154,6 +1678,8 @@ function structuralEventDetail(artifact, artifactPath, repoRoot) {
         })),
         suppressedArtifacts: artifact.suppressedArtifacts,
         digest: artifact.digest,
+        repoSymbolIndex: artifact.repoSymbolIndex,
+        reuseFindings: artifact.reuseFindings,
         consequenceUnderstanding: artifact.consequenceUnderstanding,
         planAlignment: artifact.planAlignment,
         boundaryImpact: artifact.boundaryImpact,
@@ -1223,6 +1749,16 @@ function renderStructuralUnderstanding(artifact, artifactPath, repoRoot) {
                 console.log(chalk.dim(`  ${effect.file}#${effect.symbol} ${effect.direction} ${effect.effectCategory}` +
                     ` (${effect.calleeName}${effect.line ? ` @ line ${effect.line}` : ''})`));
             }
+        }
+    }
+    if (artifact.reuseFindings.length > 0) {
+        console.log('');
+        console.log(chalk.bold('Reuse governance advisories'));
+        console.log(chalk.dim(`  ${artifact.reuseFindings.length} advisory finding${artifact.reuseFindings.length === 1 ? '' : 's'} from ` +
+            `${artifact.repoSymbolIndex.indexedSymbolCount} indexed TS/JS symbol${artifact.repoSymbolIndex.indexedSymbolCount === 1 ? '' : 's'}.`));
+        for (const finding of artifact.reuseFindings.slice(0, 8)) {
+            console.log(chalk.dim(`  ${finding.changed.file}#${finding.changed.name} -> ${finding.existing.file}#${finding.existing.name}` +
+                ` · ${finding.matchType} · ${finding.confidence}`));
         }
     }
     if (artifact.digest.topReferences.length > 0 || artifact.digest.topSymbols.length > 0) {
@@ -1315,9 +1851,9 @@ function structuralUnderstandingCommand(options = {}) {
         process.exitCode = 1;
         return;
     }
-    let diffText = '';
+    let diffFiles = [];
     try {
-        diffText = resolveUnderstandingDiff(repoRoot, options);
+        diffFiles = resolveUnderstandingDiffFiles(repoRoot, options);
     }
     catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1330,7 +1866,6 @@ function structuralUnderstandingCommand(options = {}) {
         process.exitCode = 1;
         return;
     }
-    const diffFiles = diffText.trim() ? (0, diff_parser_1.parseDiff)(diffText) : [];
     const profile = (0, v0_governance_1.getProfileStaleness)(repoRoot).currentProfile;
     const artifact = (0, structural_understanding_1.buildStructuralUnderstanding)(repoRoot, diffFiles, {
         session,
@@ -1447,157 +1982,294 @@ async function listSessionsCommand(options) {
  * End a session
  */
 async function endSessionCommand(options) {
-    try {
-        const config = (0, config_1.loadConfig)();
-        if (!config.apiKey) {
-            config.apiKey = (0, config_1.requireApiKey)();
-        }
-        const client = new api_client_1.ApiClient(config);
-        let sessionId = options.sessionId;
-        // If no session ID provided, try to get from state
-        if (!sessionId) {
-            const stateSessionId = (0, state_1.getSessionId)();
-            sessionId = stateSessionId || undefined;
-            if (!sessionId) {
-                // List active sessions and let user choose
-                (0, messages_1.printInfo)('No Active Session', 'Looking for active sessions...');
-                const sessions = await client.getSessions(config.projectId, 10);
-                const activeSessions = sessions.filter(s => s.status === 'active');
-                if (activeSessions.length === 0) {
-                    (0, messages_1.printInfo)('No Active Sessions', 'There are no active sessions to end.');
-                    return;
-                }
-                if (activeSessions.length === 1) {
-                    sessionId = activeSessions[0].sessionId;
-                    const title = activeSessions[0].title || activeSessions[0].intentDescription || 'Untitled';
-                    (0, messages_1.printInfo)('Found Active Session', `Ending: ${title}`);
-                }
-                else {
-                    // Multiple active sessions - let user choose
-                    (0, messages_1.printSection)('Multiple Active Sessions');
-                    activeSessions.forEach((session, index) => {
-                        const title = session.title || session.intentDescription || 'Untitled';
-                        console.log(chalk.cyan(`  ${index + 1}.`), chalk.white(title));
-                        console.log(chalk.dim(`     ${session.sessionId.substring(0, 20)}...`));
-                    });
-                    console.log('');
-                    const answer = await promptUser(chalk.bold('Select session to end (1-' + activeSessions.length + '): '));
-                    const choice = parseInt(answer, 10);
-                    if (choice >= 1 && choice <= activeSessions.length) {
-                        sessionId = activeSessions[choice - 1].sessionId;
-                    }
-                    else {
-                        (0, messages_1.printError)('Invalid Selection', undefined, ['Please run the command again and select a valid number']);
-                        process.exit(1);
-                    }
-                }
-            }
-        }
-        if (!sessionId) {
-            (0, messages_1.printError)('No Session Specified', undefined, [
-                'No session ID provided and no active session found',
-                'Usage: neurcode session end [session-id]',
-                'Or set a session: neurcode init'
-            ]);
-            process.exit(1);
-        }
-        // Get session details first
-        try {
-            const sessionData = await client.getSession(sessionId);
-            const session = sessionData.session;
-            if (session.status === 'completed') {
-                (0, messages_1.printWarning)('Session Already Completed', `Session "${session.title || session.intentDescription || sessionId}" is already ended.`);
-                return;
-            }
-            if (session.status === 'cancelled') {
-                (0, messages_1.printWarning)('Session Already Cancelled', `Session "${session.title || session.intentDescription || sessionId}" was already cancelled.`);
-                return;
-            }
-            // Show session summary
-            const title = session.title || session.intentDescription || 'Untitled Session';
-            const filesCount = sessionData.files?.length || 0;
-            (0, messages_1.printSection)('Session Summary');
-            console.log(chalk.white(`   Title: ${title}`));
-            console.log(chalk.white(`   Files Changed: ${filesCount}`));
-            console.log(chalk.dim(`   Session ID: ${sessionId}`));
-            console.log('');
-            // Confirm before ending
-            const confirm = await promptUser(chalk.bold('End this session? (y/n): '));
-            if (confirm.toLowerCase() !== 'y' && confirm.toLowerCase() !== 'yes') {
-                (0, messages_1.printInfo)('Cancelled', 'Session was not ended.');
-                return;
-            }
-            await client.endSession(sessionId);
-            // Clear session ID from local state if it matches the ended session
-            try {
-                const currentSessionId = (0, state_1.getSessionId)();
-                if (currentSessionId === sessionId) {
-                    const { clearSessionId } = await Promise.resolve().then(() => __importStar(require('../utils/state')));
-                    clearSessionId();
-                }
-            }
-            catch {
-                // Non-critical - continue if state clearing fails
-            }
-            const firstName = await (0, messages_1.getUserFirstName)();
-            await (0, messages_1.printSuccessBanner)('Session Completed', `Great work, ${firstName}! Your session has been marked as complete.`);
-            (0, messages_1.printSuccess)('Session Ended Successfully', `"${title}" is now marked as completed.\n   View in dashboard: dashboard.neurcode.com`);
-            // Display Session ROI Summary
-            try {
-                // Fetch ROI summary from API
-                const apiUrl = config.apiUrl || process.env.NEURCODE_API_URL || 'https://api.neurcode.com';
-                const roiUrl = `${apiUrl}/api/v1/roi/summary?timeRange=7d`;
-                const roiResponse = await fetch(roiUrl, {
-                    headers: {
-                        'Authorization': `Bearer ${config.apiKey}`,
-                        'Content-Type': 'application/json',
-                    },
-                }).catch(() => null);
-                if (roiResponse && roiResponse.ok) {
-                    const roiData = await roiResponse.json().catch(() => null);
-                    if (roiData && roiData.totalCapitalSaved) {
-                        const capitalSaved = typeof roiData.totalCapitalSaved === 'string'
-                            ? parseFloat(roiData.totalCapitalSaved)
-                            : roiData.totalCapitalSaved;
-                        const formattedAmount = capitalSaved.toFixed(2);
-                        const dashboardUrl = 'https://neurcode.com/dashboard';
-                        console.log('');
-                        console.log(chalk.cyan('📊'), chalk.bold.white('Current Session ROI:'), chalk.green.bold(`+$${formattedAmount}`));
-                        console.log(chalk.dim(`   View full report: ${dashboardUrl}`));
-                        console.log('');
-                    }
-                }
-            }
-            catch {
-                // Silently fail - ROI summary is a nice-to-have
-            }
-        }
-        catch (error) {
-            if (error.message?.includes('not found') || error.message?.includes('404')) {
-                (0, messages_1.printError)('Session Not Found', error, [
-                    `Session "${sessionId}" could not be found`,
-                    'List your sessions: neurcode session list',
-                    'Verify the session ID is correct'
-                ]);
-            }
-            else {
-                throw error;
-            }
+    return endSessionCommandWithDependencies(options);
+}
+function endSessionOutput(options, payload, exitCode = 0) {
+    if (options.json) {
+        console.log(JSON.stringify({ ...payload, exitCode }, null, 2));
+    }
+    else if (payload.ok === true) {
+        console.log(chalk.green(String(payload.message || 'Session ended.')));
+        if (payload.sessionId)
+            console.log(chalk.dim(`Session: ${payload.sessionId}`));
+        if (payload.replayHash)
+            console.log(chalk.dim(`replayHash: ${payload.replayHash}`));
+    }
+    else {
+        console.error(chalk.red(String(payload.message || payload.error || 'Session end failed.')));
+        const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+        for (const candidate of candidates) {
+            const item = candidate;
+            console.error(chalk.dim(`  ${item.sessionId || 'unknown'}: ${item.command || ''}`));
         }
     }
-    catch (error) {
-        if (error instanceof Error) {
-            if (error.message.includes('401') || error.message.includes('403')) {
-                await (0, messages_1.printAuthError)(error);
+    process.exitCode = exitCode;
+}
+async function finishLocalGovernanceSession(repoRoot, session) {
+    if (session.status === 'finished') {
+        return {
+            ok: true,
+            ended: false,
+            mode: 'local',
+            status: 'already_finished',
+            sessionId: session.sessionId,
+            replayHash: session.replayHash || null,
+            message: `Local governance session ${session.sessionId} is already finished.`,
+        };
+    }
+    (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+        type: 'user_decision',
+        ts: new Date().toISOString(),
+        decision: 'local_session_end_requested',
+        message: 'Operator ended the local governance session.',
+        detail: {
+            source: 'local_cli',
+            command: 'session end',
+        },
+    });
+    const finished = (0, governance_runtime_1.finishSession)(repoRoot, session.sessionId, {
+        reason: 'local_session_end_requested',
+    });
+    if (!finished)
+        throw new Error(`Local governance session ${session.sessionId} could not be finished.`);
+    (0, agent_guard_supervisor_1.stopSupervisorOnSessionCompletion)(repoRoot);
+    let liveStatusPublished = true;
+    try {
+        await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, finished);
+    }
+    catch {
+        liveStatusPublished = false;
+    }
+    const replay = (0, governance_runtime_1.replaySession)(finished);
+    return {
+        ok: true,
+        ended: true,
+        mode: 'local',
+        status: finished.status,
+        sessionId: finished.sessionId,
+        replayHash: finished.replayHash,
+        replayVerified: replay.matchesOriginal,
+        liveStatusPublished,
+        recordPath: `.neurcode/sessions/${finished.sessionId}.json`,
+        evidencePath: (0, node_path_1.relative)(repoRoot, (0, governance_runtime_1.aiChangeRecordPath)(repoRoot, finished.sessionId)).replace(/\\/g, '/'),
+        message: `Local governance session ${finished.sessionId} ended with replay-valid evidence.`,
+    };
+}
+async function endSessionCommandWithDependencies(options, dependencies = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const isInteractive = dependencies.isInteractive ??
+        (() => Boolean(process.stdin.isTTY && process.stdout.isTTY));
+    const prompt = dependencies.prompt ?? promptUser;
+    try {
+        if (options.sessionId) {
+            const local = (0, governance_runtime_1.loadSession)(repoRoot, options.sessionId);
+            if (local) {
+                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, local));
+                return;
             }
-            else {
-                (0, messages_1.printError)('Failed to End Session', error);
+            if (options.local) {
+                endSessionOutput(options, {
+                    ok: false,
+                    ended: false,
+                    mode: 'local',
+                    reason: 'local_session_not_found',
+                    sessionId: options.sessionId,
+                    message: `Local governance session ${options.sessionId} was not found.`,
+                }, 2);
+                return;
             }
         }
         else {
-            (0, messages_1.printError)('Failed to End Session', String(error));
+            const records = scanSessionRecords(repoRoot);
+            if (records.active.length === 1) {
+                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, records.active[0]));
+                return;
+            }
+            if (records.active.length > 1) {
+                if (!isInteractive()) {
+                    endSessionOutput(options, {
+                        ok: false,
+                        ended: false,
+                        mode: 'local',
+                        reason: 'multiple_local_sessions_noninteractive',
+                        candidates: records.active.map((session) => ({
+                            sessionId: session.sessionId,
+                            command: `neurcode session end --session-id ${session.sessionId}`,
+                        })),
+                        malformedRecords: records.malformed,
+                        message: 'Multiple active local governance sessions were found; noninteractive selection is disabled.',
+                    }, 2);
+                    return;
+                }
+                console.log(chalk.bold('Multiple active local governance sessions'));
+                records.active.forEach((session, index) => {
+                    console.log(`  ${index + 1}. ${session.sessionId} · ${truncate(session.contract.goal, 72)}`);
+                });
+                const answer = await prompt(`Select local session to end (1-${records.active.length}): `);
+                const selected = Number.parseInt(answer, 10);
+                if (!Number.isInteger(selected) || selected < 1 || selected > records.active.length) {
+                    endSessionOutput(options, {
+                        ok: false,
+                        ended: false,
+                        mode: 'local',
+                        reason: 'invalid_local_selection',
+                        message: 'No local session was ended.',
+                    }, 2);
+                    return;
+                }
+                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, records.active[selected - 1]));
+                return;
+            }
+            if (options.local) {
+                endSessionOutput(options, {
+                    ok: true,
+                    ended: false,
+                    mode: 'local',
+                    reason: 'no_active_local_session',
+                    malformedRecords: records.malformed,
+                    message: 'No active local governance session found.',
+                });
+                return;
+            }
         }
-        process.exit(1);
+        let config = null;
+        let client = dependencies.cloudClient;
+        if (!client) {
+            config = (0, config_1.loadConfig)();
+            if (!config.apiKey)
+                config.apiKey = (0, config_1.requireApiKey)();
+            client = new api_client_1.ApiClient(config);
+        }
+        let sessionId = options.sessionId;
+        if (!sessionId) {
+            const stateSessionId = (0, state_1.getSessionId)() || undefined;
+            if (stateSessionId && (0, governance_runtime_1.loadSession)(repoRoot, stateSessionId)) {
+                const local = (0, governance_runtime_1.loadSession)(repoRoot, stateSessionId);
+                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, local));
+                return;
+            }
+            sessionId = stateSessionId;
+        }
+        if (!sessionId) {
+            const sessions = await client.getSessions(options.projectId || config?.projectId, 20);
+            const active = sessions.filter((session) => session.status === 'active');
+            if (active.length === 0) {
+                endSessionOutput(options, {
+                    ok: true,
+                    ended: false,
+                    mode: 'cloud',
+                    reason: 'no_active_cloud_session',
+                    message: 'No active local or cloud session found.',
+                });
+                return;
+            }
+            if (active.length > 1 && !isInteractive()) {
+                endSessionOutput(options, {
+                    ok: false,
+                    ended: false,
+                    mode: 'cloud',
+                    reason: 'multiple_cloud_sessions_noninteractive',
+                    candidates: active.map((session) => ({
+                        sessionId: session.sessionId,
+                        command: `neurcode session end --session-id ${session.sessionId}`,
+                    })),
+                    message: 'Multiple active cloud sessions were found; noninteractive selection is disabled.',
+                }, 2);
+                return;
+            }
+            if (active.length === 1) {
+                sessionId = active[0].sessionId;
+            }
+            else {
+                active.forEach((session, index) => {
+                    const title = session.title || session.intentDescription || 'Untitled';
+                    console.log(`  ${index + 1}. ${title} · ${session.sessionId}`);
+                });
+                const answer = await prompt(`Select cloud session to end (1-${active.length}): `);
+                const selected = Number.parseInt(answer, 10);
+                if (!Number.isInteger(selected) || selected < 1 || selected > active.length) {
+                    endSessionOutput(options, {
+                        ok: false,
+                        ended: false,
+                        mode: 'cloud',
+                        reason: 'invalid_cloud_selection',
+                        message: 'No cloud session was ended.',
+                    }, 2);
+                    return;
+                }
+                sessionId = active[selected - 1].sessionId;
+            }
+        }
+        if (!sessionId) {
+            endSessionOutput(options, {
+                ok: false,
+                ended: false,
+                mode: 'cloud',
+                reason: 'cloud_session_not_resolved',
+                message: 'No cloud session could be resolved.',
+            }, 2);
+            return;
+        }
+        const sessionData = await client.getSession(sessionId);
+        const session = sessionData.session;
+        if (session.status === 'completed' || session.status === 'cancelled') {
+            endSessionOutput(options, {
+                ok: true,
+                ended: false,
+                mode: 'cloud',
+                status: session.status,
+                sessionId,
+                message: `Cloud session ${sessionId} is already ${session.status}.`,
+            });
+            return;
+        }
+        if (isInteractive()) {
+            const confirm = await prompt(`End cloud session ${sessionId}? (y/n): `);
+            if (!['y', 'yes'].includes(confirm.toLowerCase())) {
+                endSessionOutput(options, {
+                    ok: true,
+                    ended: false,
+                    mode: 'cloud',
+                    reason: 'operator_cancelled',
+                    sessionId,
+                    message: 'Cloud session was not ended.',
+                });
+                return;
+            }
+        }
+        await client.endSession(sessionId);
+        try {
+            if ((0, state_1.getSessionId)() === sessionId) {
+                const { clearSessionId } = await Promise.resolve().then(() => __importStar(require('../utils/state')));
+                clearSessionId();
+            }
+        }
+        catch {
+            // Legacy local cloud pointer cleanup is best-effort.
+        }
+        endSessionOutput(options, {
+            ok: true,
+            ended: true,
+            mode: 'cloud',
+            status: 'completed',
+            sessionId,
+            message: `Cloud session ${sessionId} ended successfully.`,
+        });
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const notFound = /not found|404/i.test(message);
+        endSessionOutput(options, {
+            ok: false,
+            ended: false,
+            mode: 'unknown',
+            reason: notFound ? 'session_not_found' : 'session_end_failed',
+            sessionId: options.sessionId || null,
+            error: message,
+            message: notFound
+                ? `Session ${options.sessionId || ''} was not found locally or in the cloud.`.trim()
+                : `Failed to end session: ${message}`,
+        }, notFound ? 2 : 1);
     }
 }
 /**

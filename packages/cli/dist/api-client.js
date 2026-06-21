@@ -330,6 +330,26 @@ class ApiClient {
             body: JSON.stringify(body),
         });
     }
+    async signAIChangeRecord(body) {
+        const url = `${this.apiUrl}/api/v1/runtime/ai-change-records/sign`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+    }
+    async verifyAIChangeRecord(body) {
+        const url = `${this.apiUrl}/api/v1/runtime/ai-change-records/verify`;
+        return this.makeRequest(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+    }
     async updateRuntimeLiveSessionStatus(body) {
         const url = `${this.apiUrl}/api/v1/runtime/live-sessions/status`;
         return this.makeRequest(url, {

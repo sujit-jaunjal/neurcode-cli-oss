@@ -55,6 +55,7 @@ const guard_1 = require("./commands/guard");
 const bootstrap_1 = require("./commands/bootstrap");
 const quickstart_1 = require("./commands/quickstart");
 const home_1 = require("./commands/home");
+const onboard_1 = require("./commands/onboard");
 const bootstrap_policy_1 = require("./commands/bootstrap-policy");
 const messages_1 = require("./utils/messages");
 const config_2 = require("./config");
@@ -77,8 +78,10 @@ const runtime_doctor_1 = require("./commands/runtime-doctor");
 const runtime_report_1 = require("./commands/runtime-report");
 const runtime_sync_1 = require("./commands/runtime-sync");
 const runtime_1 = require("./commands/runtime");
+const ops_1 = require("./commands/ops");
 const admission_1 = require("./commands/admission");
 const demo_1 = require("./commands/demo");
+const eval_1 = require("./commands/eval");
 const execution_bus_1 = require("./utils/execution-bus");
 const execution_actions_1 = require("./utils/execution-actions");
 const cli_startup_1 = require("./utils/cli-startup");
@@ -99,6 +102,14 @@ catch (error) {
 const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
     {
+        command: 'npx -y @neurcode-ai/cli@latest eval demo --fixture --agent codex',
+        description: 'Run the complete enterprise evaluation in a safe local fixture',
+    },
+    {
+        command: 'neurcode eval start --agent codex --fixture',
+        description: 'Begin the guided buyer evaluation and continue step by step',
+    },
+    {
         command: 'neurcode agent start codex --goal "<task>"',
         description: 'Start a governed session for non-Claude agents using the universal runtime handshake',
     },
@@ -117,6 +128,10 @@ const CORE_WORKFLOW_STEPS = [
     {
         command: 'neurcode runtime cloud-status',
         description: 'Read dashboard-visible live session, approval, transport, and ingestion state',
+    },
+    {
+        command: 'neurcode ops status',
+        description: 'Check CLI/npm, API, dashboard, runtime backend, receipts, Action, and release posture',
     },
     {
         command: 'neurcode report --runtime',
@@ -150,6 +165,10 @@ const CORE_WORKFLOW_STEPS = [
         command: 'neurcode replay --json',
         description: 'Inspect deterministic replay and source-free runtime receipts',
     },
+    {
+        command: 'neurcode brain impact --summary',
+        description: 'Inspect source-free repo impact, owners, tests, and reviewer questions',
+    },
 ];
 const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
     'activate',
@@ -157,6 +176,7 @@ const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
     'run',
     'status',
     'runtime',
+    'eval',
     'sessions',
     'report',
     'sync',
@@ -171,8 +191,6 @@ const ENTERPRISE_OPERATIONS_COMMAND_NAMES = new Set([
     'governance',
     'workspace',
     'control-plane',
-    'pilot-report',
-    'daemon',
     'doctor',
     'compat',
     'login',
@@ -195,31 +213,6 @@ const RUNTIME_ENGINEERING_COMMAND_NAMES = new Set([
     'executions',
     'session',
     'brain',
-]);
-const LEGACY_COMPATIBILITY_COMMAND_NAMES = new Set([
-    'check',
-    'refactor',
-    'security',
-    'ask',
-    'plan',
-    'plan-slo',
-    'ship',
-    'ship-resume',
-    'ship-runs',
-    'ship-attestation-verify',
-    'apply',
-    'allow',
-    'simulate',
-    'watch',
-    'remediate',
-    'remediate-validate',
-    'remediate-status',
-    'generate',
-    'patch',
-    'fix',
-    'prompt',
-    'revert',
-    'export',
 ]);
 function shouldRouteJsonLegacyCommandThroughExecutionBus(jsonEnabled) {
     if (!jsonEnabled)
@@ -258,7 +251,7 @@ function buildAdvancedLegacyHints(root) {
     return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['activate', 'agent', 'run', 'status', 'runtime', 'sessions', 'report', 'sync', 'admission', 'demo', 'login', 'init', 'start', 'quickstart', 'replay'];
+    const primaryOrder = ['activate', 'agent', 'run', 'status', 'runtime', 'ops', 'sessions', 'report', 'sync', 'admission', 'demo', 'login', 'init', 'start', 'quickstart', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
@@ -303,8 +296,6 @@ function renderHelpFooter(root) {
         'governance',
         'workspace',
         'control-plane',
-        'pilot-report',
-        'daemon',
         'doctor',
         'compat',
         'login',
@@ -328,31 +319,6 @@ function renderHelpFooter(root) {
         'session',
         'brain',
     ]);
-    const compatibilityCommands = collectCommandLayer(root, LEGACY_COMPATIBILITY_COMMAND_NAMES, [
-        'fix',
-        'patch',
-        'generate',
-        'prompt',
-        'plan',
-        'ask',
-        'remediate',
-        'remediate-validate',
-        'remediate-status',
-        'ship',
-        'ship-resume',
-        'ship-runs',
-        'ship-attestation-verify',
-        'apply',
-        'export',
-        'revert',
-        'check',
-        'refactor',
-        'security',
-        'simulate',
-        'watch',
-        'allow',
-        'plan-slo',
-    ]);
     return [
         '',
         'Core Workflow',
@@ -364,9 +330,7 @@ function renderHelpFooter(root) {
         'Runtime Engineering',
         ...formatCommandList(runtimeEngineering),
         '',
-        'Compatibility / Legacy',
-        ...formatCommandList(compatibilityCommands),
-        '',
+        'Compatibility commands from the older plan/verify/ship era remain callable for existing CI and migration workflows, but are intentionally absent from first-run help.',
         'Run `neurcode <command> --help` for command-specific details.',
     ].join('\n');
 }
@@ -454,8 +418,10 @@ program
 (0, runtime_report_1.reportCommand)(program);
 (0, runtime_sync_1.syncCommand)(program);
 (0, runtime_1.runtimeCommand)(program);
+(0, ops_1.opsCommand)(program);
 (0, admission_1.admissionCommand)(program);
 (0, demo_1.demoCommand)(program);
+(0, eval_1.evalCommand)(program);
 program
     .command('status')
     .description('Show the active in-flow governance session for this repository')
@@ -484,6 +450,7 @@ program
 (0, workspace_1.workspaceCommand)(program);
 (0, replay_1.replayCommand)(program);
 (0, home_1.homeCommand)(program);
+(0, onboard_1.onboardCommand)(program);
 // Top-level discoverability alias for `neurcode replay timeline`. Reviewers
 // asking "what changed and when?" should not need to know the subcommand
 // hierarchy. Same canonical artifact source, same deterministic output.
@@ -988,6 +955,84 @@ sessionCmd
     });
 });
 sessionCmd
+    .command('export-record [sessionId]')
+    .description('Export a PR-safe source-free AI Change Record envelope')
+    .option('--session-id <id>', 'Local governance session ID (default: active, then latest)')
+    .option('--latest', 'Use the latest local session even if another session is active')
+    .option('--signed', 'Attempt backend signing; fall back to self-attested with a warning if unavailable')
+    .option('--output <path>', 'Output JSON path (default: .neurcode-ai-record/<session-id>.json)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (sessionId, options) => {
+    try {
+        const summary = await (0, session_1.exportAIChangeRecordForCli)({
+            sessionId: options.sessionId || sessionId,
+            latest: options.latest === true,
+            signed: options.signed === true,
+            output: options.output,
+            dir: options.dir,
+            json: options.json === true,
+        });
+        if (options.json) {
+            console.log(JSON.stringify(summary, null, 2));
+            return;
+        }
+        console.log('AI Change Record exported');
+        console.log(`  Session:  ${summary.sessionId}`);
+        console.log(`  Artifact: ${summary.publicRelativePath}`);
+        console.log(`  Hash:     ${summary.recordHash}`);
+        console.log(`  Trust:    ${summary.trustLevel}`);
+        if (summary.receipt.present) {
+            console.log(`  Receipt:  ${summary.receipt.receiptId || 'attached'} (${summary.receipt.verificationStatus})`);
+        }
+        for (const warning of summary.warnings) {
+            console.log(`  Warning:  ${warning}`);
+        }
+        console.log('  Privacy:  source-free; no source, diffs, patches, raw prompts, or secrets.');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json)
+            console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+        else
+            console.error(`AI Change Record export failed: ${message}`);
+        process.exitCode = 1;
+    }
+});
+sessionCmd
+    .command('verify-record')
+    .description('Verify an AI Change Record receipt against a source-free record export')
+    .requiredOption('--record <path>', 'AI Change Record JSON or export envelope')
+    .option('--receipt <path>', 'Receipt JSON or export envelope (defaults to --record envelope)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    try {
+        const result = (0, session_1.verifyAIChangeRecordForCli)({
+            record: options.record,
+            receipt: options.receipt,
+            json: options.json === true,
+        });
+        if (options.json) {
+            console.log(JSON.stringify(result, null, 2));
+            return;
+        }
+        console.log(result.ok ? 'AI Change Record receipt valid' : 'AI Change Record receipt not valid');
+        console.log(`  Trust:   ${result.trustLevel}`);
+        console.log(`  Receipt: ${result.receiptId || 'n/a'}`);
+        if (result.verification.reasons.length > 0) {
+            console.log(`  Reasons: ${result.verification.reasons.join('; ')}`);
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json)
+            console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+        else
+            console.error(`AI Change Record verification failed: ${message}`);
+        process.exitCode = 1;
+    }
+});
+sessionCmd
     .command('understanding')
     .description('Build local TypeScript structural understanding for the active governed change')
     .option('--session-id <id>', 'Local governance session ID (default: active, then latest)')
@@ -1017,10 +1062,16 @@ sessionCmd
     .description('End the current session or a specific session')
     .option('--session-id <id>', 'Session ID to end (defaults to current session)')
     .option('--project-id <id>', 'Project ID')
-    .action((options) => {
-    (0, session_1.endSessionCommand)({
+    .option('--local', 'Restrict resolution to local governance sessions')
+    .option('--dir <path>', 'Repository root for local governance session resolution')
+    .option('--json', 'Output stable machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.endSessionCommand)({
         sessionId: options.sessionId,
         projectId: options.projectId,
+        local: options.local === true,
+        dir: options.dir,
+        json: options.json === true,
     });
 });
 sessionCmd
@@ -1544,9 +1595,9 @@ program
     .option('--project-id <id>', 'Project ID override')
     .option('--ci', 'CI mode: deterministic verification-only flow, no local interactive/runtime assumptions')
     .option('--policy-only', 'Run in policy-only verification mode')
-    .option('--staged', 'Only verify staged changes')
-    .option('--head', 'Verify changes against HEAD')
-    .option('--base <ref>', 'Verify changes against a specific base ref')
+    .option('--staged', 'Verify staged changes only; unstaged and untracked files are excluded')
+    .option('--head', 'Verify the working tree against HEAD, including untracked files')
+    .option('--base <ref>', 'Verify the working tree against a base ref, including untracked files')
     .option('--apply-safe', 'Auto-apply high-confidence, deterministic patches and re-run verify')
     .option('--json', 'Output machine-readable JSON')
     .action(async (options) => {
@@ -1640,7 +1691,7 @@ program
     .option('--record', 'Report verification results to Neurcode Cloud')
     .option('--api-key <key>', 'Neurcode API Key (overrides config and env var)')
     .option('--api-url <url>', 'Override API URL (default: https://api.neurcode.com)')
-    .option('--local-only', 'Offline structural fallback: skip API, run deterministic structural rules only (sets NEURCODE_VERIFY_LOCAL_ONLY=1)')
+    .option('--local-only', 'Offline compatibility alias for the supported local policy + structural engine (no API)')
     .option('--require-intent-runtime', 'Fail if the intent-governed runtime is not active for this run (no silent downgrade to structural-only). Honours NEURCODE_REQUIRE_INTENT_RUNTIME=1.')
     .action(async (options) => {
     if (options.localOnly === true) {

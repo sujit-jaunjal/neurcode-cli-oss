@@ -4,10 +4,11 @@
  * One session per .neurcode/sessions/<id>.json.
  * No daemon required; CLI commands and hooks read/write directly.
  */
-import { type OwnershipBoundary, type PlanCoherenceMode, type RepoGovernanceProfile, type RuntimeBlockType, type RuntimeLocalMode } from './profile';
+import { type OwnershipBoundary, type PlanCoherenceMode, type RepoSymbolDuplicateMode, type RepoGovernanceProfile, type RuntimeBlockType, type RuntimeLocalMode } from './profile';
 import { type AgentPlan, type AgentPlanSource, type PlanCoherenceResult } from './agent-plan';
 import { type ArchitectureObligation, type ArchitectureObligationPolicy, type ArchitectureObligationWaiver, type ArchitectureObligationWaiverSource } from './architecture-obligations';
 import type { RepoArchitectureGraph } from './architecture-graph';
+import { INTENT_PRIVACY_POLICY_VERSION, type IntentRedactionReasonCode } from './intent-privacy';
 export type EventType = 'session_start' | 'check_ok' | 'check_warn' | 'check_block' | 'approval_decision' | 'user_decision' | 'plan_captured' | 'plan_amended' | 'plan_amendment_proposed' | 'plan_amendment_decision' | 'obligation_state_changed' | 'obligation_waiver_decision' | 'agent_session_launched' | 'agent_handshake' | 'agent_runtime_call' | 'agent_guard_started' | 'agent_guard_status' | 'agent_guard_finished' | 'agent_guard_supervisor_started' | 'agent_guard_supervisor_stopped' | 'structural_understanding' | 'consequence_nudge' | 'session_finish';
 export interface SessionEvent {
     type: EventType;
@@ -99,6 +100,8 @@ export interface SessionContract {
     planCoherenceMode?: PlanCoherenceMode;
     /** Local in-flow enforcement posture for harmless out-of-scope task expansion. */
     runtimeMode?: RuntimeLocalMode;
+    /** Deterministic duplicate symbol-name policy captured from repo governance config. */
+    repoSymbolDuplicateMode?: RepoSymbolDuplicateMode;
     /**
      * Source-free model of the agent's *own stated plan* (steps + expected files),
      * captured from Claude Code hook payloads when the agent exposes one.
@@ -251,6 +254,14 @@ export interface GovernanceSession {
     replayHash?: string;
     finishedAt?: string;
     status: 'active' | 'finished';
+    privacy?: {
+        policyVersion: typeof INTENT_PRIVACY_POLICY_VERSION;
+        classification: 'local_private';
+        bounded: true;
+        sensitivePatternRedaction: true;
+        reasonCodes: IntentRedactionReasonCode[];
+        updatedAt: string;
+    };
 }
 export type { RuntimeBlockType, RuntimeLocalMode };
 export interface UnresolvedApprovalBlock {

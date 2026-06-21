@@ -107,6 +107,38 @@ neurcode status
 neurcode status --json
 ```
 
+### `neurcode session end`
+
+End a local governance session or a true cloud session without mixing their identities.
+
+```bash
+neurcode session end
+neurcode session end --session-id <local-or-cloud-session-id>
+neurcode session end --session-id <local-session-id> --local --json
+```
+
+An explicit local governance ID is finished locally before cloud APIs are considered, preserving its replay hash and AI Change Record. With no arguments, exactly one active local session is finished automatically. If multiple local sessions exist and stdin is noninteractive, the command exits quickly with candidate IDs and exact `--session-id` commands instead of prompting.
+
+### Profile-drift recovery
+
+Cached-profile freshness and active-session compatibility are separate:
+
+```text
+profile status: fresh
+session compatibility: incompatible
+action: session_restart_required
+```
+
+When a profile changes and no human decision is pending, the next implementation prompt finishes the stale session with replay-valid recovery evidence and starts a new session from the current profile. Exact approvals and waivers are not carried forward.
+
+If an exact approval, risky plan amendment, or other human decision is unresolved, automatic recovery fails closed and creates no second session. Run exactly:
+
+```bash
+neurcode session reset-stale --force
+```
+
+`--force` abandons unresolved operator state. `neurcode activate --force` or a profile refresh alone is not sufficient because the active session contract remains incompatible.
+
 ### `neurcode runtime cloud-status`
 
 Read the dashboard-visible runtime state for a paired repository without mutating sessions or approvals. This is the agent-safe way to prove whether the Runtime Control Plane can see the active session, blocked approval path, local live transport, and bulk evidence ingestion posture.
@@ -183,12 +215,24 @@ Compatibility/backstop command: evaluate the current git diff against policy rul
 neurcode verify
 neurcode verify --ci                       # deterministic CI-safe verification mode
 neurcode verify --policy-only              # policy checks only, no plan enforcement
-neurcode verify --staged                   # verify only staged changes
-neurcode verify --base main                # verify against a specific base ref
+neurcode verify --staged                   # staged changes only; excludes unstaged/untracked
+neurcode verify --head                     # working tree vs HEAD, including untracked
+neurcode verify --base main                # working tree vs base, including untracked
 neurcode verify --record                   # report results to Neurcode Cloud
 neurcode verify --ci --json --evidence     # emit deterministic verification evidence artifact
 neurcode verify --evidence-dir .neurcode/evidence
 neurcode verify --compiled-policy neurcode.policy.compiled.json
+```
+
+An empty selected context returns `not_evaluated` (exit 3), not PASS. JSON includes requested, analyzed, skipped, and unsupported counts plus coverage posture. `--local-only` remains an offline compatibility alias for the supported local policy + structural engine; new automation should prefer `--ci --policy-only` with an explicit diff selector.
+
+### `neurcode policy duplicate-mode [off|warn|block]`
+
+Inspect or set deterministic duplicate-symbol enforcement. The command reports the effective value and its source, writes durable configuration to `.neurcode/governance.json`, and preserves it during forced profile regeneration. Structural resemblance remains advisory and cannot trigger this block mode.
+
+```bash
+neurcode policy duplicate-mode
+neurcode policy duplicate-mode block --json
 ```
 
 ### `neurcode fix`

@@ -15,6 +15,7 @@ const crypto_1 = require("crypto");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const secret_masking_1 = require("./secret-masking");
+const team_memory_path_hygiene_1 = require("./team-memory-path-hygiene");
 const CONTEXT_SCHEMA_VERSION = 1;
 const BRAIN_CONTEXT_FILE = 'brain-context.json';
 const MAX_FILE_ENTRIES_PER_SCOPE = 2000;
@@ -85,8 +86,14 @@ function writeStore(cwd, store) {
 }
 function ensureScopeStore(store, key, scope) {
     const existing = store.scopes[key];
-    if (existing)
+    if (existing) {
+        for (const filePath of Object.keys(existing.files)) {
+            if (!(0, team_memory_path_hygiene_1.isTeamMemoryProjectPath)(filePath))
+                delete existing.files[filePath];
+        }
+        existing.events = existing.events.filter((event) => !event.filePath || (0, team_memory_path_hygiene_1.isTeamMemoryProjectPath)(event.filePath));
         return existing;
+    }
     const created = {
         orgId: scope.orgId,
         projectId: scope.projectId,
@@ -153,7 +160,7 @@ function inferLanguage(filePath) {
 }
 function shouldIndexFile(filePath, content) {
     const normalized = normalizeFilePath(filePath);
-    if (!normalized || normalized.startsWith('.neurcode/'))
+    if (!normalized || !(0, team_memory_path_hygiene_1.isTeamMemoryProjectPath)(normalized))
         return false;
     if (normalized.startsWith('node_modules/'))
         return false;
@@ -490,6 +497,8 @@ function refreshBrainContextFromWorkspace(cwd, scope, options) {
 function recordBrainProgressEvent(cwd, scope, event) {
     const key = scopeKey(scope);
     if (!key)
+        return;
+    if (event.filePath && !(0, team_memory_path_hygiene_1.isTeamMemoryProjectPath)(event.filePath))
         return;
     const store = readStore(cwd);
     const scopeStore = ensureScopeStore(store, key, scope);

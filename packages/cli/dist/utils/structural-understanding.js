@@ -48,6 +48,10 @@ exports.STRUCTURAL_UNDERSTANDING_SCHEMA_VERSION = 'neurcode.structural-understan
 exports.CONSEQUENCE_UNDERSTANDING_SCHEMA_VERSION = 'neurcode.consequence-understanding.v1';
 const TS_LIKE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i;
 const SKIP_DIR = /^(node_modules|\.git|dist|build|out|coverage|\.next|vendor)$/i;
+const REUSE_MIN_TOKEN_COUNT = 12;
+const REUSE_TOKEN_SHINGLE_SIZE = 5;
+const REUSE_TOKEN_OVERLAP_THRESHOLD = 0.86;
+const REUSE_MAX_FINDINGS = 20;
 const EFFECT_REGISTRY = [
     {
         category: 'filesystem-write',
@@ -197,6 +201,27 @@ function emptyConsequenceUnderstanding(generatedAt, reason = null) {
     };
     return { ...core, artifactHash: hash(consequenceHashInput(core)) };
 }
+function emptyRepoSymbolIndexSummary() {
+    return {
+        schemaVersion: 'neurcode.repo-symbol-index.v1',
+        language: 'typescript/javascript',
+        modelUsed: false,
+        sourceUploaded: false,
+        sourceStored: false,
+        indexedFileCount: 0,
+        indexedSymbolCount: 0,
+        exportedSymbolCount: 0,
+        localFunctionCount: 0,
+        methodCount: 0,
+        classCount: 0,
+        changedCandidateCount: 0,
+        unsupportedLanguages: ['python'],
+        indexHash: hash('empty-repo-symbol-index'),
+        fingerprintAlgorithm: 'typescript-scanner-normalized-token-shingles-v1',
+        signatureAlgorithm: 'name-insensitive-kind-arity-param-return-shape-v1',
+        provenance: 'repo-symbol-index',
+    };
+}
 function none(projectRoot, diffFiles, reason, generatedAt, suppressedArtifacts = []) {
     const core = {
         schemaVersion: exports.STRUCTURAL_UNDERSTANDING_SCHEMA_VERSION,
@@ -222,6 +247,8 @@ function none(projectRoot, diffFiles, reason, generatedAt, suppressedArtifacts =
         testReferences: [],
         digest: emptyDigest(generatedAt),
         consequenceUnderstanding: emptyConsequenceUnderstanding(generatedAt, reason),
+        repoSymbolIndex: emptyRepoSymbolIndexSummary(),
+        reuseFindings: [],
         planAlignment: null,
         boundaryImpact: [],
         limitations: commonLimitations(),
@@ -236,7 +263,7 @@ function privacyBlock() {
         diffStored: false,
         modelUsed: false,
         factsOnly: true,
-        outputContains: ['repo-relative paths', 'symbol names', 'line numbers', 'import targets', 'owner tokens', 'hashes'],
+        outputContains: ['repo-relative paths', 'symbol names', 'line numbers', 'import targets', 'owner tokens', 'hashes', 'signature hashes', 'token fingerprints'],
         outputOmits: ['source text', 'diff hunks', 'patch content', 'shell command bodies', 'model judgments'],
     };
 }
@@ -260,6 +287,8 @@ function provenanceMap() {
         consequenceUnderstanding: 'typescript-checker',
         planAlignment: 'session-plan',
         boundaryImpact: 'codeowners-profile',
+        repoSymbolIndex: 'repo-symbol-index',
+        reuseFindings: 'repo-symbol-index',
     };
 }
 function changedFileFacts(diffFiles) {
@@ -268,7 +297,7 @@ function changedFileFacts(diffFiles) {
         changeType: file.changeType,
         addedLines: file.addedLines || 0,
         removedLines: file.removedLines || 0,
-        provenance: 'git-diff',
+        provenance: file.provenance ?? 'git-diff',
     })).sort((a, b) => a.path.localeCompare(b.path));
 }
 function importEdgeFacts(diffFiles, suppressedArtifacts = []) {
@@ -925,6 +954,501 @@ function collectDeclarations(sourceFile, checker, projectRoot) {
     };
     ts.forEachChild(sourceFile, visit);
     return out;
+}
+function isFunctionLikeVariableDeclaration(node) {
+    return ts.isVariableDeclaration(node) &&
+        Boolean(node.initializer && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)));
+}
+function functionLikeVariableInitializer(node) {
+    if (!ts.isVariableDeclaration(node))
+        return null;
+    const initializer = node.initializer;
+    return initializer && (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer))
+        ? initializer
+        : null;
+}
+function reusableKind(node) {
+    if (ts.isClassDeclaration(node))
+        return 'class';
+    if (ts.isMethodDeclaration(node))
+        return 'method';
+    if (ts.isFunctionDeclaration(node) || isFunctionLikeVariableDeclaration(node))
+        return 'function';
+    return null;
+}
+function enclosingClassDeclaration(node) {
+    let current = node.parent;
+    while (current) {
+        if (ts.isClassDeclaration(current))
+            return current;
+        current = current.parent;
+    }
+    return null;
+}
+function isTopLevelReusableDeclaration(node) {
+    if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) {
+        return ts.isSourceFile(node.parent);
+    }
+    if (ts.isVariableDeclaration(node)) {
+        return Boolean(node.parent &&
+            ts.isVariableDeclarationList(node.parent) &&
+            node.parent.parent &&
+            ts.isVariableStatement(node.parent.parent) &&
+            ts.isSourceFile(node.parent.parent.parent));
+    }
+    return false;
+}
+function isExportedReusableDeclaration(node) {
+    if (isExportedDeclaration(node))
+        return true;
+    if (ts.isMethodDeclaration(node)) {
+        const parentClass = enclosingClassDeclaration(node);
+        return Boolean(parentClass && isExportedDeclaration(parentClass));
+    }
+    return false;
+}
+function callableParameters(node) {
+    if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node))
+        return Array.from(node.parameters);
+    const initializer = functionLikeVariableInitializer(node);
+    if (initializer)
+        return Array.from(initializer.parameters);
+    return [];
+}
+function callableReturnTypeNode(node) {
+    if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node))
+        return node.type ?? null;
+    const initializer = functionLikeVariableInitializer(node);
+    if (initializer)
+        return initializer.type ?? null;
+    return null;
+}
+function propertyNameText(name) {
+    if (!name)
+        return null;
+    if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name))
+        return name.text;
+    if (ts.isPrivateIdentifier(name))
+        return name.text;
+    return null;
+}
+function typeShape(node) {
+    if (!node)
+        return 'implicit';
+    switch (node.kind) {
+        case ts.SyntaxKind.StringKeyword: return 'string';
+        case ts.SyntaxKind.NumberKeyword: return 'number';
+        case ts.SyntaxKind.BooleanKeyword: return 'boolean';
+        case ts.SyntaxKind.VoidKeyword: return 'void';
+        case ts.SyntaxKind.NullKeyword: return 'null';
+        case ts.SyntaxKind.UndefinedKeyword: return 'undefined';
+        case ts.SyntaxKind.AnyKeyword: return 'any';
+        case ts.SyntaxKind.UnknownKeyword: return 'unknown';
+        case ts.SyntaxKind.NeverKeyword: return 'never';
+        case ts.SyntaxKind.ObjectKeyword: return 'object';
+        case ts.SyntaxKind.ArrayType: return 'array';
+        case ts.SyntaxKind.TupleType: return 'tuple';
+        case ts.SyntaxKind.TypeLiteral: return 'object-literal';
+        case ts.SyntaxKind.UnionType: return 'union';
+        case ts.SyntaxKind.IntersectionType: return 'intersection';
+        case ts.SyntaxKind.FunctionType: return 'function';
+        case ts.SyntaxKind.LiteralType: return 'literal';
+        case ts.SyntaxKind.ParenthesizedType: return ts.isParenthesizedTypeNode(node) ? typeShape(node.type) : 'parenthesized';
+        case ts.SyntaxKind.TypePredicate: return 'predicate';
+        default:
+            if (ts.isTypeReferenceNode(node)) {
+                const name = node.typeName.getText(node.getSourceFile()).toLowerCase();
+                if (name === 'promise')
+                    return 'promise';
+                if (name === 'array' || name === 'readonlyarray')
+                    return 'array';
+                if (name === 'record' || name === 'map' || name === 'set' || name === 'weakmap' || name === 'weakset')
+                    return 'collection';
+                return 'reference';
+            }
+            return 'other';
+    }
+}
+function parameterShape(param) {
+    const rest = param.dotDotDotToken ? 'rest' : 'value';
+    const optional = param.questionToken || param.initializer ? 'optional' : 'required';
+    return `${rest}:${optional}:${typeShape(param.type)}`;
+}
+function classMemberShapes(node) {
+    const shapes = [];
+    for (const member of node.members) {
+        const name = propertyNameText(member.name) ?? 'anonymous';
+        if (ts.isConstructorDeclaration(member)) {
+            shapes.push(`constructor:${member.parameters.length}`);
+        }
+        else if (ts.isMethodDeclaration(member)) {
+            shapes.push(`method:${name}:${member.parameters.length}:${typeShape(member.type)}`);
+        }
+        else if (ts.isPropertyDeclaration(member)) {
+            shapes.push(`property:${name}:${typeShape(member.type)}`);
+        }
+        else if (ts.isGetAccessor(member)) {
+            shapes.push(`get:${name}:${typeShape(member.type)}`);
+        }
+        else if (ts.isSetAccessor(member)) {
+            shapes.push(`set:${name}:${member.parameters.length}`);
+        }
+    }
+    return uniqueSorted(shapes);
+}
+function signatureShapeForDeclaration(node, kind) {
+    if (kind === 'class' && ts.isClassDeclaration(node)) {
+        const members = classMemberShapes(node);
+        const constructor = node.members.find(ts.isConstructorDeclaration);
+        const paramCount = constructor ? constructor.parameters.length : 0;
+        return {
+            shape: `class|ctor=${paramCount}|members=${members.join(',')}`,
+            paramCount,
+            memberCount: members.length,
+            returnShape: null,
+        };
+    }
+    const params = callableParameters(node);
+    const returnShape = typeShape(callableReturnTypeNode(node) ?? undefined);
+    return {
+        shape: `${kind}|params=${params.map(parameterShape).join(',')}|return=${returnShape}`,
+        paramCount: params.length,
+        memberCount: 0,
+        returnShape,
+    };
+}
+function normalizedTokensForNode(node) {
+    const sourceFile = node.getSourceFile();
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, node.getText(sourceFile));
+    const tokens = [];
+    let token = scanner.scan();
+    while (token !== ts.SyntaxKind.EndOfFileToken) {
+        if (token === ts.SyntaxKind.Identifier || token === ts.SyntaxKind.PrivateIdentifier) {
+            tokens.push('ID');
+        }
+        else if (token === ts.SyntaxKind.StringLiteral ||
+            token === ts.SyntaxKind.NumericLiteral ||
+            token === ts.SyntaxKind.BigIntLiteral ||
+            token === ts.SyntaxKind.RegularExpressionLiteral ||
+            token === ts.SyntaxKind.FirstTemplateToken ||
+            token === ts.SyntaxKind.TemplateHead ||
+            token === ts.SyntaxKind.TemplateMiddle ||
+            token === ts.SyntaxKind.TemplateTail) {
+            tokens.push('LIT');
+        }
+        else {
+            tokens.push(ts.tokenToString(token) ?? ts.SyntaxKind[token] ?? String(token));
+        }
+        token = scanner.scan();
+    }
+    return tokens;
+}
+function tokenShingles(tokens) {
+    const out = new Set();
+    if (tokens.length < REUSE_TOKEN_SHINGLE_SIZE)
+        return out;
+    for (let index = 0; index <= tokens.length - REUSE_TOKEN_SHINGLE_SIZE; index += 1) {
+        out.add(hash(tokens.slice(index, index + REUSE_TOKEN_SHINGLE_SIZE).join(' '), 16));
+    }
+    return out;
+}
+function shingleOverlap(left, right) {
+    if (left.size === 0 || right.size === 0)
+        return 0;
+    let intersection = 0;
+    for (const item of left) {
+        if (right.has(item))
+            intersection += 1;
+    }
+    const union = left.size + right.size - intersection;
+    return union > 0 ? intersection / union : 0;
+}
+function symbolRef(entry) {
+    return {
+        file: entry.file,
+        name: entry.name,
+        kind: entry.kind,
+        exported: entry.exported,
+        local: entry.local,
+        signatureHash: entry.signatureHash,
+        tokenFingerprintHash: entry.tokenFingerprintHash,
+        tokenShingleSetHash: entry.tokenShingleSetHash,
+        paramCount: entry.paramCount,
+        memberCount: entry.memberCount,
+        returnShape: entry.returnShape,
+        provenance: 'repo-symbol-index',
+    };
+}
+function reuseEntryFromDeclaration(decl, action) {
+    const kind = reusableKind(decl.node);
+    if (!kind)
+        return null;
+    const topLevel = isTopLevelReusableDeclaration(decl.node);
+    const exported = isExportedReusableDeclaration(decl.node);
+    const local = !exported;
+    if (!exported && kind === 'method')
+        return null;
+    if (!exported && !topLevel && kind !== 'function')
+        return null;
+    const signature = signatureShapeForDeclaration(decl.node, kind);
+    const normalizedTokens = normalizedTokensForNode(decl.node);
+    const shingles = tokenShingles(normalizedTokens);
+    const tokenFingerprintHash = normalizedTokens.length >= REUSE_MIN_TOKEN_COUNT
+        ? hash(normalizedTokens.join(' '), 24)
+        : null;
+    const tokenShingleSetHash = shingles.size > 0 ? hash([...shingles].sort(), 24) : null;
+    return {
+        file: decl.file,
+        name: decl.name,
+        kind,
+        exported,
+        local,
+        signatureHash: hash(signature.shape, 24),
+        tokenFingerprintHash,
+        tokenShingleSetHash,
+        paramCount: signature.paramCount,
+        memberCount: signature.memberCount,
+        returnShape: signature.returnShape,
+        provenance: 'repo-symbol-index',
+        action,
+        topLevel,
+        signatureShape: signature.shape,
+        normalizedTokens,
+        tokenShingles: shingles,
+        declaration: decl.node,
+    };
+}
+function highInformationSignature(entry) {
+    if (entry.kind === 'class')
+        return entry.memberCount >= 2 || entry.paramCount >= 2;
+    if (entry.paramCount >= 2)
+        return true;
+    if (entry.returnShape && !['implicit', 'void', 'any', 'unknown'].includes(entry.returnShape)) {
+        return entry.paramCount >= 1;
+    }
+    return false;
+}
+function confidenceRank(confidence) {
+    return confidence === 'high' ? 0 : 1;
+}
+function matchRank(matchType) {
+    switch (matchType) {
+        case 'signature_token_fingerprint_match': return 0;
+        case 'token_fingerprint_match': return 1;
+        case 'exported_name_collision': return 2;
+        case 'normalized_signature_match': return 3;
+        default: return 9;
+    }
+}
+function mergeReuseFinding(current, next) {
+    if (!current)
+        return next;
+    const reasonCodes = uniqueSorted([...current.reasonCodes, ...next.reasonCodes]);
+    const tokenOverlap = Math.max(current.evidence.tokenOverlap ?? 0, next.evidence.tokenOverlap ?? 0);
+    const signature = current.evidence.signatureHash ?? next.evidence.signatureHash;
+    const tokenFingerprint = current.evidence.tokenFingerprintHash ?? next.evidence.tokenFingerprintHash;
+    const tokenShingle = current.evidence.tokenShingleSetHash ?? next.evidence.tokenShingleSetHash;
+    const matchType = reasonCodes.includes('same_normalized_signature') &&
+        (reasonCodes.includes('same_normalized_token_fingerprint') || reasonCodes.includes('high_token_shingle_overlap'))
+        ? 'signature_token_fingerprint_match'
+        : reasonCodes.includes('same_normalized_token_fingerprint') || reasonCodes.includes('high_token_shingle_overlap')
+            ? 'token_fingerprint_match'
+            : reasonCodes.includes('exported_symbol_name_collision')
+                ? 'exported_name_collision'
+                : 'normalized_signature_match';
+    const confidence = matchType === 'signature_token_fingerprint_match' ||
+        reasonCodes.includes('same_normalized_token_fingerprint') ||
+        reasonCodes.includes('exported_symbol_name_collision')
+        ? 'high'
+        : 'medium';
+    return {
+        ...current,
+        matchType,
+        confidence,
+        reasonCodes,
+        evidence: {
+            ...current.evidence,
+            signatureHash: signature,
+            tokenFingerprintHash: tokenFingerprint,
+            tokenShingleSetHash: tokenShingle,
+            tokenOverlap: tokenOverlap > 0 ? Number(tokenOverlap.toFixed(3)) : null,
+        },
+        message: reuseFindingMessage(current.changed, current.existing, matchType),
+    };
+}
+function reuseFindingMessage(changed, existing, matchType) {
+    const subject = changed.kind === 'class' ? 'class' : changed.kind === 'method' ? 'method' : 'function';
+    const match = matchType === 'signature_token_fingerprint_match'
+        ? 'signature+token fingerprint'
+        : matchType.replace(/_/g, ' ');
+    return `Potential reuse issue: changed ${subject} ${changed.name} resembles existing ${existing.file}#${existing.name}; match type: ${match}; action: review existing helper before merging.`;
+}
+function reuseFindingForPair(changed, existing) {
+    if (changed.file === existing.file)
+        return null;
+    const reasonCodes = [
+        changed.action === 'add' ? 'changed_symbol_added' : 'changed_symbol_modified',
+        'existing_symbol_elsewhere',
+        'typescript_javascript_only',
+    ];
+    let signatureHash = null;
+    let tokenFingerprintHash = null;
+    let tokenShingleSetHash = null;
+    let tokenOverlap = null;
+    if (changed.exported &&
+        existing.exported &&
+        changed.topLevel &&
+        existing.topLevel &&
+        changed.kind === existing.kind &&
+        changed.name === existing.name) {
+        reasonCodes.push('exported_symbol_name_collision');
+    }
+    if (changed.kind === existing.kind &&
+        changed.signatureHash === existing.signatureHash &&
+        highInformationSignature(changed)) {
+        reasonCodes.push('same_normalized_signature');
+        signatureHash = changed.signatureHash;
+    }
+    if (changed.tokenFingerprintHash &&
+        existing.tokenFingerprintHash &&
+        changed.tokenFingerprintHash === existing.tokenFingerprintHash) {
+        reasonCodes.push('same_normalized_token_fingerprint');
+        tokenFingerprintHash = changed.tokenFingerprintHash;
+        tokenShingleSetHash = changed.tokenShingleSetHash;
+        tokenOverlap = 1;
+    }
+    else if (changed.normalizedTokens.length >= REUSE_MIN_TOKEN_COUNT &&
+        existing.normalizedTokens.length >= REUSE_MIN_TOKEN_COUNT) {
+        const overlap = shingleOverlap(changed.tokenShingles, existing.tokenShingles);
+        if (overlap >= REUSE_TOKEN_OVERLAP_THRESHOLD) {
+            reasonCodes.push('high_token_shingle_overlap');
+            tokenShingleSetHash = changed.tokenShingleSetHash;
+            tokenOverlap = Number(overlap.toFixed(3));
+        }
+    }
+    if (!reasonCodes.includes('exported_symbol_name_collision') &&
+        !reasonCodes.includes('same_normalized_signature') &&
+        !reasonCodes.includes('same_normalized_token_fingerprint') &&
+        !reasonCodes.includes('high_token_shingle_overlap')) {
+        return null;
+    }
+    const matchType = reasonCodes.includes('same_normalized_signature') &&
+        (reasonCodes.includes('same_normalized_token_fingerprint') || reasonCodes.includes('high_token_shingle_overlap'))
+        ? 'signature_token_fingerprint_match'
+        : reasonCodes.includes('same_normalized_token_fingerprint') || reasonCodes.includes('high_token_shingle_overlap')
+            ? 'token_fingerprint_match'
+            : reasonCodes.includes('exported_symbol_name_collision')
+                ? 'exported_name_collision'
+                : 'normalized_signature_match';
+    const confidence = matchType === 'signature_token_fingerprint_match' ||
+        reasonCodes.includes('same_normalized_token_fingerprint') ||
+        reasonCodes.includes('exported_symbol_name_collision')
+        ? 'high'
+        : 'medium';
+    const changedRef = symbolRef(changed);
+    const existingRef = symbolRef(existing);
+    return {
+        schemaVersion: 'neurcode.reuse-finding.v1',
+        severity: 'warn',
+        advisory: true,
+        hardBlock: false,
+        changed: changedRef,
+        existing: existingRef,
+        matchType,
+        confidence,
+        reasonCodes: uniqueSorted(reasonCodes),
+        evidence: {
+            signatureHash,
+            tokenFingerprintHash,
+            tokenShingleSetHash,
+            tokenOverlap,
+            changedNormalizedTokenCount: changed.normalizedTokens.length,
+            existingNormalizedTokenCount: existing.normalizedTokens.length,
+        },
+        action: 'review_existing_helper_before_merging',
+        message: reuseFindingMessage(changedRef, existingRef, matchType),
+        provenance: 'repo-symbol-index',
+    };
+}
+function buildReuseDetection(input) {
+    const entries = [];
+    const changedActionByKey = new Map(input.targets.map((target) => [
+        symbolKey(target.file, target.kind, target.name),
+        target.action,
+    ]));
+    const changedCandidates = [];
+    for (const declarations of input.declarationsByFile.values()) {
+        for (const decl of declarations) {
+            const key = symbolKey(decl.file, decl.kind, decl.name);
+            const changedAction = changedActionByKey.get(key);
+            if (changedAction === 'delete')
+                continue;
+            const entry = reuseEntryFromDeclaration(decl, changedAction ?? 'existing');
+            if (!entry)
+                continue;
+            entries.push(entry);
+            if (changedActionByKey.has(key))
+                changedCandidates.push(entry);
+        }
+    }
+    const byPair = new Map();
+    for (const changed of changedCandidates) {
+        for (const existing of entries) {
+            if (existing === changed)
+                continue;
+            const finding = reuseFindingForPair(changed, existing);
+            if (!finding)
+                continue;
+            const key = `${finding.changed.file}\0${finding.changed.name}\0${finding.existing.file}\0${finding.existing.name}`;
+            byPair.set(key, mergeReuseFinding(byPair.get(key), finding));
+        }
+    }
+    const sourceFileCount = input.program.getSourceFiles()
+        .filter((file) => !file.isDeclarationFile && !file.fileName.includes('node_modules'))
+        .length;
+    const indexHash = hash(entries
+        .map((entry) => ({
+        file: entry.file,
+        name: entry.name,
+        kind: entry.kind,
+        exported: entry.exported,
+        signatureHash: entry.signatureHash,
+        tokenFingerprintHash: entry.tokenFingerprintHash,
+        tokenShingleSetHash: entry.tokenShingleSetHash,
+    }))
+        .sort((a, b) => a.file.localeCompare(b.file) ||
+        a.name.localeCompare(b.name) ||
+        a.kind.localeCompare(b.kind)));
+    const reuseFindings = [...byPair.values()]
+        .sort((a, b) => confidenceRank(a.confidence) - confidenceRank(b.confidence) ||
+        matchRank(a.matchType) - matchRank(b.matchType) ||
+        a.changed.file.localeCompare(b.changed.file) ||
+        a.changed.name.localeCompare(b.changed.name) ||
+        a.existing.file.localeCompare(b.existing.file) ||
+        a.existing.name.localeCompare(b.existing.name))
+        .slice(0, REUSE_MAX_FINDINGS);
+    return {
+        repoSymbolIndex: {
+            schemaVersion: 'neurcode.repo-symbol-index.v1',
+            language: 'typescript/javascript',
+            modelUsed: false,
+            sourceUploaded: false,
+            sourceStored: false,
+            indexedFileCount: sourceFileCount,
+            indexedSymbolCount: entries.length,
+            exportedSymbolCount: entries.filter((entry) => entry.exported).length,
+            localFunctionCount: entries.filter((entry) => entry.local && entry.kind === 'function').length,
+            methodCount: entries.filter((entry) => entry.kind === 'method').length,
+            classCount: entries.filter((entry) => entry.kind === 'class').length,
+            changedCandidateCount: changedCandidates.length,
+            unsupportedLanguages: ['python'],
+            indexHash,
+            fingerprintAlgorithm: 'typescript-scanner-normalized-token-shingles-v1',
+            signatureAlgorithm: 'name-insensitive-kind-arity-param-return-shape-v1',
+            provenance: 'repo-symbol-index',
+        },
+        reuseFindings,
+    };
 }
 function smallestContaining(declarations, line) {
     return declarations
@@ -2243,6 +2767,11 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
         suppressedArtifacts,
         profile,
     });
+    const reuseDetection = buildReuseDetection({
+        program,
+        declarationsByFile,
+        targets: [...targets.values()],
+    });
     const core = {
         schemaVersion: exports.STRUCTURAL_UNDERSTANDING_SCHEMA_VERSION,
         generatedAt,
@@ -2273,10 +2802,14 @@ function buildStructuralUnderstanding(projectRoot, diffFiles, options = {}) {
         testReferences,
         digest,
         consequenceUnderstanding,
+        repoSymbolIndex: reuseDetection.repoSymbolIndex,
+        reuseFindings: reuseDetection.reuseFindings,
         planAlignment,
         boundaryImpact,
         limitations: [
             ...commonLimitations(),
+            'Reuse governance is deterministic and TypeScript/JavaScript-first; Python and other languages are not enforced in V1.',
+            'Reuse findings are advisory WARN signals, not hard blocks; token fingerprints and normalized signatures can miss semantic duplicates or produce review noise.',
             ...(changedPackageNames.length
                 ? [
                     `Cross-package references resolved for direct importers of [${changedPackageNames.join(', ')}] across ${consumerPackages.length} consumer package(s). Transitive re-export chains and consumers that do not import the changed package directly may be under-counted.`,

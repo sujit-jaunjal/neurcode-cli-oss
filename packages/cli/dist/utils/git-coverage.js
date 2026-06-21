@@ -38,6 +38,7 @@ function isAdmissionSupportArtifactPath(path) {
         || normalized.startsWith('.neurcode/evidence/')
         || normalized.startsWith('.neurcode/executions/')
         || normalized.startsWith('.neurcode/runtime-events/')
+        || normalized.startsWith('.neurcode/cache/')
         || normalized.startsWith('.neurcode/brain/cache/')
         || normalized === '.neurcode/profile.json'
         || normalized === '.neurcode/active-session.json'
@@ -46,7 +47,13 @@ function isAdmissionSupportArtifactPath(path) {
         || normalized === '.neurcode/runtime-outbox.lock'
         || normalized === '.neurcode/pilot-validation.latest.json'
         || normalized === '.claude/settings.json'
-        || normalized === '.claude/settings.local.json';
+        || normalized === '.claude/settings.local.json'
+        || normalized === '.cursor/mcp.json'
+        || normalized === '.cursor/rules/neurcode.mdc'
+        || normalized === '.cursor/rules/neurcode-session-scope.mdc'
+        || normalized === '.github/hooks/neurcode.json'
+        || normalized === '.githooks/pre-commit'
+        || normalized === '.githooks/pre-push';
 }
 const NEURCODE_GITIGNORE_HYGIENE_BLOCK = [
     '# Neurcode runtime vs source separation',

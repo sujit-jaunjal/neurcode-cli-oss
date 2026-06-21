@@ -269,7 +269,7 @@ function buildAgentSetupSnippet(input) {
                     version: 1,
                     hooks: {
                         UserPromptSubmit: [{ type: 'command', command: 'neurcode session-hook start' }],
-                        PreToolUse: [{ type: 'command', command: 'neurcode session-hook check' }],
+                        PreToolUse: [{ type: 'command', command: 'neurcode session-hook check --trusted-adapter copilot-hooks --trusted-timing before_write' }],
                         Stop: [{ type: 'command', command: 'neurcode session-hook finish' }],
                     },
                 }, null, 2),

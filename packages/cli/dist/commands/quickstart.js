@@ -150,10 +150,13 @@ async function quickstartCommand(options = {}) {
     printStep(4, 'Review findings', 'BLOCKING findings must be resolved. ADVISORY findings are informational.\n' +
         '  Structural rules (SR001-SR010) are deterministic: same code = same result, always.');
     printStep(5, 'Iterate', 'Export remediation context if needed, apply external edits, then re-run verify. When passing, the PR is governance-cleared.');
-    // 5. Explain local-only mode
-    printBanner('Local-Only Mode (No Network Required)');
-    console.log(chalk_1.default.dim('\n  `neurcode verify --local-only` runs deterministic structural analysis'));
-    console.log(chalk_1.default.dim('  without network access. It uses AST-backed rules to detect:'));
+    // 5. Explain the supported offline policy engine. `--local-only` remains a
+    // compatibility spelling, but both routes execute this same truthful path.
+    printBanner('Offline Policy Verification (No Network Required)');
+    console.log(chalk_1.default.dim('\n  `neurcode verify --ci --policy-only --head` runs the supported local policy'));
+    console.log(chalk_1.default.dim('  and structural engine without network access. It evaluates tracked and untracked'));
+    console.log(chalk_1.default.dim('  working-tree files, reports coverage, and never turns empty/partial analysis into PASS.'));
+    console.log(chalk_1.default.dim('\n  AST-backed rules include:'));
     console.log(chalk_1.default.dim('\n    SR001 - Swallowed async rejections'));
     console.log(chalk_1.default.dim('    SR002 - Missing error propagation'));
     console.log(chalk_1.default.dim('    SR003 - Timer/resource leaks'));
@@ -162,7 +165,8 @@ async function quickstartCommand(options = {}) {
     console.log(chalk_1.default.dim('  These findings are:'));
     console.log(chalk_1.default.dim('    - Deterministic: same code always produces same finding'));
     console.log(chalk_1.default.dim('    - Reproducible: identical on any machine, any time'));
-    console.log(chalk_1.default.dim('    - No LLM involved: pure AST analysis\n'));
+    console.log(chalk_1.default.dim('    - No LLM involved: pure AST and compiled-policy analysis'));
+    console.log(chalk_1.default.dim('    - Advisory findings remain advisory; unsupported or skipped analysis fails closed\n'));
     // 6. Next commands - intent-first lifecycle order (matches welcome banner +
     //    `neurcode home` so the recommended flow is coherent across surfaces).
     printBanner('Recommended Next Commands');
@@ -173,7 +177,8 @@ async function quickstartCommand(options = {}) {
     console.log(chalk_1.default.cyan('       neurcode whoami\n'));
     console.log(chalk_1.default.bold.white('  Local governance lifecycle:'));
     console.log(chalk_1.default.cyan('       neurcode start') + chalk_1.default.dim(' "what you intend to change"'));
-    console.log(chalk_1.default.cyan('       neurcode verify --local-only --head --require-intent-runtime'));
+    console.log(chalk_1.default.cyan('       neurcode verify --ci --policy-only --head'));
+    console.log(chalk_1.default.dim('       # --local-only is retained as an offline compatibility alias'));
     console.log(chalk_1.default.cyan('       neurcode home'));
     console.log(chalk_1.default.cyan('       neurcode replay --html /tmp/replay-report.html\n'));
     console.log(chalk_1.default.bold.green('  Quickstart complete. Connected onboarding starts with login, then init.\n'));

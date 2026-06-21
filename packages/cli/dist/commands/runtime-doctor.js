@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runtimeDoctorCommand = runtimeDoctorCommand;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
+const fs_1 = require("fs");
+const path_1 = require("path");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const v0_governance_1 = require("../utils/v0-governance");
@@ -9,6 +11,7 @@ const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
 const hook_heartbeat_1 = require("../utils/hook-heartbeat");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
+const profile_drift_recovery_1 = require("../utils/profile-drift-recovery");
 /** True when the goal produced an over-broad approval scope (e.g. `**`). */
 function hasOverBroadApprovalScope(session) {
     const globs = session.contract?.approvalRequiredGlobs ?? [];
@@ -48,17 +51,140 @@ function printCheck(check) {
 function compatibilityModeLabel(value) {
     return value.replace(/_/g, ' ');
 }
+function parseCodeownersOwnerTokens(content) {
+    const owners = new Set();
+    for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.replace(/\s+#.*$/, '').trim();
+        if (!line || line.startsWith('#'))
+            continue;
+        const parts = line.split(/\s+/);
+        for (const owner of parts.slice(1)) {
+            if (owner.startsWith('@'))
+                owners.add(owner);
+        }
+    }
+    return Array.from(owners).sort();
+}
+function readJson(path) {
+    try {
+        if (!(0, fs_1.existsSync)(path))
+            return null;
+        const parsed = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    }
+    catch {
+        return null;
+    }
+}
+function ownerTokensFromMappingCache(data) {
+    if (!data)
+        return [];
+    const tokens = new Set();
+    const bindings = data.ownerRoleBindings || data.policy?.ownerRoleBindings || data.policy?.owner_role_bindings;
+    if (bindings && typeof bindings === 'object' && !Array.isArray(bindings)) {
+        for (const key of Object.keys(bindings)) {
+            if (key.startsWith('@'))
+                tokens.add(key);
+        }
+    }
+    const entries = Array.isArray(data.entries)
+        ? data.entries
+        : Array.isArray(data.directoryEntries)
+            ? data.directoryEntries
+            : Array.isArray(data.summary)
+                ? data.summary
+                : [];
+    for (const entry of entries) {
+        const token = typeof entry?.ownerToken === 'string'
+            ? entry.ownerToken
+            : typeof entry?.owner_token === 'string'
+                ? entry.owner_token
+                : '';
+        if (token.startsWith('@'))
+            tokens.add(token);
+    }
+    const mappedOwnerTokens = Array.isArray(data.mappedOwnerTokens) ? data.mappedOwnerTokens : [];
+    for (const token of mappedOwnerTokens) {
+        if (typeof token === 'string' && token.startsWith('@'))
+            tokens.add(token);
+    }
+    return Array.from(tokens).sort();
+}
+function inspectAuthorityPosture(repoRoot, connected) {
+    const codeownersCandidates = ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEOWNERS'];
+    const ownerTokens = new Set();
+    let codeownersPath = null;
+    for (const rel of codeownersCandidates) {
+        const path = (0, path_1.join)(repoRoot, rel);
+        if (!(0, fs_1.existsSync)(path))
+            continue;
+        codeownersPath ??= rel;
+        for (const owner of parseCodeownersOwnerTokens((0, fs_1.readFileSync)(path, 'utf8')))
+            ownerTokens.add(owner);
+    }
+    const cacheCandidates = [
+        (0, path_1.join)(repoRoot, '.neurcode', 'authority-policy.json'),
+        (0, path_1.join)(repoRoot, '.neurcode', 'authority-mappings.json'),
+        (0, path_1.join)(repoRoot, '.neurcode', 'codeowners-directory.json'),
+    ];
+    let cachePath = null;
+    let cache = null;
+    for (const candidate of cacheCandidates) {
+        const data = readJson(candidate);
+        if (!data)
+            continue;
+        cachePath = candidate;
+        cache = data;
+        break;
+    }
+    const owners = Array.from(ownerTokens).sort();
+    const mappedOwnerTokens = ownerTokensFromMappingCache(cache).filter((owner) => owners.includes(owner));
+    const mapped = new Set(mappedOwnerTokens);
+    const unmappedOwnerTokens = owners.filter((owner) => !mapped.has(owner));
+    const strictDirectoryMode = Boolean(cache?.strictDirectoryMode || cache?.policy?.strictDirectoryMode || cache?.policy?.strict_directory_mode);
+    return {
+        codeownersPath,
+        ownerTokens: owners,
+        mappedOwnerTokens,
+        unmappedOwnerTokens,
+        strictDirectoryMode,
+        cachePath,
+        source: owners.length === 0
+            ? 'no_codeowners'
+            : cache
+                ? 'local_cache'
+                : connected
+                    ? 'dashboard_pairing'
+                    : 'unpaired',
+    };
+}
 function runtimeDoctorCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
     const activation = (0, v0_governance_1.inspectClaudeActivation)(repoRoot);
     const copilotActivation = (0, v0_governance_1.inspectCopilotActivation)(repoRoot);
     const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
+    const profileAction = (0, v0_governance_1.profileFreshnessActionForSession)(staleness, activeSession?.profileHash);
+    const pendingProfileDecisions = activeSession
+        ? (0, profile_drift_recovery_1.pendingProfileDriftDecisions)(activeSession)
+        : [];
+    const profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(staleness, profileAction, {
+        sessionProfileHash: activeSession?.profileHash,
+        ...(profileAction === 'session_restart_required'
+            ? {
+                recoveryReason: 'active_session_profile_changed',
+                recoveryCommand: profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND,
+                unresolvedHumanDecisions: pendingProfileDecisions.length > 0,
+            }
+            : {}),
+    });
     const cursorScopeRules = (0, session_allowlist_rules_1.inspectSessionScopeRules)(repoRoot, activeSession?.sessionId || null);
     const governanceConfig = (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot);
     const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
     const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
+    const privacyAudit = (0, runtime_outbox_1.auditRuntimePrivacy)(repoRoot);
     const heartbeat = (0, hook_heartbeat_1.readHookHeartbeat)(repoRoot);
+    const authorityPosture = inspectAuthorityPosture(repoRoot, Boolean(connection));
     const h = activation.hooks;
     const ch = copilotActivation.hooks;
     const launcherState = activeSession ? (0, agent_session_launcher_1.latestAgentLauncherState)(activeSession) : null;
@@ -77,6 +203,24 @@ function runtimeDoctorCommand(options = {}) {
             ? `Fresh profile at ${staleness.profilePath} (${staleness.currentProfile.topology.trackedFileCount} tracked files).`
             : `${staleness.status}: ${staleness.reasons.join('; ') || 'profile needs refresh'}.`,
         recommendation: staleness.status === 'fresh' ? undefined : 'Run `neurcode activate claude` or `neurcode activate copilot` to refresh it.',
+    });
+    checks.push({
+        id: 'session_profile_compatibility',
+        label: 'Active session profile compatibility',
+        status: !activeSession
+            ? 'skip'
+            : profileFreshness.sessionCompatibility === 'compatible'
+                ? 'pass'
+                : 'fail',
+        message: !activeSession
+            ? 'No active local governance session is present.'
+            : profileFreshness.sessionCompatibility === 'compatible'
+                ? `Session ${activeSession.sessionId} matches current profile ${profileFreshness.currentProfileHash.slice(0, 12)}.`
+                : `Enforcement stopped because session profile ${activeSession.profileHash.slice(0, 12)} differs from current profile ${profileFreshness.currentProfileHash.slice(0, 12)}. ` +
+                    `${pendingProfileDecisions.length} unresolved human decision${pendingProfileDecisions.length === 1 ? '' : 's'} prevent automatic recovery.`,
+        recommendation: activeSession && profileFreshness.sessionCompatibility === 'incompatible'
+            ? `Run exactly: \`${profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND}\`. The --force flag abandons unresolved operator state; then start a new governed session.`
+            : undefined,
     });
     // ── Claude Code hooks (on-disk correctness) ────────────────────────────────
     // Priority: parse error > stale bare hooks > missing pinned entrypoint > installed > missing.
@@ -288,7 +432,7 @@ function runtimeDoctorCommand(options = {}) {
             ? supervisor?.effectiveStatus === 'running'
                 ? `Supervisor/diff-watch is running for session ${activeSession?.sessionId}; last pass: ${supervisor.state?.lastPass === null ? 'pending' : supervisor.state?.lastPass ? 'yes' : 'no'}.`
                 : activeCapability.supervisorSupported && activeSession
-                    ? 'For Codex/Cursor, run `neurcode agent guard start --supervise --goal "<task>"` or `neurcode agent guard supervise run` before finalizing/committing.'
+                    ? 'For Codex/Cursor, run `neurcode agent guard start codex --goal "Evaluate exact-path runtime governance" --plan "Safe path first; request exact approval for billing boundary" --no-supervise` or `neurcode agent guard supervise run` before finalizing/committing.'
                     : 'Use cooperative `neurcode runtime-adapter event` calls before edits; this host is not a hard pre-write blocker.'
             : undefined,
     });
@@ -310,7 +454,7 @@ function runtimeDoctorCommand(options = {}) {
         recommendation: activeAdapter === 'codex-mcp' || activeAdapter === 'cursor-mcp'
             ? supervisor?.effectiveStatus === 'running'
                 ? 'Keep the supervisor running until finish, then export runtime admission.'
-                : 'Start with `neurcode agent guard start codex --goal "<task>"` or `neurcode agent guard start cursor --goal "<task>"`.'
+                : 'Start with `neurcode agent guard start codex --goal "Evaluate exact-path runtime governance" --plan "Safe path first; request exact approval for billing boundary" --no-supervise` or the same command with `cursor`.'
             : 'Run `neurcode activate codex` or `neurcode activate cursor` to print the workflow commands.',
     });
     checks.push({
@@ -329,7 +473,7 @@ function runtimeDoctorCommand(options = {}) {
         label: 'GitHub Action / runtime admission',
         status: 'skip',
         message: `${actionCapability.adapter} is ${compatibilityModeLabel(actionCapability.compatibilityMode)}: PR-time advisory routing plus admission display when .neurcode-admission records are committed.`,
-        recommendation: 'Run `neurcode admission doctor`, then `neurcode session export-admission <session-id> --explain` before opening a PR with the public Action.',
+        recommendation: 'Run `neurcode admission doctor`, then `neurcode session export-admission --explain` before opening a PR with the public Action.',
     });
     checks.push({
         id: 'governance_config',
@@ -343,6 +487,35 @@ function runtimeDoctorCommand(options = {}) {
         recommendation: governanceConfig.error
             ? 'Fix .neurcode/governance.json. Expected arrays: approvalRequiredGlobs, sensitiveGlobs, safeSupportGlobs, ignoredGlobs; optional planCoherence: off|warn|block; optional localMode: strict|advisory|paused.'
             : undefined,
+    });
+    const ownerPreview = authorityPosture.ownerTokens.slice(0, 5).join(', ');
+    const unmappedPreview = authorityPosture.unmappedOwnerTokens.slice(0, 5).join(', ');
+    checks.push({
+        id: 'approval_authority_posture',
+        label: 'Approval authority posture',
+        status: authorityPosture.ownerTokens.length === 0
+            ? 'skip'
+            : authorityPosture.source === 'local_cache' && authorityPosture.unmappedOwnerTokens.length === 0
+                ? 'pass'
+                : authorityPosture.strictDirectoryMode && authorityPosture.unmappedOwnerTokens.length > 0
+                    ? 'fail'
+                    : 'warn',
+        message: authorityPosture.ownerTokens.length === 0
+            ? 'No CODEOWNERS owner tokens detected locally; exact-path approvals use local/session policy only.'
+            : authorityPosture.source === 'local_cache'
+                ? authorityPosture.unmappedOwnerTokens.length === 0
+                    ? `CODEOWNERS owners are mapped in local authority metadata: ${ownerPreview}.`
+                    : `CODEOWNERS owners detected (${ownerPreview}); unmapped locally: ${unmappedPreview}. Strict enterprise mode ${authorityPosture.strictDirectoryMode ? 'is on' : 'is not proven on locally'}.`
+                : authorityPosture.source === 'dashboard_pairing'
+                    ? `CODEOWNERS owners detected (${ownerPreview}); this repo is dashboard-paired, but local doctor has no authority mapping cache to prove owner bindings.`
+                    : `CODEOWNERS owners detected (${ownerPreview}); this repo is not paired, so Neurcode cannot map owners to workspace users/groups yet.`,
+        recommendation: authorityPosture.ownerTokens.length === 0
+            ? undefined
+            : authorityPosture.source === 'unpaired'
+                ? 'Run `neurcode activate claude --dir .` to pair the repo, then open Runtime Control Plane > Policy & health > CODEOWNERS token bindings.'
+                : authorityPosture.unmappedOwnerTokens.length > 0 || authorityPosture.source === 'dashboard_pairing'
+                    ? `Open Runtime Control Plane > Policy & health > CODEOWNERS token bindings; add ${authorityPosture.unmappedOwnerTokens[0] || authorityPosture.ownerTokens[0]}: owner, admin; then Sync GitHub directory or Link directory entry.`
+                    : undefined,
     });
     checks.push({
         id: 'approval_ux',
@@ -368,12 +541,23 @@ function runtimeDoctorCommand(options = {}) {
                 (dashboardSyncRecovered ? ` Live block/approval transport is separate and recovered at ${transport.lastDeliveredAt}.` : '')
             : 'This repo is not paired with the Neurcode dashboard yet.',
         recommendation: !connection
-            ? 'From Runtime Evidence, copy the activation command or run `neurcode activate claude --connect <token>`.'
+            ? 'From Runtime Evidence, copy the activation command when available, or run `neurcode activate claude --dir .` for local-only activation.'
             : dashboardSyncFailed
                 ? dashboardSyncRecovered
                     ? 'Run `neurcode sync --runtime --json` to refresh bulk evidence metadata after recovery. Live approvals can still be visible while this is pending.'
                     : `Run \`neurcode sync --runtime --json\` and inspect the bulk evidence error${connection.autoSync.lastError ? ` (${connection.autoSync.lastError})` : ''}.`
                 : undefined,
+    });
+    checks.push({
+        id: 'runtime_privacy',
+        label: 'Intent privacy boundary',
+        status: privacyAudit.quarantined > 0 || privacyAudit.rejected > 0
+            ? 'fail'
+            : privacyAudit.migrated > 0
+                ? 'warn'
+                : 'pass',
+        message: `${privacyAudit.entriesScanned} local entr${privacyAudit.entriesScanned === 1 ? 'y' : 'ies'} scanned: ${privacyAudit.safe} safe, ${privacyAudit.migrated} legacy projection${privacyAudit.migrated === 1 ? '' : 's'}, ${privacyAudit.quarantined} quarantined, ${privacyAudit.rejected} rejected.`,
+        recommendation: privacyAudit.nextRecoveryAction,
     });
     checks.push({
         id: 'runtime_transport',
@@ -388,14 +572,16 @@ function runtimeDoctorCommand(options = {}) {
         message: !connection
             ? 'Runtime transport activates after this repo is paired with the dashboard.'
             : transport.health === 'degraded'
-                ? `${transport.deadLetterEvents} source-free event${transport.deadLetterEvents === 1 ? '' : 's'} moved to the local dead-letter queue after bounded delivery attempts.`
+                ? `${transport.deadLetterEvents} source-free event${transport.deadLetterEvents === 1 ? '' : 's'} dead-lettered and ${transport.quarantinedEvents} privacy-rejected event${transport.quarantinedEvents === 1 ? '' : 's'} quarantined locally.`
                 : transport.pendingEvents > 0
                     ? `${transport.pendingEvents} source-free event${transport.pendingEvents === 1 ? '' : 's'} queued locally (${transport.retryingEvents} retrying, ${transport.pendingSessionSnapshots} session snapshot${transport.pendingSessionSnapshots === 1 ? '' : 's'}, ${transport.pendingApprovalAcks} approval acknowledgement${transport.pendingApprovalAcks === 1 ? '' : 's'}).`
                     : transport.lastDeliveredAt
                         ? `Outbox empty. Last cloud delivery: ${transport.lastDeliveredAt}.`
                         : 'Outbox empty. No live runtime event has needed cloud delivery yet.',
         recommendation: transport.health === 'degraded'
-            ? `Inspect the delivery error, then run \`neurcode sync --runtime --retry-dead-letters\`. Last dead-letter error: ${transport.lastDeadLetterError || 'unknown'}`
+            ? transport.quarantinedEvents > 0
+                ? 'Run `neurcode runtime privacy-audit`; generate a new privacy-safe snapshot. Quarantined payload bodies remain local and are never printed or uploaded.'
+                : `Inspect the delivery status, then run \`neurcode sync --runtime --retry-dead-letters\`.`
             : transport.lastError
                 ? `Cloud delivery will retry automatically. Last error: ${transport.lastError}`
                 : transport.lastRecoveredAt
@@ -458,7 +644,9 @@ function runtimeDoctorCommand(options = {}) {
         ok: summary.fail === 0,
         repoRoot,
         profileStatus: staleness.status,
-        restartRequired: liveness.status === 'fail',
+        profileFreshness,
+        restartRequired: liveness.status === 'fail' ||
+            profileFreshness.sessionCompatibility === 'incompatible',
         hooks: {
             installed: h.installed,
             stale: h.stale,
@@ -525,6 +713,8 @@ function runtimeDoctorCommand(options = {}) {
                 outboxHealth: transport.health,
             }
             : null,
+        authorityPosture,
+        privacyAudit,
         checks,
         summary,
     };

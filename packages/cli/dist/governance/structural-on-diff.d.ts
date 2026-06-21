@@ -10,6 +10,17 @@ export interface StructuralOnDiffResult {
     legacyDebtCount: number;
     /** Whether diff-scoped enforcement was active */
     diffScopedEnforcement: boolean;
+    filesRequested: number;
+    filesAnalyzed: number;
+    filesSkipped: Array<{
+        path: string;
+        reasonCode: string;
+    }>;
+    filesUnsupported: Array<{
+        path: string;
+        reasonCode: 'unsupported_language';
+    }>;
+    coveragePosture: 'complete' | 'partial' | 'not_evaluated';
 }
 /**
  * Run the default structural rule set on files touched by the diff.

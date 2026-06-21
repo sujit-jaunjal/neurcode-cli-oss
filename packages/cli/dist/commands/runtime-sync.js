@@ -17,6 +17,9 @@ const runtime_live_1 = require("../utils/runtime-live");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
 const runtime_outbox_2 = require("../utils/runtime-outbox");
 const admission_artifact_1 = require("../utils/admission-artifact");
+const local_repo_brain_1 = require("../utils/local-repo-brain");
+const repo_brain_impact_1 = require("../utils/repo-brain-impact");
+const runtime_privacy_1 = require("../utils/runtime-privacy");
 let chalk;
 try {
     chalk = require('chalk');
@@ -310,8 +313,39 @@ function summarizeOversizedSessionForBulk(session) {
         },
     };
 }
+function collectImpactPathsFromSession(session) {
+    const paths = new Set();
+    for (const event of session.events || []) {
+        if (typeof event.filePath === 'string' && event.filePath.trim()) {
+            paths.add(event.filePath.replace(/\\/g, '/'));
+        }
+    }
+    const target = session.contract?.intentContract?.target;
+    const pathTokens = target && typeof target === 'object' && Array.isArray(target.pathTokens)
+        ? target.pathTokens
+        : [];
+    for (const token of pathTokens) {
+        if (typeof token !== 'string')
+            continue;
+        const normalized = token.trim().replace(/\\/g, '/');
+        if (normalized && (normalized.includes('/') || normalized.includes('.')))
+            paths.add(normalized);
+    }
+    return [...paths].filter((path) => path.includes('/') || path.includes('.')).sort();
+}
+function buildRuntimeSyncImpactSummary(repoRoot, session) {
+    try {
+        const paths = collectImpactPathsFromSession(session);
+        if (paths.length === 0)
+            return null;
+        return (0, repo_brain_impact_1.summarizeImpact)((0, repo_brain_impact_1.buildRepoBrainImpactForRepo)(repoRoot, paths, { autoBuild: false }));
+    }
+    catch {
+        return null;
+    }
+}
 function buildCompactUploadSession(repoRoot, record) {
-    const sanitized = sanitizeForUpload(record.session);
+    const sanitized = (0, runtime_privacy_1.buildCloudSafeRuntimeSession)(record.session);
     let compacted = compactForBulkEvidence(sanitized);
     const bytesBefore = byteSize(sanitized);
     compacted.uploadMetadata = {
@@ -356,6 +390,34 @@ function buildCompactUploadSession(repoRoot, record) {
     if (metadata?.bulkEvidence) {
         metadata.bulkEvidence.bytesAfter = byteSize(compacted);
     }
+    try {
+        const brain = (0, local_repo_brain_1.readLocalRepoBrain)(repoRoot);
+        compacted.repoBrain = brain ? {
+            status: 'found',
+            artifactHash: typeof brain.artifactHash === 'string' ? brain.artifactHash : null,
+            generatedAt: typeof brain.generatedAt === 'string' ? brain.generatedAt : null,
+            declarationsIndexed: typeof brain.summary?.symbolsIndexed === 'number' ? brain.summary.symbolsIndexed : null,
+            sensitiveFilesCount: typeof brain.summary?.sensitiveFiles === 'number' ? brain.summary.sensitiveFiles : null,
+            ownerBoundaryStatus: brain.summary?.ownerBoundaryStatus ?? null,
+            recoveryCommand: 'neurcode brain index',
+        } : {
+            status: 'missing',
+            artifactHash: null,
+            generatedAt: null,
+            declarationsIndexed: null,
+            sensitiveFilesCount: null,
+            ownerBoundaryStatus: null,
+            recoveryCommand: 'neurcode brain index',
+        };
+    }
+    catch { /* never break upload path */ }
+    const impactSummary = buildRuntimeSyncImpactSummary(repoRoot, record.session);
+    if (impactSummary)
+        compacted.impactSummary = impactSummary;
+    const finalMetadata = compacted.uploadMetadata;
+    if (finalMetadata?.bulkEvidence) {
+        finalMetadata.bulkEvidence.bytesAfter = byteSize(compacted);
+    }
     return compacted;
 }
 function buildUploadPayloadFromSessions(repoRoot, sessions) {
@@ -382,6 +444,7 @@ function buildUploadPayloadFromSessions(repoRoot, sessions) {
         sessions,
     };
     assertPayloadHasNoSourceKeys(payload);
+    (0, governance_runtime_1.assertPrivacySafeCloudPayload)(payload);
     return payload;
 }
 function buildRuntimeEvidenceUploadBatches(repoRoot, records) {
@@ -421,7 +484,7 @@ function aggregateRuntimeEvidenceResponses(responses) {
             sessions: [],
             privacy: {
                 sourceUploaded: false,
-                uploadedFields: ['file paths', 'owners', 'verdicts', 'timestamps', 'contracts', 'replay hashes'],
+                uploadedFields: ['intent summaries', 'file paths', 'owners', 'verdicts', 'timestamps', 'structured contracts', 'replay hashes'],
             },
         };
     }
@@ -500,7 +563,9 @@ async function runtimeSyncCommand(options = {}) {
                 ],
                 privacy: {
                     sourceUploaded: false,
-                    uploadedFields: ['file paths', 'owners', 'verdicts', 'timestamps', 'contracts', 'replay hashes'],
+                    promptUploaded: false,
+                    chatUploaded: false,
+                    uploadedFields: ['intent summaries', 'file paths', 'owners', 'verdicts', 'timestamps', 'structured contracts', 'replay hashes'],
                 },
                 payload: dryRunPayload,
                 uploadBatches: summarizeUploadBatches(uploadPayloads),
@@ -518,7 +583,7 @@ async function runtimeSyncCommand(options = {}) {
                 console.log(`Endpoint: /api/v1/runtime/evidence`);
                 console.log(`Selected: ${validRecords.length}`);
                 console.log(`Skipped:  ${result.skipped}`);
-                console.log(chalk.dim('Privacy: source code is not uploaded; session evidence only.'));
+                console.log(chalk.dim('Privacy: raw source, diffs, prompts, chat, and plan prose are excluded from cloud evidence.'));
                 console.log('');
             }
             return;
@@ -607,7 +672,7 @@ async function runtimeSyncCommand(options = {}) {
         if (requeuedDeadLetters > 0) {
             console.log(`DLQ:      ${chalk.yellow(String(requeuedDeadLetters))} event${requeuedDeadLetters === 1 ? '' : 's'} requeued`);
         }
-        console.log(chalk.dim('Privacy: no source code, diffs, or file contents were uploaded.'));
+        console.log(chalk.dim('Privacy: raw source, diffs, prompts, chat, and plan prose were not uploaded.'));
         console.log('');
     }
     catch (error) {

@@ -120,6 +120,28 @@ export interface RuntimeEvidenceUploadResponse {
         uploadedFields: string[];
     };
 }
+export interface AIChangeRecordSignRequest {
+    repoId?: string | null;
+    repoKey?: string | null;
+    sessionId: string;
+    recordHash: string;
+    recordSchemaVersion: string;
+    recordGeneratedAt?: string | null;
+}
+export interface AIChangeRecordVerifyRequest {
+    recordHash?: string | null;
+    receiptId?: string | null;
+    receipt?: Record<string, unknown>;
+}
+export interface AIChangeRecordReceiptResponse {
+    ok: boolean;
+    receipt?: Record<string, unknown>;
+    verification?: Record<string, unknown>;
+    privacy?: {
+        sourceUploaded: false;
+        uploadedFields: string[];
+    };
+}
 export interface RuntimeLiveSessionStatusRequest {
     repo: {
         name: string;
@@ -309,6 +331,45 @@ export interface RuntimeEvidenceSummaryResponse {
     };
 }
 export interface RuntimeOperationsStatusResponse {
+    release?: {
+        schemaVersion: 'neurcode.ops-status.v1' | string;
+        generatedAt: string;
+        api: {
+            version: string;
+            nodeVersion: string;
+            environment: string;
+            buildId: string | null;
+            commit: string | null;
+            deployedAt: string | null;
+        };
+        dashboard: {
+            buildId: string | null;
+            commit: string | null;
+            deployedAt: string | null;
+            appUrl: string;
+        };
+        cli: {
+            latestVersion: string | null;
+            npmPackage: string;
+        };
+        action: {
+            bundleVersion: string | null;
+            bundleCommit: string | null;
+            posture: string;
+        };
+        runtime: {
+            receiptSigningConfigured: boolean;
+            migrationLedger: {
+                status: string;
+                lastAppliedAt: string | null;
+            };
+        };
+        privacy: {
+            sourceUploaded: false;
+            secretValuesIncluded: false;
+            exposedFields: string[];
+        };
+    };
     runtimeBackend: {
         configured: boolean;
         status: 'disabled' | 'degraded' | 'healthy' | string;
@@ -597,6 +658,8 @@ export declare class ApiClient {
     analyzeDiff(diff: string, projectId?: string): Promise<AnalyzeDiffResponse>;
     analyzeBloat(diff: string, intent?: string, projectId?: string, sessionId?: string, fileContents?: Record<string, string>): Promise<AnalyzeBloatResponse>;
     uploadRuntimeEvidence(body: RuntimeEvidenceUploadRequest): Promise<RuntimeEvidenceUploadResponse>;
+    signAIChangeRecord(body: AIChangeRecordSignRequest): Promise<AIChangeRecordReceiptResponse>;
+    verifyAIChangeRecord(body: AIChangeRecordVerifyRequest): Promise<AIChangeRecordReceiptResponse>;
     updateRuntimeLiveSessionStatus(body: RuntimeLiveSessionStatusRequest): Promise<{
         ok: boolean;
         liveSession: Record<string, unknown>;

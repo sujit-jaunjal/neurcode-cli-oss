@@ -8,8 +8,11 @@
  * - neurcode session end     - End the current or specified session
  * - neurcode session status  - Show status of current session
  */
-import { type AgentPlan, type AgentPlanAmendmentProposal, type AgentInvocationSummary, type AgentGuardPostureSummary, type ArchitectureObligation, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
+import { type AgentPlan, type AgentPlanAmendmentProposal, type AIChangeRecord, type AgentInvocationSummary, type AgentGuardPostureSummary, type ArchitectureObligation, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
+import { type DiffFile } from '@neurcode-ai/diff-parser';
+import { type ProfileFreshnessSignal } from '../utils/v0-governance';
 import { type RuntimeConnection } from '../utils/runtime-connection';
+import { type ImpactSummary } from '../utils/repo-brain-impact';
 import { type AgentGuardSupervisorInspection } from '../utils/agent-guard-supervisor';
 interface SessionCommandOptions {
     sessionId?: string;
@@ -21,6 +24,10 @@ interface SessionCommandOptions {
     local?: boolean;
     dir?: string;
     path?: string;
+    record?: string;
+    receipt?: string;
+    signed?: boolean;
+    output?: string;
     requestId?: string;
     obligationId?: string;
     reason?: string;
@@ -71,6 +78,7 @@ interface PresentLocalGovernanceStatus {
     status: GovernanceSession['status'];
     goal: string;
     profileHash: string;
+    profileFreshness: ProfileFreshnessSignal;
     scopeMode: GovernanceSession['contract']['scopeMode'];
     planCoherenceMode: NonNullable<GovernanceSession['contract']['planCoherenceMode']>;
     agentPlan: AgentPlan | null;
@@ -96,6 +104,10 @@ interface PresentLocalGovernanceStatus {
     connection: RuntimeConnection | null;
 }
 type LocalGovernanceStatus = MissingLocalGovernanceStatus | PresentLocalGovernanceStatus;
+type UnderstandingDiffFile = DiffFile & {
+    provenance?: 'git-diff' | 'git-untracked';
+};
+export declare function resolveUnderstandingDiffFiles(repoRoot: string, options?: Pick<SessionCommandOptions, 'staged' | 'base' | 'head'>): UnderstandingDiffFile[];
 export declare function buildLocalGovernanceStatus(options?: SessionCommandOptions): LocalGovernanceStatus;
 export declare function localGovernanceStatusCommand(options?: SessionCommandOptions): void;
 export declare function resetStaleGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
@@ -107,6 +119,47 @@ export declare function waiveGovernanceObligationCommand(options?: SessionComman
 export declare function listRuntimeSessionsCommand(options?: SessionCommandOptions): void;
 export declare function showRuntimeSessionCommand(sessionId: string, options?: SessionCommandOptions): void;
 export declare function aiChangeRecordCommand(options?: SessionCommandOptions): void;
+export interface AIChangeRecordExportSummary {
+    ok: true;
+    repoRoot: string;
+    sessionId: string;
+    localPath: string;
+    publicPath: string;
+    publicRelativePath: string;
+    recordHash: string;
+    trustLevel: string;
+    receipt: {
+        present: boolean;
+        receiptId: string | null;
+        keyId: string | null;
+        verificationStatus: string;
+    };
+    warnings: string[];
+}
+/**
+ * Collect the real, source-free file paths that a change touched or intended to
+ * touch, for impact analysis. Approved/blocked paths are stored as hashes for
+ * privacy and are deliberately excluded; the filter drops any non-path token.
+ */
+export declare function collectChangeRecordImpactPaths(record: AIChangeRecord): string[];
+/**
+ * Build a source-free {@link ImpactSummary} for an AI Change Record. Advisory:
+ * never throws and never auto-builds the brain — when the brain is not indexed
+ * the summary is honestly degraded (brainStatus: 'missing') rather than absent.
+ */
+export declare function buildChangeRecordImpactSummary(repoRoot: string, record: AIChangeRecord): ImpactSummary | null;
+export declare function exportAIChangeRecordForCli(options?: SessionCommandOptions): Promise<AIChangeRecordExportSummary>;
+export declare function verifyAIChangeRecordForCli(options?: SessionCommandOptions): {
+    ok: boolean;
+    recordHash: string;
+    receiptId: string | null;
+    trustLevel: import("@neurcode-ai/governance-runtime").AIChangeRecordTrustLevel;
+    verification: import("@neurcode-ai/governance-runtime").AIChangeRecordReceiptVerification;
+    privacy: {
+        sourceUploaded: boolean;
+        sourceFree: boolean;
+    };
+};
 export declare function structuralUnderstandingCommand(options?: SessionCommandOptions): void;
 /**
  * List all sessions
@@ -116,6 +169,17 @@ export declare function listSessionsCommand(options: SessionCommandOptions): Pro
  * End a session
  */
 export declare function endSessionCommand(options: SessionCommandOptions): Promise<void>;
+interface SessionEndCloudClient {
+    getSessions(projectId?: string, limit?: number): Promise<any[]>;
+    getSession(sessionId: string): Promise<any>;
+    endSession(sessionId: string): Promise<unknown>;
+}
+export interface SessionEndDependencies {
+    isInteractive?: () => boolean;
+    prompt?: (question: string) => Promise<string>;
+    cloudClient?: SessionEndCloudClient;
+}
+export declare function endSessionCommandWithDependencies(options: SessionCommandOptions, dependencies?: SessionEndDependencies): Promise<void>;
 /**
  * Show session status
  */

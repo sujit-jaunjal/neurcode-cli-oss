@@ -22,10 +22,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolveSessionForHook = resolveSessionForHook;
 exports.normalizeHookFilePathForRepo = normalizeHookFilePathForRepo;
 exports.hookFilePathCandidates = hookFilePathCandidates;
+exports.proposedSourceFromHookInput = proposedSourceFromHookInput;
 exports.evaluateNoActiveSessionWrite = evaluateNoActiveSessionWrite;
 exports.shouldKeepSessionActiveForPendingApproval = shouldKeepSessionActiveForPendingApproval;
+exports.reconcileTrustedAdapterPosture = reconcileTrustedAdapterPosture;
 exports.sessionHookCommand = sessionHookCommand;
 const child_process_1 = require("child_process");
+const crypto_1 = require("crypto");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
@@ -42,6 +45,11 @@ const diff_parser_1 = require("@neurcode-ai/diff-parser");
 const structural_understanding_1 = require("../utils/structural-understanding");
 const consequence_nudges_1 = require("../utils/consequence-nudges");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
+const local_repo_brain_1 = require("../utils/local-repo-brain");
+const proposed_change_analysis_1 = require("../utils/proposed-change-analysis");
+const repo_intelligence_v2_1 = require("../utils/repo-intelligence-v2");
+const runtime_companion_1 = require("../utils/runtime-companion");
+const profile_drift_recovery_1 = require("../utils/profile-drift-recovery");
 // ── Helpers ───────────────────────────────────────────────────────────────────
 /** Read the full hook JSON from stdin, or return {} on any error. */
 function readHookInput() {
@@ -146,6 +154,41 @@ function sessionAlreadyEmittedNudge(session, nudgeKey) {
         typeof event.detail === 'object' &&
         event.detail['nudgeKey'] === nudgeKey);
 }
+function reuseNudgeKey(artifactHash, finding) {
+    return [
+        'reuse',
+        artifactHash,
+        finding.changed.file,
+        finding.changed.name,
+        finding.existing.file,
+        finding.existing.name,
+        finding.matchType,
+    ].join(':');
+}
+function formatReuseNudge(finding) {
+    return finding.message;
+}
+function reuseNudgeFromArtifact(artifactHash, findings) {
+    const [finding] = findings;
+    if (!finding)
+        return null;
+    return {
+        nudgeVersion: 'reuse-v1',
+        nudgeKey: reuseNudgeKey(artifactHash, finding),
+        severity: 'medium',
+        headline: formatReuseNudge(finding),
+        consequenceClass: 'repo-reuse',
+        operatorAction: 'Review the existing helper before merging; reuse or intentionally explain the duplicate.',
+        reviewFocus: [finding.changed.file, finding.existing.file],
+        artifactHash,
+        reuseFinding: finding,
+        surfacedReuseFindings: findings.slice(0, 3),
+        provenance: 'deterministic-static',
+    };
+}
+function isReuseNudge(nudge) {
+    return nudge.nudgeVersion === 'reuse-v1';
+}
 function readWorkingDiff(repoRoot) {
     return (0, child_process_1.execFileSync)('git', ['-C', repoRoot, 'diff', '--no-ext-diff', 'HEAD'], {
         encoding: 'utf8',
@@ -168,10 +211,12 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
         });
         const nudges = (0, consequence_nudges_1.selectInFlowConsequenceNudges)(artifact, { max: 3 });
         const [nudge] = nudges;
-        if (!nudge)
+        const reuseNudge = reuseNudgeFromArtifact(artifact.artifactHash, artifact.reuseFindings);
+        const selectedNudge = nudge ?? reuseNudge;
+        if (!selectedNudge)
             return null;
         const latest = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId) || session;
-        if (sessionAlreadyEmittedNudge(latest, nudge.nudgeKey))
+        if (sessionAlreadyEmittedNudge(latest, selectedNudge.nudgeKey))
             return null;
         const artifactPath = (0, structural_understanding_1.writeStructuralUnderstanding)(repoRoot, session.sessionId, artifact);
         (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
@@ -188,6 +233,8 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
                 changedFiles: artifact.changedFiles,
                 changedSymbols: artifact.changedSymbols,
                 digest: artifact.digest,
+                repoSymbolIndex: artifact.repoSymbolIndex,
+                reuseFindings: artifact.reuseFindings,
                 boundaryImpact: artifact.boundaryImpact,
                 suppressedArtifacts: artifact.suppressedArtifacts,
                 consequenceUnderstanding: {
@@ -205,103 +252,120 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
         (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
             type: 'consequence_nudge',
             ts: new Date().toISOString(),
-            message: nudge.headline,
+            message: (nudge ?? reuseNudge)?.headline ?? 'Structural advisory recorded.',
             detail: {
-                nudgeVersion: nudge.nudgeVersion,
-                nudgeKey: nudge.nudgeKey,
-                severity: nudge.severity,
-                consequenceClass: nudge.consequenceClass,
-                operatorAction: nudge.operatorAction,
-                reviewFocus: nudge.reviewFocus,
-                artifactHash: nudge.artifactHash,
-                impact: nudge.impact ? {
-                    rank: nudge.impact.rank,
-                    score: nudge.impact.score,
-                    file: nudge.impact.file,
-                    symbol: nudge.impact.symbol,
-                    summary: nudge.impact.summary,
-                    findingTypes: nudge.impact.findingTypes,
-                    findingRanks: nudge.impact.findingRanks,
-                    findingCount: nudge.impact.findingCount,
-                    productionConsumerCount: nudge.impact.productionConsumerCount,
-                    testConsumerCount: nudge.impact.testConsumerCount,
-                    reachableProductionConsumerCount: nudge.impact.reachableProductionConsumerCount,
-                    externalProductionConsumerCount: nudge.impact.externalProductionConsumerCount,
-                    changedProductionConsumerCount: nudge.impact.changedProductionConsumerCount,
-                    sensitiveConsumerCount: nudge.impact.sensitiveConsumerCount,
-                    approvalRequiredConsumerCount: nudge.impact.approvalRequiredConsumerCount,
-                    runtimeGovernanceConsumerCount: nudge.impact.runtimeGovernanceConsumerCount,
-                    productionFiles: nudge.impact.productionFiles,
-                    changedProductionFiles: nudge.impact.changedProductionFiles,
-                    testFiles: nudge.impact.testFiles,
-                    sensitiveFiles: nudge.impact.sensitiveFiles,
-                    approvalRequiredFiles: nudge.impact.approvalRequiredFiles,
-                    runtimeGovernanceFiles: nudge.impact.runtimeGovernanceFiles,
-                    highFanout: nudge.impact.highFanout,
-                    architectureRelevant: nudge.impact.architectureRelevant,
-                    reasonCodes: nudge.impact.reasonCodes,
-                    provenance: nudge.impact.provenance,
-                } : null,
-                finding: {
-                    rank: nudge.finding.rank,
-                    score: nudge.finding.score,
-                    findingType: nudge.finding.findingType,
-                    file: nudge.finding.file,
-                    symbol: nudge.finding.symbol,
-                    summary: nudge.finding.summary,
-                    consumerCount: nudge.finding.consumerCount,
-                    nonTestConsumerCount: nudge.finding.nonTestConsumerCount,
-                    testConsumerCount: nudge.finding.testConsumerCount,
-                    externalConsumerCount: nudge.finding.externalConsumerCount,
-                    externalConsumerFiles: nudge.finding.externalConsumerFiles,
-                    consumerSummary: nudge.finding.consumerSummary,
-                    reasonCodes: nudge.finding.reasonCodes,
-                },
-                topImpacts: nudges
-                    .map((item) => item.impact)
-                    .filter((impact) => Boolean(impact))
-                    .map((impact) => ({
-                    rank: impact.rank,
-                    score: impact.score,
-                    file: impact.file,
-                    symbol: impact.symbol,
-                    summary: impact.summary,
-                    findingTypes: impact.findingTypes,
-                    findingCount: impact.findingCount,
-                    reachableProductionConsumerCount: impact.reachableProductionConsumerCount,
-                    externalProductionConsumerCount: impact.externalProductionConsumerCount,
-                    changedProductionConsumerCount: impact.changedProductionConsumerCount,
-                    productionFiles: impact.productionFiles,
-                    changedProductionFiles: impact.changedProductionFiles,
-                    sensitiveConsumerCount: impact.sensitiveConsumerCount,
-                    approvalRequiredConsumerCount: impact.approvalRequiredConsumerCount,
-                    runtimeGovernanceConsumerCount: impact.runtimeGovernanceConsumerCount,
-                    highFanout: impact.highFanout,
-                    architectureRelevant: impact.architectureRelevant,
-                    reasonCodes: impact.reasonCodes,
-                })),
-                topFindings: nudges.map((item) => ({
-                    nudgeKey: item.nudgeKey,
-                    severity: item.severity,
-                    consequenceClass: item.consequenceClass,
-                    operatorAction: item.operatorAction,
-                    reviewFocus: item.reviewFocus,
-                    findingType: item.finding.findingType,
-                    file: item.finding.file,
-                    symbol: item.finding.symbol,
-                    externalConsumerCount: item.finding.externalConsumerCount,
-                    externalConsumerFiles: item.finding.externalConsumerFiles,
-                    consumerSummary: item.finding.consumerSummary,
-                    reasonCodes: item.finding.reasonCodes,
-                })),
-                provenance: nudge.provenance,
+                ...(nudge
+                    ? {
+                        nudgeVersion: nudge.nudgeVersion,
+                        nudgeKey: nudge.nudgeKey,
+                        severity: nudge.severity,
+                        consequenceClass: nudge.consequenceClass,
+                        operatorAction: nudge.operatorAction,
+                        reviewFocus: nudge.reviewFocus,
+                        artifactHash: nudge.artifactHash,
+                        impact: nudge.impact ? {
+                            rank: nudge.impact.rank,
+                            score: nudge.impact.score,
+                            file: nudge.impact.file,
+                            symbol: nudge.impact.symbol,
+                            summary: nudge.impact.summary,
+                            findingTypes: nudge.impact.findingTypes,
+                            findingRanks: nudge.impact.findingRanks,
+                            findingCount: nudge.impact.findingCount,
+                            productionConsumerCount: nudge.impact.productionConsumerCount,
+                            testConsumerCount: nudge.impact.testConsumerCount,
+                            reachableProductionConsumerCount: nudge.impact.reachableProductionConsumerCount,
+                            externalProductionConsumerCount: nudge.impact.externalProductionConsumerCount,
+                            changedProductionConsumerCount: nudge.impact.changedProductionConsumerCount,
+                            sensitiveConsumerCount: nudge.impact.sensitiveConsumerCount,
+                            approvalRequiredConsumerCount: nudge.impact.approvalRequiredConsumerCount,
+                            runtimeGovernanceConsumerCount: nudge.impact.runtimeGovernanceConsumerCount,
+                            productionFiles: nudge.impact.productionFiles,
+                            changedProductionFiles: nudge.impact.changedProductionFiles,
+                            testFiles: nudge.impact.testFiles,
+                            sensitiveFiles: nudge.impact.sensitiveFiles,
+                            approvalRequiredFiles: nudge.impact.approvalRequiredFiles,
+                            runtimeGovernanceFiles: nudge.impact.runtimeGovernanceFiles,
+                            highFanout: nudge.impact.highFanout,
+                            architectureRelevant: nudge.impact.architectureRelevant,
+                            reasonCodes: nudge.impact.reasonCodes,
+                            provenance: nudge.impact.provenance,
+                        } : null,
+                        finding: {
+                            rank: nudge.finding.rank,
+                            score: nudge.finding.score,
+                            findingType: nudge.finding.findingType,
+                            file: nudge.finding.file,
+                            symbol: nudge.finding.symbol,
+                            summary: nudge.finding.summary,
+                            consumerCount: nudge.finding.consumerCount,
+                            nonTestConsumerCount: nudge.finding.nonTestConsumerCount,
+                            testConsumerCount: nudge.finding.testConsumerCount,
+                            externalConsumerCount: nudge.finding.externalConsumerCount,
+                            externalConsumerFiles: nudge.finding.externalConsumerFiles,
+                            consumerSummary: nudge.finding.consumerSummary,
+                            reasonCodes: nudge.finding.reasonCodes,
+                        },
+                        topImpacts: nudges
+                            .map((item) => item.impact)
+                            .filter((impact) => Boolean(impact))
+                            .map((impact) => ({
+                            rank: impact.rank,
+                            score: impact.score,
+                            file: impact.file,
+                            symbol: impact.symbol,
+                            summary: impact.summary,
+                            findingTypes: impact.findingTypes,
+                            findingCount: impact.findingCount,
+                            reachableProductionConsumerCount: impact.reachableProductionConsumerCount,
+                            externalProductionConsumerCount: impact.externalProductionConsumerCount,
+                            changedProductionConsumerCount: impact.changedProductionConsumerCount,
+                            productionFiles: impact.productionFiles,
+                            changedProductionFiles: impact.changedProductionFiles,
+                            sensitiveConsumerCount: impact.sensitiveConsumerCount,
+                            approvalRequiredConsumerCount: impact.approvalRequiredConsumerCount,
+                            runtimeGovernanceConsumerCount: impact.runtimeGovernanceConsumerCount,
+                            highFanout: impact.highFanout,
+                            architectureRelevant: impact.architectureRelevant,
+                            reasonCodes: impact.reasonCodes,
+                        })),
+                        topFindings: nudges.map((item) => ({
+                            nudgeKey: item.nudgeKey,
+                            severity: item.severity,
+                            consequenceClass: item.consequenceClass,
+                            operatorAction: item.operatorAction,
+                            reviewFocus: item.reviewFocus,
+                            findingType: item.finding.findingType,
+                            file: item.finding.file,
+                            symbol: item.finding.symbol,
+                            externalConsumerCount: item.finding.externalConsumerCount,
+                            externalConsumerFiles: item.finding.externalConsumerFiles,
+                            consumerSummary: item.finding.consumerSummary,
+                            reasonCodes: item.finding.reasonCodes,
+                        })),
+                        provenance: nudge.provenance,
+                    }
+                    : reuseNudge
+                        ? {
+                            nudgeVersion: reuseNudge.nudgeVersion,
+                            nudgeKey: reuseNudge.nudgeKey,
+                            severity: reuseNudge.severity,
+                            consequenceClass: reuseNudge.consequenceClass,
+                            operatorAction: reuseNudge.operatorAction,
+                            reviewFocus: reuseNudge.reviewFocus,
+                            artifactHash: reuseNudge.artifactHash,
+                            reuseFinding: reuseNudge.reuseFinding,
+                            topReuseFindings: reuseNudge.surfacedReuseFindings,
+                            provenance: reuseNudge.provenance,
+                        }
+                        : {}),
                 killSwitch: 'NEURCODE_DISABLE_CONSEQUENCE_NUDGES=1',
             },
         });
         const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
         if (refreshed)
             await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed);
-        return nudge;
+        return nudge ?? reuseNudge;
     }
     catch (error) {
         diagnostic(`consequence nudge skipped: ${error instanceof Error ? error.message : String(error)}`);
@@ -352,6 +416,36 @@ function hookFilePathCandidates(hookInput) {
     }
     return Array.from(new Set(candidates));
 }
+function stringField(record, keys) {
+    for (const key of keys) {
+        const value = record[key];
+        if (typeof value === 'string' && value.trim())
+            return value;
+    }
+    return null;
+}
+function proposedSourceFromHookInput(hookInput) {
+    const toolInput = hookInput['tool_input'] ??
+        hookInput['toolInput'] ??
+        {};
+    const direct = stringField(toolInput, ['content', 'file_content', 'fileContent', 'text']);
+    if (direct)
+        return { source: direct, sourceKind: 'write_content' };
+    const replacement = stringField(toolInput, ['new_string', 'newString', 'replacement', 'newText']);
+    if (replacement)
+        return { source: replacement, sourceKind: 'edit_new_string' };
+    const edits = toolInput['edits'] ?? toolInput['changes'];
+    if (Array.isArray(edits)) {
+        const parts = edits
+            .map((edit) => edit && typeof edit === 'object'
+            ? stringField(edit, ['new_string', 'newString', 'replacement', 'newText'])
+            : null)
+            .filter((value) => Boolean(value));
+        if (parts.length > 0)
+            return { source: parts.join('\n'), sourceKind: 'multi_edit_new_strings' };
+    }
+    return { source: null, sourceKind: 'not_available' };
+}
 function runtimeMode(session) {
     return session.contract.runtimeMode === 'strict' ||
         session.contract.runtimeMode === 'paused' ||
@@ -359,9 +453,92 @@ function runtimeMode(session) {
         ? session.contract.runtimeMode
         : 'strict';
 }
+function repoSymbolDuplicateMode(session) {
+    const mode = session.contract.repoSymbolDuplicateMode;
+    return mode === 'off' || mode === 'warn' || mode === 'block' ? mode : 'warn';
+}
+function repoSymbolPolicyMessage(policy) {
+    const first = policy.findings[0];
+    if (!first)
+        return policy.reason;
+    const modeSuffix = policy.verdict === 'block'
+        ? 'Policy mode: block. Reuse or rename the symbol, or intentionally relax repoSymbolDuplicateMode.'
+        : 'Policy mode: warn. Review the existing symbol before continuing.';
+    return `${first.message} ${modeSuffix}`;
+}
+function classifyClarification(prompt) {
+    const compact = prompt
+        .replace(/```[\s\S]*?```/g, ' ')
+        .split(/\r?\n/)
+        .filter((line) => {
+        const trimmed = line.trim();
+        if (/^(?:diff --git |index [0-9a-f]{6,}|@@ |--- |\+\+\+ |Binary files )/.test(trimmed))
+            return false;
+        return !/^[+-](?!\s)/.test(trimmed);
+    })
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!compact)
+        return 'Human follow-up recorded without textual content.';
+    if (/^(?:yes|no|ok|okay|sure|continue|proceed|approved?|denied?|option\s+[a-z0-9]+|[a-z0-9]+)$/i.test(compact)) {
+        return 'Short human clarification referencing the active agent context.';
+    }
+    if (compact.length <= 80) {
+        return 'Brief human clarification recorded against the active agent proposal.';
+    }
+    return 'Detailed human clarification recorded against the active governed session.';
+}
+function acceptedProposalContext(session, rawPrompt) {
+    const pendingProposal = [...(session.contract.planAmendmentProposals ?? [])]
+        .reverse()
+        .find((proposal) => proposal.status === 'pending');
+    const activePlan = session.contract.agentPlan;
+    return {
+        schemaVersion: 'neurcode.intent-continuity-context.v1',
+        latestUserClarification: {
+            summary: classifyClarification(rawPrompt),
+            promptLength: rawPrompt.length,
+            promptHash: (0, crypto_1.createHash)('sha256').update(rawPrompt).digest('hex'),
+            recordedAt: new Date().toISOString(),
+            source: 'user_prompt_submit',
+        },
+        acceptedAgentProposal: activePlan
+            ? {
+                activePlanRevision: (0, governance_runtime_1.activeAgentPlanRevision)(session.contract),
+                summary: activePlan.summary || null,
+                expectedFiles: activePlan.expectedFiles,
+                expectedGlobs: activePlan.expectedGlobs,
+                constraints: activePlan.constraints,
+                risks: activePlan.risks,
+                source: activePlan.source,
+            }
+            : null,
+        pendingPlanAmendment: pendingProposal
+            ? {
+                proposalId: pendingProposal.proposalId,
+                previousRevision: pendingProposal.previousRevision,
+                proposedBy: pendingProposal.proposedBy,
+                reason: pendingProposal.reason,
+                riskLevel: pendingProposal.risk.level,
+                addedFiles: pendingProposal.risk.addedFiles,
+                addedGlobs: pendingProposal.risk.addedGlobs,
+                status: pendingProposal.status,
+            }
+            : null,
+        privacy: {
+            sourceUploaded: false,
+            sourceIncluded: false,
+            rawPromptStored: false,
+            summaryOnly: true,
+        },
+    };
+}
 function blockContext(input) {
     const isApproval = input.blockType === 'approval_required_boundary';
     const isScope = input.blockType === 'scope_violation_or_task_expansion';
+    const isRepoSymbolDuplicate = input.blockType === 'repo_symbol_duplicate_policy';
+    const isStructuralPolicy = input.blockType === 'structural_policy_violation';
     return {
         schemaVersion: 'neurcode.runtime-block.v1',
         blockType: input.blockType,
@@ -372,16 +549,24 @@ function blockContext(input) {
             ? 'exact_path_approval'
             : isScope
                 ? 'scope_amendment'
-                : input.blockType === 'profile_or_runtime_health_block'
-                    ? 'runtime_health_recovery'
-                    : 'split_tool_call',
+                : isRepoSymbolDuplicate
+                    ? 'symbol_reuse_or_policy_decision'
+                    : isStructuralPolicy
+                        ? 'structural_policy_remediation'
+                        : input.blockType === 'profile_or_runtime_health_block'
+                            ? 'runtime_health_recovery'
+                            : 'split_tool_call',
         operatorActionLabel: isApproval
             ? 'Approve exact path / Deny'
             : isScope
                 ? 'Approve task expansion / Amend scope / Deny'
-                : input.blockType === 'profile_or_runtime_health_block'
-                    ? 'Refresh or restart runtime'
-                    : 'Split into one file per tool call',
+                : isRepoSymbolDuplicate
+                    ? 'Reuse existing symbol / Rename / Relax policy'
+                    : isStructuralPolicy
+                        ? 'Remediate structural policy / Obtain required approval'
+                        : input.blockType === 'profile_or_runtime_health_block'
+                            ? 'Refresh or restart runtime'
+                            : 'Split into one file per tool call',
         suggestedApprovalPath: isApproval ? input.suggestedApprovalPath || input.filePath || null : null,
         owners: input.owners || [],
         proposalId: input.proposalId || null,
@@ -389,9 +574,13 @@ function blockContext(input) {
             ? 'Approve only the exact path for this session, or deny the write.'
             : isScope
                 ? 'Accept the pending scope amendment or re-plan locally, then retry the write.'
-                : input.blockType === 'profile_or_runtime_health_block'
-                    ? 'Refresh the governance profile or restart the active governed session.'
-                    : 'Retry as separate single-file edits so each path can be governed.'),
+                : isRepoSymbolDuplicate
+                    ? 'Reuse or rename the duplicate symbol, or change repoSymbolDuplicateMode with an explicit rationale.'
+                    : isStructuralPolicy
+                        ? 'Review the matched deterministic facts and remediation, then retry after fixing the change or recording an authorized approval.'
+                        : input.blockType === 'profile_or_runtime_health_block'
+                            ? 'Refresh the governance profile or restart the active governed session.'
+                            : 'Retry as separate single-file edits so each path can be governed.'),
     };
 }
 const NO_ACTIVE_SESSION_SCOPE_SENTINEL = '__neurcode_no_active_session_scope__';
@@ -428,7 +617,9 @@ function blockTypeFromEvent(event) {
         if (value === 'approval_required_boundary' ||
             value === 'scope_violation_or_task_expansion' ||
             value === 'profile_or_runtime_health_block' ||
-            value === 'multi_file_or_tool_shape_block') {
+            value === 'multi_file_or_tool_shape_block' ||
+            value === 'repo_symbol_duplicate_policy' ||
+            value === 'structural_policy_violation') {
             return value;
         }
     }
@@ -489,6 +680,9 @@ function latestUnresolvedActionableBlock(session) {
 function shouldKeepSessionActiveForPendingApproval(session, pendingApproval) {
     if (!pendingApproval)
         return false;
+    if (pendingApproval.blockType === 'profile_or_runtime_health_block') {
+        return false;
+    }
     if (pendingApproval.blockType && pendingApproval.blockType !== 'approval_required_boundary') {
         return true;
     }
@@ -690,6 +884,7 @@ async function maybeContinueActiveClaudeSession(repoRoot, rawPrompt, intentSelec
     if (decision.action === 'start_new_session')
         return null;
     if (decision.action === 'record_operator_note') {
+        const continuityContext = acceptedProposalContext(activeSession, rawPrompt);
         (0, governance_runtime_1.appendEvent)(repoRoot, activeSession.sessionId, {
             type: 'user_decision',
             ts: new Date().toISOString(),
@@ -697,6 +892,7 @@ async function maybeContinueActiveClaudeSession(repoRoot, rawPrompt, intentSelec
             message: 'Human follow-up prompt recorded without changing the active governed plan.',
             detail: {
                 intentContinuity: decision.detail,
+                continuityContext,
                 reason: decision.reason,
                 confidence: decision.confidence,
             },
@@ -721,6 +917,7 @@ async function maybeContinueActiveClaudeSession(repoRoot, rawPrompt, intentSelec
             : `Human follow-up prompt updated active plan revision ${amended.previousRevision} -> ${amended.revision}.`,
         detail: {
             intentContinuity: decision.detail,
+            continuityContext: acceptedProposalContext(session, rawPrompt),
             reason: decision.reason,
             confidence: decision.confidence,
             planAmendment: {
@@ -758,12 +955,112 @@ async function handleStart(cmdCwd) {
     }
     try {
         const profileResult = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot);
-        const profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(profileResult, profileResult.refreshed ? 'auto_refreshed' : 'none');
+        let profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(profileResult, profileResult.refreshed ? 'auto_refreshed' : 'none');
         if (profileResult.refreshed && profileResult.status !== 'missing') {
             diagnostic(`profile refreshed before session start (${profileResult.reasons.join('; ')})`);
         }
         for (const warning of intentSelection.warnings) {
             diagnostic(warning);
+        }
+        const recovery = (0, profile_drift_recovery_1.recoverProfileDriftForSessionStart)({
+            repoRoot,
+            currentProfile: profileResult.profile,
+            goal: goal.trim(),
+        });
+        if (recovery.status === 'blocked') {
+            profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(profileResult, 'session_restart_required', {
+                sessionProfileHash: recovery.sessionProfileHash,
+                recoveryReason: recovery.reason,
+                recoveryCommand: recovery.recoveryCommand,
+                unresolvedHumanDecisions: true,
+            });
+            try {
+                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, recovery.session, { profileFreshness });
+            }
+            catch (liveError) {
+                diagnostic(`profile-drift block evidence queued locally only: ${liveError instanceof Error ? liveError.message : String(liveError)}`);
+            }
+            const sessionHash = recovery.sessionProfileHash.slice(0, 12);
+            const currentHash = recovery.currentProfileHash.slice(0, 12);
+            process.stdout.write(JSON.stringify({
+                message: `⏸ Neurcode session ${recovery.session.sessionId} cannot continue because its profile ` +
+                    `${sessionHash} differs from current profile ${currentHash}. ` +
+                    `${recovery.pendingDecisions.length} unresolved human decision` +
+                    `${recovery.pendingDecisions.length === 1 ? '' : 's'} prevent automatic recovery. ` +
+                    `Run exactly: ${profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND}. ` +
+                    '`--force` abandons unresolved operator state; no replacement session was created.',
+                profileFreshness,
+                reason: recovery.reason,
+                pendingDecisions: recovery.pendingDecisions,
+                recoveryCommand: recovery.recoveryCommand,
+            }) + '\n');
+            return;
+        }
+        if (recovery.status === 'recovered') {
+            (0, runtime_companion_1.invalidateRuntimeCompanionFreshness)(repoRoot);
+            const staleProfileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(profileResult, 'session_restart_required', {
+                sessionProfileHash: recovery.previousSession.profileHash,
+                recoveryReason: recovery.reason,
+                unresolvedHumanDecisions: false,
+            });
+            const supervisorStop = (0, agent_guard_supervisor_1.stopSupervisorOnSessionCompletion)(repoRoot);
+            if (supervisorStop.signaled) {
+                diagnostic(`stale-profile supervisor stop requested (pid ${supervisorStop.state?.pid ?? 'unknown'})`);
+            }
+            const admission = (0, admission_artifact_1.tryEmitSelfAttestedAdmissionRecord)({
+                repoRoot,
+                session: recovery.previousSession,
+            });
+            if (!admission.ok) {
+                diagnostic(`stale-profile recovery admission artifact skipped: ${admission.error}`);
+            }
+            let liveStatusPublished = true;
+            try {
+                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, recovery.previousSession, { profileFreshness: staleProfileFreshness });
+            }
+            catch (liveError) {
+                liveStatusPublished = false;
+                diagnostic(`stale-profile finished evidence queued locally only: ${liveError instanceof Error ? liveError.message : String(liveError)}`);
+            }
+            profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(profileResult, 'none', {
+                sessionProfileHash: recovery.replacementSession.profileHash,
+                recoveryReason: recovery.reason,
+                unresolvedHumanDecisions: false,
+            });
+            let session = recovery.replacementSession;
+            const plannedAtStart = maybeCaptureAgentPlan(repoRoot, session, hookInput);
+            if (plannedAtStart)
+                session = plannedAtStart;
+            try {
+                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session, { profileFreshness });
+            }
+            catch (liveError) {
+                liveStatusPublished = false;
+                diagnostic(`replacement-session evidence queued locally only: ${liveError instanceof Error ? liveError.message : String(liveError)}`);
+            }
+            try {
+                const sync = (0, runtime_connection_1.triggerRuntimeAutoSync)(repoRoot);
+                if (sync.started)
+                    diagnostic('stale-profile recovery evidence auto-sync queued');
+            }
+            catch (syncError) {
+                diagnostic(`stale-profile recovery auto-sync failed: ${syncError instanceof Error ? syncError.message : String(syncError)}`);
+            }
+            process.stdout.write(JSON.stringify({
+                message: `♻️ Neurcode recovered stale-profile session ${recovery.previousSession.sessionId} ` +
+                    `and started session ${session.sessionId} from profile ${session.profileHash.slice(0, 12)}.`,
+                recovery: {
+                    reason: recovery.reason,
+                    previousSessionId: recovery.previousSession.sessionId,
+                    replacementSessionId: session.sessionId,
+                    replayHash: recovery.previousSession.replayHash,
+                    replayVerified: recovery.replayVerified,
+                    exactApprovalsCarriedForward: false,
+                    liveStatusPublished,
+                },
+                profileFreshness,
+            }) + '\n');
+            return;
         }
         const reused = await maybeReuseLaunchedClaudeSession(repoRoot, rawGoal.trim(), hookInput, profileFreshness);
         if (reused) {
@@ -838,8 +1135,25 @@ async function handleStart(cmdCwd) {
         // Fail open — don't break the agent turn
     }
 }
+const HARD_PREWRITE_ADAPTERS = new Set(['claude-code-hooks', 'copilot-hooks']);
+/**
+ * Bind the attested host posture to the session's established launcher posture.
+ * A governed session launched by a cooperative or observe-only agent can never
+ * be re-labelled as host-enforced hard pre-write by a later check, even if the
+ * check declares a hard adapter string. Changing adapters requires an explicit
+ * re-handshake that re-launches the session. This is posture binding, not a
+ * cryptographic host-attestation claim.
+ */
+function reconcileTrustedAdapterPosture(declared, launched) {
+    if (!launched || declared === launched)
+        return { adapterId: declared, downgraded: false };
+    if (HARD_PREWRITE_ADAPTERS.has(declared) && !HARD_PREWRITE_ADAPTERS.has(launched)) {
+        return { adapterId: launched, downgraded: true };
+    }
+    return { adapterId: declared, downgraded: false };
+}
 /** PreToolUse — check a pending Edit/Write/MultiEdit before it lands. */
-async function handleCheck(cmdCwd) {
+async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
     const hookInput = readHookInput();
     const effectiveCwd = cwdFromHookInput(hookInput, cmdCwd);
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
@@ -1025,10 +1339,18 @@ async function handleCheck(cmdCwd) {
         const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
         const action = (0, v0_governance_1.profileFreshnessActionForSession)(staleness, session.profileHash);
         if (action === 'session_restart_required') {
-            let signal = (0, v0_governance_1.buildProfileFreshnessSignal)(staleness, action);
+            let signal = (0, v0_governance_1.buildProfileFreshnessSignal)(staleness, action, {
+                sessionProfileHash: session.profileHash,
+                recoveryReason: 'active_session_profile_changed',
+                recoveryCommand: profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND,
+            });
             try {
                 const refreshedProfile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot);
-                signal = (0, v0_governance_1.buildProfileFreshnessSignal)(refreshedProfile, action);
+                signal = (0, v0_governance_1.buildProfileFreshnessSignal)(refreshedProfile, action, {
+                    sessionProfileHash: session.profileHash,
+                    recoveryReason: 'active_session_profile_changed',
+                    recoveryCommand: profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND,
+                });
             }
             catch (refreshError) {
                 signal = {
@@ -1043,7 +1365,10 @@ async function handleCheck(cmdCwd) {
             profileFreshness = signal;
             const message = `⏸ Neurcode: repository governance profile changed during this active session. ` +
                 `This edit to ${filePath} was not checked against the updated repo topology. ` +
-                `Start a new governed session, or run \`neurcode profile\` / \`neurcode activate claude\` and retry.`;
+                `Session profile ${session.profileHash.slice(0, 12)} differs from current profile ` +
+                `${signal.currentProfileHash.slice(0, 12)}. Submit the implementation prompt again for automatic recovery. ` +
+                `If unresolved operator state blocks recovery, run exactly: \`${profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND}\`; ` +
+                '`--force` abandons that unresolved state.';
             try {
                 (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
                     type: 'check_block',
@@ -1081,13 +1406,15 @@ async function handleCheck(cmdCwd) {
         }
         if (staleness.status !== 'fresh') {
             const refreshedProfile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot);
-            profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(refreshedProfile, refreshedProfile.refreshed ? 'auto_refreshed' : 'none');
+            profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(refreshedProfile, refreshedProfile.refreshed ? 'auto_refreshed' : 'none', { sessionProfileHash: session.profileHash });
             if (refreshedProfile.refreshed) {
                 diagnostic(`profile refreshed before edit check (${refreshedProfile.reasons.join('; ') || refreshedProfile.status})`);
             }
         }
         else {
-            profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(staleness, 'none');
+            profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(staleness, 'none', {
+                sessionProfileHash: session.profileHash,
+            });
         }
     }
     catch (err) {
@@ -1112,11 +1439,13 @@ async function handleCheck(cmdCwd) {
                         status: 'unreadable',
                         refreshed: false,
                         action: 'manual_refresh_required',
+                        sessionCompatibility: 'unknown',
                         checkedAt: new Date().toISOString(),
                         profilePath: '.neurcode/profile.json',
                         reasons: [err instanceof Error ? err.message : String(err)],
-                        currentProfileHash: session.profileHash,
-                        currentTopologyHash: session.profileHash,
+                        sessionProfileHash: session.profileHash,
+                        currentProfileHash: 'unavailable',
+                        currentTopologyHash: 'unavailable',
                         trackedFileCount: 0,
                     },
                 },
@@ -1255,6 +1584,88 @@ async function handleCheck(cmdCwd) {
                 `${planCoherencePolicy.reason} Proceeding — recorded in session.`,
         };
     }
+    const launchedAdapter = (0, agent_session_launcher_1.latestAgentLauncherState)(session)?.agent.adapter;
+    const adapterPosture = reconcileTrustedAdapterPosture(trustedAdapterId, launchedAdapter);
+    if (adapterPosture.downgraded) {
+        diagnostic(`trusted adapter ${trustedAdapterId} cannot host-enforce a session launched by ${launchedAdapter}; ` +
+            `attesting ${adapterPosture.adapterId} posture. Re-handshake to change adapters.`);
+    }
+    const proposedSource = proposedSourceFromHookInput(hookInput);
+    const proposedChange = (0, proposed_change_analysis_1.analyzeProposedChange)({
+        repoRoot,
+        filePath,
+        proposedSource: proposedSource.source,
+        sourceKind: proposedSource.sourceKind,
+        adapterId: adapterPosture.adapterId,
+        timing: trustedTiming,
+        sessionId: session.sessionId,
+        planRevision: (0, governance_runtime_1.activeAgentPlanRevision)(session.contract),
+        proposedChange: hookInput['proposed_change'] ?? hookInput['proposedChange'],
+    });
+    let repoSymbolPolicy = (0, local_repo_brain_1.evaluateRepoSymbolDuplicatePolicy)({
+        projectRoot: repoRoot,
+        filePath,
+        proposedSource: proposedSource.source,
+        proposedSymbols: proposedChange.localSymbols,
+        policyMode: repoSymbolDuplicateMode(session),
+    });
+    repoSymbolPolicy = {
+        ...repoSymbolPolicy,
+        reason: repoSymbolPolicy.verdict === 'not_evaluated'
+            ? `${repoSymbolPolicy.reason} Source extraction: ${proposedSource.sourceKind}; ` +
+                `content availability: ${proposedChange.envelope.content.availabilityReason}.`
+            : repoSymbolPolicy.reason,
+    };
+    const repoIntelligence = await (0, repo_intelligence_v2_1.evaluateLocalRepoIntelligenceV2)({
+        repoRoot,
+        change: proposedChange.envelope,
+        approvedPaths: session.contract.approvedPaths,
+        approvalGrants: session.contract.approvalGrants,
+    });
+    if (result.verdict !== 'block' && repoSymbolPolicy.verdict === 'block') {
+        result = {
+            ...result,
+            verdict: 'block',
+            blockType: 'repo_symbol_duplicate_policy',
+            message: `⏸ Neurcode: ${repoSymbolPolicyMessage(repoSymbolPolicy)}`,
+            options: ['narrow', 'replan'],
+        };
+    }
+    else if (result.verdict === 'ok' && repoSymbolPolicy.verdict === 'warn') {
+        result = {
+            ...result,
+            verdict: 'warn',
+            blockType: 'repo_symbol_duplicate_policy',
+            message: `⚠️ Neurcode: ${repoSymbolPolicyMessage(repoSymbolPolicy)}`,
+            options: ['continue', 'replan'],
+        };
+    }
+    else if (result.verdict === 'warn' && repoSymbolPolicy.verdict === 'warn') {
+        result = {
+            ...result,
+            message: `${result.message} ${repoSymbolPolicyMessage(repoSymbolPolicy)}`,
+        };
+    }
+    if (result.verdict !== 'block' && repoIntelligence.evaluation.verdict === 'block') {
+        const first = repoIntelligence.evaluation.findings.find((finding) => finding.verdict === 'block');
+        result = {
+            ...result,
+            verdict: 'block',
+            blockType: 'structural_policy_violation',
+            message: `⏸ Neurcode: ${first?.explanation ?? 'A deterministic structural policy blocked this change.'} ${first?.remediation ?? ''}`.trim(),
+            options: ['narrow', 'replan'],
+        };
+    }
+    else if (result.verdict === 'ok' && repoIntelligence.evaluation.verdict === 'warn') {
+        const first = repoIntelligence.evaluation.findings[0];
+        result = {
+            ...result,
+            verdict: 'warn',
+            blockType: 'structural_policy_violation',
+            message: `⚠️ Neurcode: ${first?.explanation ?? 'A deterministic structural policy warned on this change.'} ${first?.remediation ?? ''}`.trim(),
+            options: ['continue', 'replan'],
+        };
+    }
     // ── Record the event ─────────────────────────────────────────────────────
     // Tag every check with the agent-plan revision that was active when it ran,
     // so the evidence record can answer "which plan version governed this edit?".
@@ -1296,6 +1707,16 @@ async function handleCheck(cmdCwd) {
                     dependents: architectureEdit.dependents,
                     message: architectureEdit.message,
                 },
+                repoSymbolPolicy,
+                repoSymbolPolicySource: proposedSource.sourceKind,
+                proposedChange: proposedChange.envelope,
+                repoIntelligence: repoIntelligence.evidence,
+                structuralPolicy: {
+                    configured: repoIntelligence.policyConfigured,
+                    schemaVersion: repoIntelligence.policyConfigured
+                        ? 'neurcode.structural-policy-artifact.v2'
+                        : null,
+                },
                 boundaryVerdict,
                 activePlanRevision,
                 planPresent: Boolean(session.contract.agentPlan),
@@ -1313,23 +1734,64 @@ async function handleCheck(cmdCwd) {
     const consequenceNudge = result.verdict === 'block'
         ? null
         : await maybeRecordConsequenceNudge(repoRoot, session);
+    // ── Repo brain facts (P0/P1) ─────────────────────────────────────────────
+    // Load source-free repo context for the blocked/warned path. Best-effort:
+    // if the artifact is missing the message is unchanged and recovery guidance
+    // is appended instead.
+    let repoBrainFileFacts = null;
+    let repoBrainMeta = {
+        artifactHash: null,
+        generatedAt: null,
+        status: 'missing',
+    };
+    try {
+        const brainCtx = (0, local_repo_brain_1.getRepoBrainContext)(repoRoot, [filePath]);
+        repoBrainMeta = { artifactHash: brainCtx.artifactHash, generatedAt: brainCtx.generatedAt, status: brainCtx.status };
+        repoBrainFileFacts = brainCtx.files[0] ?? null;
+    }
+    catch {
+        // Never let brain context loading break the enforcement path.
+    }
     // ── Emit hook response ────────────────────────────────────────────────────
     if (result.verdict === 'block') {
+        // Enrich deny message with source-free repo facts (P1).
+        const brainSuffix = repoBrainFileFacts
+            ? (0, local_repo_brain_1.formatRepoBrainFactsForMessage)(repoBrainFileFacts)
+            : repoBrainMeta.status === 'missing'
+                ? 'Run `neurcode brain index` for local source-free repo context.'
+                : '';
+        const enrichedMessage = brainSuffix
+            ? `${result.message} | ${brainSuffix}`
+            : result.message;
         // Include machine-readable approvalContext when the block is approval-required,
         // so the agent can surface a structured approval request to the human.
-        denyPreToolUse(result.message, {
+        denyPreToolUse(enrichedMessage, {
+            repoSymbolPolicy,
             ...(result.approvalContext ? { approvalContext: result.approvalContext } : {}),
             ...(result.blockType
                 ? {
-                    blockContext: blockContext({
-                        blockType: result.blockType,
-                        filePath,
-                        message: result.message,
-                        suggestedApprovalPath: result.approvalContext?.suggestedApprovalPath,
-                        owners: result.owners,
-                        proposalId: pendingScopeAmendmentProposalId,
-                        runtimeMode: runtimeMode(session),
-                    }),
+                    blockContext: {
+                        ...blockContext({
+                            blockType: result.blockType,
+                            filePath,
+                            message: enrichedMessage,
+                            suggestedApprovalPath: result.approvalContext?.suggestedApprovalPath,
+                            owners: result.owners,
+                            proposalId: pendingScopeAmendmentProposalId,
+                            runtimeMode: runtimeMode(session),
+                        }),
+                        ...(repoBrainFileFacts ? {
+                            repoBrainFacts: {
+                                sensitiveKinds: repoBrainFileFacts.sensitiveKinds,
+                                module: repoBrainFileFacts.module,
+                                hotspot: repoBrainFileFacts.hotspot,
+                                ownerBoundary: repoBrainFileFacts.ownerBoundary,
+                                reuseAdvisories: repoBrainFileFacts.reuseAdvisories,
+                                artifactHash: repoBrainMeta.artifactHash,
+                                generatedAt: repoBrainMeta.generatedAt,
+                            },
+                        } : { repoBrainStatus: 'missing', repoBrainRecovery: 'neurcode brain index' }),
+                    },
                 }
                 : {}),
         });
@@ -1343,6 +1805,29 @@ async function handleCheck(cmdCwd) {
                 hookEventName: 'PreToolUse',
                 permissionDecision: 'allow',
                 reason,
+                repoSymbolPolicy,
+            },
+        }) + '\n');
+        process.exit(0);
+    }
+    if (consequenceNudge && isReuseNudge(consequenceNudge)) {
+        process.stdout.write(JSON.stringify({
+            hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'allow',
+                reason: consequenceNudge.headline,
+                reuseNudge: {
+                    nudgeVersion: consequenceNudge.nudgeVersion,
+                    nudgeKey: consequenceNudge.nudgeKey,
+                    severity: consequenceNudge.severity,
+                    consequenceClass: consequenceNudge.consequenceClass,
+                    operatorAction: consequenceNudge.operatorAction,
+                    reviewFocus: consequenceNudge.reviewFocus,
+                    artifactHash: consequenceNudge.artifactHash,
+                    finding: consequenceNudge.reuseFinding,
+                    surfacedFindingLimit: 3,
+                    topFindings: consequenceNudge.surfacedReuseFindings,
+                },
             },
         }) + '\n');
         process.exit(0);
@@ -1542,12 +2027,28 @@ function sessionHookCommand(program) {
         const opts = cmd.opts();
         await handleStart(opts.dir || process.cwd());
     });
-    cmd
+    const check = cmd
         .command('check')
         .description('Check a pending edit against the active session (PreToolUse hook)')
-        .action(async () => {
+        .option('--trusted-adapter <adapter>', 'Ingress-bound adapter identity declared by the installed host hook')
+        .option('--trusted-timing <timing>', 'Ingress-bound event timing', 'before_write');
+    check.action(async (subOpts) => {
         const opts = cmd.opts();
-        await handleCheck(opts.dir || process.cwd());
+        const adapters = [
+            'claude-code-hooks', 'copilot-hooks', 'generic-mcp', 'codex-mcp',
+            'cursor-mcp', 'vscode-extension', 'github-action',
+        ];
+        const timings = ['before_write', 'during_write', 'after_write', 'ci'];
+        // No implicit hard pre-write default: an unspecified adapter is the
+        // non-privileged cooperative generic ingress, never Claude host enforcement.
+        const trustedAdapter = subOpts.trustedAdapter ?? 'generic-mcp';
+        if (!adapters.includes(trustedAdapter)) {
+            throw new Error(`Unsupported trusted hook adapter: ${trustedAdapter}`);
+        }
+        if (!timings.includes(subOpts.trustedTiming)) {
+            throw new Error(`Unsupported trusted hook timing: ${subOpts.trustedTiming}`);
+        }
+        await handleCheck(opts.dir || process.cwd(), trustedAdapter, subOpts.trustedTiming);
     });
     cmd
         .command('finish')

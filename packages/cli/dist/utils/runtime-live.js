@@ -10,6 +10,7 @@ const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const config_1 = require("../config");
 const runtime_connection_1 = require("./runtime-connection");
 const runtime_outbox_1 = require("./runtime-outbox");
+const runtime_privacy_1 = require("./runtime-privacy");
 const SOURCE_LIKE_KEYS = new Set([
     'content',
     'fileContent',
@@ -177,7 +178,7 @@ async function publishRuntimeLiveStatus(repoRoot, session, options = {}) {
     const body = {
         repo,
         generatedAt: new Date().toISOString(),
-        session: compactRuntimeLiveSession(session),
+        session: (0, runtime_privacy_1.buildCloudSafeRuntimeSession)(session),
     };
     try {
         (0, runtime_outbox_1.enqueueRuntimeSessionSnapshot)(repoRoot, session.sessionId, body);
@@ -320,9 +321,13 @@ async function fetchPendingScopeAmendments(repoRoot, sessionId) {
 function queueApprovalAcknowledgement(repoRoot, sessionId, approval, body) {
     if (!approval.id)
         return;
+    const { message: _message, ...safeBody } = body;
     (0, runtime_outbox_1.enqueueRuntimeApprovalAck)(repoRoot, sessionId, {
         approvalId: approval.id,
-        body,
+        body: {
+            ...safeBody,
+            ...(body.message ? { reasonCode: 'local_apply_failed' } : {}),
+        },
     });
 }
 function queueRuntimeLiveApprovalAppliedAck(repoRoot, sessionId, approval, body) {
@@ -335,9 +340,13 @@ function queueRuntimeLiveApprovalAppliedAck(repoRoot, sessionId, approval, body)
 function queueScopeAmendmentAcknowledgement(repoRoot, sessionId, amendment, body) {
     if (!amendment.id)
         return;
+    const { message: _message, ...safeBody } = body;
     (0, runtime_outbox_1.enqueueRuntimeScopeAmendmentAck)(repoRoot, sessionId, {
         amendmentId: amendment.id,
-        body,
+        body: {
+            ...safeBody,
+            ...(body.message ? { reasonCode: 'local_apply_failed' } : {}),
+        },
     });
 }
 async function applyPendingRuntimeLiveActions(repoRoot, sessionId) {

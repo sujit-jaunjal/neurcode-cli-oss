@@ -13,6 +13,7 @@ exports.extractAgentPlan = extractAgentPlan;
 exports.sanitizeAgentPlan = sanitizeAgentPlan;
 exports.sanitizePlanCoherence = sanitizePlanCoherence;
 const micromatch_1 = __importDefault(require("micromatch"));
+const intent_privacy_1 = require("./intent-privacy");
 exports.AGENT_PLAN_SCHEMA_VERSION = 1;
 function normalizeRepoPath(pathValue) {
     return pathValue.replace(/\\/g, '/').replace(/^\.\//, '').trim();
@@ -46,7 +47,7 @@ function stripSourceLikePlanText(text) {
     })
         .join('\n');
 }
-const GLOB_CHARS = /[*?{}\[\]!]/;
+const GLOB_CHARS = /[*?{}[\]]/;
 function looksLikeGlob(token) {
     return GLOB_CHARS.test(token);
 }
@@ -55,16 +56,67 @@ function looksLikeGlob(token) {
  * either they contain a directory separator, or they end in a common source
  * file extension. Deliberately conservative to avoid capturing prose.
  */
-const PATH_LIKE = /^(?:[\w.@~-]+\/)*[\w.@~-]+\.[A-Za-z0-9]{1,8}$/;
-const DIR_PATH_LIKE = /^(?:[\w.@~-]+\/)+[\w.@~*-]+$/;
+const PATH_LIKE = /^(?:[\p{L}\p{N}._@+-]+\/)*[\p{L}\p{N}._@+-]+\.[\p{L}\p{N}]{1,16}$/u;
+const DIR_PATH_LIKE = /^(?:[\p{L}\p{N}._@+-]+\/)+[\p{L}\p{N}._@+-]+$/u;
+const ROUTE_PARAMETER = /^\[(?:\.\.\.)?[\p{L}\p{N}_-]+\]$/u;
+const RUNTIME_PROTOCOL_IDENTIFIERS = new Set([
+    'session.handshake',
+    'session.start',
+    'plan.capture',
+    'plan.amend',
+    'edit.before',
+    'edit.after',
+    'session.finish',
+    'approval.apply',
+    'obligation.waive',
+]);
+const REPOSITORY_ROOT_SEGMENTS = new Set([
+    'src',
+    'app',
+    'lib',
+    'packages',
+    'services',
+    'web',
+    'apps',
+    'docs',
+    'scripts',
+    'test',
+    'tests',
+    'fixtures',
+    'infra',
+    'public',
+    '.github',
+    '.cursor',
+    '.vscode',
+    '.neurcode',
+]);
 function looksLikePath(token) {
     if (!token || token.length > 200) {
         return false;
     }
-    if (looksLikeGlob(token)) {
+    if (RUNTIME_PROTOCOL_IDENTIFIERS.has(token.toLowerCase())) {
         return false;
     }
-    return PATH_LIKE.test(token) || DIR_PATH_LIKE.test(token);
+    if (looksLikeGlob(token)) {
+        const segments = token.split('/');
+        const routeOnly = segments.some((segment) => ROUTE_PARAMETER.test(segment))
+            && segments.every((segment) => !looksLikeGlob(segment) || ROUTE_PARAMETER.test(segment));
+        if (routeOnly) {
+            const [root] = segments;
+            const last = segments.at(-1) ?? '';
+            return REPOSITORY_ROOT_SEGMENTS.has(root)
+                && /^[\p{L}\p{N}._@+-]+\.[\p{L}\p{N}]{1,16}$/u.test(last);
+        }
+        return false;
+    }
+    if (PATH_LIKE.test(token)) {
+        return true;
+    }
+    if (!DIR_PATH_LIKE.test(token)) {
+        return false;
+    }
+    const [root] = token.split('/');
+    return REPOSITORY_ROOT_SEGMENTS.has(root);
 }
 /** Pull `inline code` spans out of markdown/plain text. */
 function extractInlineCodeSpans(text) {
@@ -96,16 +148,22 @@ function extractExpectedTargetsFromText(text) {
         if (!normalized) {
             return;
         }
-        if (looksLikeGlob(normalized)) {
-            // A glob still needs at least one path-ish segment to be meaningful.
-            if (/[\w/]/.test(normalized.replace(GLOB_CHARS, ''))) {
-                globs.push(normalized);
-            }
+        const validated = (0, intent_privacy_1.sanitizeRepoRelativePath)(normalized, { allowGlobs: true });
+        if (!validated.path) {
             return;
         }
-        if (looksLikePath(normalized)) {
-            files.push(normalized);
+        const exact = (0, intent_privacy_1.sanitizeRepoRelativePath)(validated.path, { allowGlobs: false });
+        if (exact.path) {
+            if (looksLikePath(exact.path))
+                files.push(exact.path);
+            return;
         }
+        const glob = (0, intent_privacy_1.sanitizeRepoRelativePath)(validated.path, {
+            allowGlobs: true,
+            requireGlob: true,
+        });
+        if (glob.path)
+            globs.push(glob.path);
     };
     // Prefer code spans (highest signal), then fall back to all tokens.
     for (const span of extractInlineCodeSpans(text)) {
@@ -329,6 +387,13 @@ function asRecord(value) {
         ? value
         : undefined;
 }
+function optionalStringArray(value) {
+    if (!Array.isArray(value))
+        return undefined;
+    return value
+        .map((entry) => asString(entry))
+        .filter((entry) => Boolean(entry));
+}
 /**
  * Locate plan-bearing text inside a Claude Code hook payload, ranked by signal.
  * Returns undefined when the payload only carries a user prompt (or nothing).
@@ -391,6 +456,8 @@ function findPlanText(payload) {
                             source: 'mcp',
                             structured: true,
                             steps: steps.length > 0 ? steps : undefined,
+                            expectedFiles: optionalStringArray(parsed.expectedFiles),
+                            expectedGlobs: optionalStringArray(parsed.expectedGlobs),
                         };
                     }
                 }
@@ -416,6 +483,8 @@ function findPlanText(payload) {
                 source: 'claude_prompt',
                 structured: true,
                 steps: steps.length > 0 ? steps : undefined,
+                expectedFiles: optionalStringArray(planRecord.expectedFiles),
+                expectedGlobs: optionalStringArray(planRecord.expectedGlobs),
             };
         }
     }
@@ -470,16 +539,31 @@ function extractAgentPlan(payload, options = {}) {
         if (!found) {
             return null;
         }
-        const safeText = stripSourceLikePlanText(found.text);
+        const safeText = (0, intent_privacy_1.sanitizeLocalPrivateText)(stripSourceLikePlanText(found.text)).value;
         const steps = found.steps && found.steps.length > 0
-            ? uniqueNonEmpty(found.steps.map(stripSourceLikePlanText))
+            ? uniqueNonEmpty(found.steps.map((step) => (0, intent_privacy_1.sanitizeLocalPrivateText)(stripSourceLikePlanText(step)).value))
             : uniqueNonEmpty(parsePlanSteps(safeText));
         // Conservative: an unstructured assistant message must actually contain
         // multiple steps to qualify as a plan.
         if (!found.structured && steps.length < 2) {
             return null;
         }
-        const { expectedFiles, expectedGlobs } = extractExpectedTargetsFromText(safeText);
+        const inferredTargets = extractExpectedTargetsFromText(safeText);
+        const expectedFiles = found.expectedFiles === undefined
+            ? inferredTargets.expectedFiles
+            : uniqueNonEmpty(found.expectedFiles.flatMap((candidate) => {
+                const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(candidate, { allowGlobs: false });
+                return sanitized.path ? [sanitized.path] : [];
+            }));
+        const expectedGlobs = found.expectedGlobs === undefined
+            ? inferredTargets.expectedGlobs
+            : uniqueNonEmpty(found.expectedGlobs.flatMap((candidate) => {
+                const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(candidate, {
+                    allowGlobs: true,
+                    requireGlob: true,
+                });
+                return sanitized.path ? [sanitized.path] : [];
+            }));
         const summary = firstSentence(safeText) ||
             (steps.length > 0 ? steps[0] : '') ||
             'Agent plan';
@@ -549,10 +633,19 @@ function sanitizeAgentPlan(value) {
         summary,
         steps,
         expectedFiles: Array.isArray(record.expectedFiles)
-            ? uniqueNonEmpty(record.expectedFiles.map((s) => asString(s) || ''))
+            ? uniqueNonEmpty(record.expectedFiles.flatMap((s) => {
+                const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(asString(s), { allowGlobs: false });
+                return sanitized.path ? [sanitized.path] : [];
+            }))
             : [],
         expectedGlobs: Array.isArray(record.expectedGlobs)
-            ? uniqueNonEmpty(record.expectedGlobs.map((s) => asString(s) || ''))
+            ? uniqueNonEmpty(record.expectedGlobs.flatMap((s) => {
+                const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(asString(s), {
+                    allowGlobs: true,
+                    requireGlob: true,
+                });
+                return sanitized.path ? [sanitized.path] : [];
+            }))
             : [],
         constraints: Array.isArray(record.constraints)
             ? uniqueNonEmpty(record.constraints.map((s) => asString(s) || ''))

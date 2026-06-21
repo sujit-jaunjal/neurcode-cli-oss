@@ -26,6 +26,8 @@ export type CanonicalVerifyOutput = VerifyOutput & {
     expediteNote?: string;
     engineeringContext?: unknown;
     driftIntelligence?: unknown;
+    evaluationStatus?: 'evaluated' | 'partial' | 'not_evaluated';
+    verificationCoverage?: unknown;
 };
 export declare const EXPEDITE_FOLLOW_UP_CHECKLIST: readonly ["Add validation back", "Move logic to proper layer", "Remove temporary code"];
 export declare function containsAnyToken(value: string, tokens: string[]): boolean;

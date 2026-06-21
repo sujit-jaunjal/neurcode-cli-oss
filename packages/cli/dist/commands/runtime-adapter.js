@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.launcherAdapterMatches = launcherAdapterMatches;
 exports.submitAgentRuntimeEvent = submitAgentRuntimeEvent;
 exports.runtimeAdapterCommand = runtimeAdapterCommand;
 const node_child_process_1 = require("node:child_process");
@@ -118,7 +119,16 @@ function childFailure(event, result) {
     throw new Error(message);
 }
 function runHook(event, hookAction, extras = {}) {
-    return runCurrentCli(['session-hook', '--dir', event.cwd, hookAction], event.cwd, hookInput(event, extras));
+    const args = ['session-hook', '--dir', event.cwd, hookAction];
+    if (hookAction === 'check') {
+        const timing = event.adapter === 'github-action'
+            ? 'ci'
+            : event.eventType === 'edit.after'
+                ? 'after_write'
+                : 'before_write';
+        args.push('--trusted-adapter', event.adapter, '--trusted-timing', timing);
+    }
+    return runCurrentCli(args, event.cwd, hookInput(event, extras));
 }
 function loadTargetSession(repoRoot, sessionId) {
     return sessionId ? (0, governance_runtime_1.loadSession)(repoRoot, sessionId) : (0, governance_runtime_1.loadActiveSession)(repoRoot);
@@ -165,6 +175,7 @@ function recordAgentRuntimeCall(event, session, governanceDecision) {
             eventId: event.eventId || null,
             timestamp: event.timestamp || null,
             enforcementLevel: capability.enforcementLevel,
+            hostCapability: capability.hostCapability,
             automatic: capability.automatic,
             toolName: typeof event.payload.toolName === 'string' ? event.payload.toolName : null,
             payloadKeys: payloadKeys(event.payload),
@@ -179,6 +190,23 @@ function recordAgentRuntimeCall(event, session, governanceDecision) {
         },
     });
 }
+function readPostWriteSource(repoRoot, filePath) {
+    const absoluteRoot = (0, node_path_1.resolve)(repoRoot);
+    const absolutePath = (0, node_path_1.resolve)(repoRoot, filePath);
+    if (absolutePath !== absoluteRoot && !absolutePath.startsWith(`${absoluteRoot}/`))
+        return null;
+    try {
+        if (!(0, node_fs_1.existsSync)(absolutePath))
+            return null;
+        const stat = (0, node_fs_1.statSync)(absolutePath);
+        if (!stat.isFile() || stat.size > 2_000_000)
+            return null;
+        return (0, node_fs_1.readFileSync)(absolutePath, 'utf8');
+    }
+    catch {
+        return null;
+    }
+}
 async function submitAgentRuntimeEvent(event) {
     const capability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)(event.adapter);
     if (!capability.events.includes(event.eventType)) {
@@ -188,6 +216,19 @@ async function submitAgentRuntimeEvent(event) {
     const targetSession = event.eventType === 'session.start'
         ? null
         : loadTargetSession(event.cwd, payload.sessionId);
+    // Bind every in-session event to the launcher's adapter posture. A governed
+    // session cannot silently change adapters — which would change its enforcement
+    // guarantee — so a cooperative agent cannot mint a Claude/Copilot hard
+    // pre-write posture by selecting that adapter string mid-session. Changing
+    // adapters requires an explicit re-handshake; session.start has no prior
+    // session and session.handshake performs its own posture check.
+    if (targetSession && event.eventType !== 'session.handshake') {
+        const launchedAdapter = (0, agent_session_launcher_1.latestAgentLauncherState)(targetSession)?.agent.adapter;
+        if (!launcherAdapterMatches(event.adapter, launchedAdapter)) {
+            throw new Error(`Runtime adapter ${event.adapter} does not match this governed session's ${launchedAdapter} launcher posture; `
+                + 'explicitly re-handshake before changing adapters.');
+        }
+    }
     switch (event.eventType) {
         case 'session.handshake': {
             const session = targetSession;
@@ -275,6 +316,7 @@ async function submitAgentRuntimeEvent(event) {
                 ...(payload.sessionId ? { session_id: payload.sessionId } : {}),
                 tool_name: payload.toolName ?? 'Write',
                 tool_input: { file_path: payload.filePath },
+                ...(payload.proposedChange ? { proposed_change: payload.proposedChange } : {}),
             });
             if (result.status !== 0)
                 childFailure(event, result);
@@ -285,10 +327,17 @@ async function submitAgentRuntimeEvent(event) {
             return decisionEnvelope(event, checked.decision, checked.message, checked.payload);
         }
         case 'edit.after': {
+            const postWriteSource = payload.filePath
+                ? readPostWriteSource(event.cwd, payload.filePath)
+                : null;
             const result = runHook(event, 'check', {
                 ...(payload.sessionId ? { session_id: payload.sessionId } : {}),
                 tool_name: payload.toolName ?? 'Write',
-                tool_input: { file_path: payload.filePath },
+                tool_input: {
+                    file_path: payload.filePath,
+                    ...(postWriteSource !== null ? { content: postWriteSource } : {}),
+                },
+                ...(payload.proposedChange ? { proposed_change: payload.proposedChange } : {}),
             });
             if (result.status !== 0)
                 childFailure(event, result);

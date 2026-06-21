@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AGENT_GUARD_SCHEMA_VERSION = void 0;
+exports.isNeurcodeManagedArtifactPath = isNeurcodeManagedArtifactPath;
 exports.captureAgentGuardSnapshot = captureAgentGuardSnapshot;
 exports.snapshotMapFromFiles = snapshotMapFromFiles;
 exports.snapshotFilesFromMap = snapshotFilesFromMap;
@@ -52,8 +53,19 @@ function runtimeCallDecision(event) {
 function sha256Hex(input) {
     return (0, node_crypto_1.createHash)('sha256').update(input).digest('hex');
 }
-function isInternalPath(path) {
-    return path === '.neurcode' || path.startsWith('.neurcode/');
+const NEURCODE_MANAGED_ARTIFACTS = new Set([
+    '.cursor/mcp.json',
+    '.cursor/rules/neurcode.mdc',
+    '.cursor/rules/neurcode-session-scope.mdc',
+    '.github/hooks/neurcode.json',
+    '.githooks/pre-commit',
+    '.githooks/pre-push',
+]);
+function isNeurcodeManagedArtifactPath(path) {
+    const normalized = normalizeRepoPath(path);
+    return normalized === '.neurcode'
+        || normalized.startsWith('.neurcode/')
+        || NEURCODE_MANAGED_ARTIFACTS.has(normalized);
 }
 function uniqueSorted(values) {
     return [...new Set(values.map(normalizeRepoPath).filter(Boolean))]
@@ -61,7 +73,7 @@ function uniqueSorted(values) {
 }
 function listRepoFiles(repoRoot) {
     const output = (0, node_child_process_1.execFileSync)('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: repoRoot, encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
-    return uniqueSorted(output.split('\0')).filter((path) => !isInternalPath(path));
+    return uniqueSorted(output.split('\0')).filter((path) => !isNeurcodeManagedArtifactPath(path));
 }
 function treeHash(files) {
     return sha256Hex(JSON.stringify(files.map((file) => ({
@@ -87,7 +99,7 @@ function snapshotFilesFromMap(map) {
 }
 function hashRepoFile(repoRoot, repoRelativePath) {
     const path = normalizeRepoPath(repoRelativePath);
-    if (!path || isInternalPath(path))
+    if (!path || isNeurcodeManagedArtifactPath(path))
         return null;
     const absolutePath = (0, node_path_1.resolve)(repoRoot, path);
     try {
@@ -109,7 +121,7 @@ function hashRepoFile(repoRoot, repoRelativePath) {
 function applyIncrementalSnapshotChanges(repoRoot, current, changedPaths) {
     for (const rawPath of changedPaths) {
         const path = normalizeRepoPath(rawPath);
-        if (!path || isInternalPath(path))
+        if (!path || isNeurcodeManagedArtifactPath(path))
             continue;
         const absolutePath = (0, node_path_1.resolve)(repoRoot, path);
         if (!(0, node_fs_1.existsSync)(absolutePath)) {
@@ -419,7 +431,8 @@ function classify(evidence) {
 function buildEvaluationFromChanges(repoRoot, artifact, session, changes) {
     const generatedAt = new Date().toISOString();
     const evidence = evidenceForSession(session, artifact.startedAt, repoRoot);
-    const files = [...changes]
+    const files = changes
+        .filter((change) => !isNeurcodeManagedArtifactPath(change.path))
         .sort((left, right) => left.path.localeCompare(right.path))
         .map((change) => {
         const item = lookupEvidence(evidence, change.path, repoRoot);

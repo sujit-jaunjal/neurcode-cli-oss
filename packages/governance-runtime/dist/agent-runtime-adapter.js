@@ -1,4 +1,9 @@
 "use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.AGENT_RUNTIME_DECISION_SCHEMA_VERSION = exports.AGENT_RUNTIME_ADAPTER_SCHEMA_VERSION = void 0;
+exports.listAgentRuntimeAdapterCapabilities = listAgentRuntimeAdapterCapabilities;
+exports.getAgentRuntimeAdapterCapability = getAgentRuntimeAdapterCapability;
+exports.normalizeAgentRuntimeEvent = normalizeAgentRuntimeEvent;
 /**
  * Agent Runtime Adapter Contract V1
  *
@@ -6,11 +11,7 @@
  * companions, and future agent integrations. The adapter contract describes
  * agent lifecycle events; the CLI remains the local enforcement engine.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.AGENT_RUNTIME_DECISION_SCHEMA_VERSION = exports.AGENT_RUNTIME_ADAPTER_SCHEMA_VERSION = void 0;
-exports.listAgentRuntimeAdapterCapabilities = listAgentRuntimeAdapterCapabilities;
-exports.getAgentRuntimeAdapterCapability = getAgentRuntimeAdapterCapability;
-exports.normalizeAgentRuntimeEvent = normalizeAgentRuntimeEvent;
+const contracts_1 = require("@neurcode-ai/contracts");
 exports.AGENT_RUNTIME_ADAPTER_SCHEMA_VERSION = 'neurcode.agent-runtime-event.v1';
 exports.AGENT_RUNTIME_DECISION_SCHEMA_VERSION = 'neurcode.agent-runtime-decision.v1';
 const ALL_RUNTIME_EVENTS = [
@@ -30,6 +31,7 @@ const CAPABILITIES = [
         enforcementLevel: 'hard_deny',
         controlLevel: 'hard_block_capable',
         compatibilityMode: 'hard_pre_write_enforcement',
+        hostCapability: 'hard_prewrite',
         automatic: true,
         events: ['session.start', 'plan.capture', 'edit.before', 'session.finish'],
         enforceable: ['pre-write boundary deny', 'pre-write intent and plan checks', 'exact-path approvals'],
@@ -42,6 +44,7 @@ const CAPABILITIES = [
         enforcementLevel: 'hard_deny',
         controlLevel: 'hard_block_capable',
         compatibilityMode: 'hard_pre_write_enforcement',
+        hostCapability: 'hard_prewrite',
         automatic: true,
         events: ['session.start', 'plan.capture', 'edit.before', 'session.finish'],
         enforceable: ['pre-tool boundary deny when Copilot hook discovery is active', 'exact-path approvals'],
@@ -54,6 +57,7 @@ const CAPABILITIES = [
         enforcementLevel: 'cooperative',
         controlLevel: 'supervised_advisory_capable',
         compatibilityMode: 'cooperative_check',
+        hostCapability: 'cooperative_prewrite',
         automatic: false,
         events: [...ALL_RUNTIME_EVENTS],
         enforceable: ['runtime decision returned to cooperating agent', 'exact-path approvals when the agent calls the runtime'],
@@ -66,6 +70,7 @@ const CAPABILITIES = [
         enforcementLevel: 'cooperative',
         controlLevel: 'supervised_advisory_capable',
         compatibilityMode: 'supervisor_diff_watch',
+        hostCapability: 'cooperative_prewrite',
         automatic: false,
         events: [...ALL_RUNTIME_EVENTS],
         enforceable: ['cooperative edit.before checks when Codex calls the runtime', 'pre-commit supervisor/diff-watch warnings'],
@@ -78,6 +83,7 @@ const CAPABILITIES = [
         enforcementLevel: 'cooperative',
         controlLevel: 'supervised_advisory_capable',
         compatibilityMode: 'supervisor_diff_watch',
+        hostCapability: 'supervised_write',
         automatic: false,
         events: [...ALL_RUNTIME_EVENTS],
         enforceable: ['cooperative edit.before checks when Cursor calls the runtime', 'pre-commit supervisor/diff-watch warnings'],
@@ -90,6 +96,7 @@ const CAPABILITIES = [
         enforcementLevel: 'observe_only',
         controlLevel: 'evidence_only_capable',
         compatibilityMode: 'evidence_only',
+        hostCapability: 'post_write',
         automatic: false,
         events: [...ALL_RUNTIME_EVENTS],
         enforceable: ['live visibility', 'source-free evidence capture'],
@@ -102,6 +109,7 @@ const CAPABILITIES = [
         enforcementLevel: 'post_change_backstop',
         controlLevel: 'evidence_only_capable',
         compatibilityMode: 'evidence_only',
+        hostCapability: 'ci_only',
         automatic: true,
         events: ['edit.after', 'session.finish'],
         enforceable: ['post-change admission/backstop checks'],
@@ -153,6 +161,21 @@ function assertSourceFree(value, path = 'payload') {
         return;
     for (const [key, child] of Object.entries(record)) {
         const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (normalizedKey === 'content' &&
+            path.endsWith('.proposedChange') &&
+            asRecord(child)) {
+            const metadata = asRecord(child);
+            const allowed = new Set(['present', 'availabilityReason', 'contentHash', 'rawRetained']);
+            for (const metadataKey of Object.keys(metadata)) {
+                if (!allowed.has(metadataKey)) {
+                    throw new Error(`source-like adapter payload key is not allowed: ${path}.${key}.${metadataKey}`);
+                }
+            }
+            if (metadata.rawRetained !== false) {
+                throw new Error(`proposed change raw content must not be retained: ${path}.${key}.rawRetained`);
+            }
+            continue;
+        }
         if (SOURCE_LIKE_KEYS.has(normalizedKey)) {
             throw new Error(`source-like adapter payload key is not allowed: ${path}.${key}`);
         }
@@ -216,9 +239,29 @@ function normalizeAgentRuntimeEvent(value) {
     }
     const rawPayload = asRecord(record.payload) ?? {};
     assertSourceFree(rawPayload);
+    const filePath = cleanString(rawPayload.filePath, 1000);
+    const proposedChangeRecord = asRecord(rawPayload.proposedChange);
+    let proposedChange;
+    if (proposedChangeRecord) {
+        if (!filePath)
+            throw new Error('payload.filePath is required when payload.proposedChange is present');
+        const timing = record.adapter === 'github-action'
+            ? 'ci'
+            : record.eventType === 'edit.after'
+                ? 'after_write'
+                : 'before_write';
+        proposedChange = (0, contracts_1.validateAndBindProposedChangeEnvelope)(proposedChangeRecord, {
+            adapterId: record.adapter,
+            timing,
+            targetPath: filePath,
+            ...(typeof rawPayload.sessionId === 'string'
+                ? { session: { sessionId: rawPayload.sessionId.trim() } }
+                : {}),
+        });
+    }
     const payload = {
         goal: cleanString(rawPayload.goal),
-        filePath: cleanString(rawPayload.filePath, 1000),
+        filePath,
         toolName: cleanString(rawPayload.toolName, 120),
         plan: cleanPlan(rawPayload.plan),
         summary: cleanString(rawPayload.summary, 1000),
@@ -232,6 +275,7 @@ function normalizeAgentRuntimeEvent(value) {
             ? Math.max(0, Math.min(24 * 60, rawPayload.ttlMinutes))
             : undefined,
         actor: cleanString(rawPayload.actor, 300),
+        proposedChange,
     };
     switch (record.eventType) {
         case 'session.handshake':

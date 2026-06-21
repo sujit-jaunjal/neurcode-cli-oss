@@ -31,7 +31,7 @@ pnpm test:contracts
 
 ```bash
 pnpm oss:export -- --force
-pnpm oss:export:actions -- --force
+pnpm oss:export:action -- --force
 pnpm oss:check:export:cli
 pnpm oss:check:export:action
 ```

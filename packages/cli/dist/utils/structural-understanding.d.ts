@@ -2,7 +2,7 @@ import type { DiffFile } from '@neurcode-ai/diff-parser';
 import { type GovernanceSession, type RepoGovernanceProfile } from '@neurcode-ai/governance-runtime';
 export declare const STRUCTURAL_UNDERSTANDING_SCHEMA_VERSION: "neurcode.structural-understanding.v1";
 export declare const CONSEQUENCE_UNDERSTANDING_SCHEMA_VERSION: "neurcode.consequence-understanding.v1";
-export type StructuralUnderstandingProvenance = 'git-diff' | 'typescript-compiler' | 'session-plan' | 'codeowners-profile' | 'deterministic-ranking' | 'generated-artifact-heuristic' | 'effect-registry' | 'typescript-checker' | 'inheritance-projection';
+export type StructuralUnderstandingProvenance = 'git-diff' | 'git-untracked' | 'typescript-compiler' | 'session-plan' | 'codeowners-profile' | 'deterministic-ranking' | 'generated-artifact-heuristic' | 'effect-registry' | 'typescript-checker' | 'inheritance-projection' | 'repo-symbol-index' | 'token-fingerprint';
 export type StructuralSuppressedArtifactReason = 'neurcodeignore' | 'dist_directory' | 'build_directory' | 'out_directory' | 'minified_javascript' | 'bundled_javascript' | 'webpack_bootstrap' | 'webpack_modules' | 'source_map_marker' | 'generated_marker';
 export interface StructuralChangedSymbol {
     name: string;
@@ -269,6 +269,64 @@ export interface ConsequenceUnderstandingArtifact {
         topImpacts: 'deterministic-impact-grouping';
     };
 }
+export type StructuralReuseMatchType = 'exported_name_collision' | 'normalized_signature_match' | 'token_fingerprint_match' | 'signature_token_fingerprint_match';
+export type StructuralReuseConfidence = 'high' | 'medium';
+export type StructuralReuseReasonCode = 'exported_symbol_name_collision' | 'same_normalized_signature' | 'same_normalized_token_fingerprint' | 'high_token_shingle_overlap' | 'changed_symbol_added' | 'changed_symbol_modified' | 'existing_symbol_elsewhere' | 'typescript_javascript_only';
+export interface StructuralReuseSymbolRef {
+    file: string;
+    name: string;
+    kind: 'function' | 'class' | 'method';
+    exported: boolean;
+    local: boolean;
+    signatureHash: string;
+    tokenFingerprintHash: string | null;
+    tokenShingleSetHash: string | null;
+    paramCount: number;
+    memberCount: number;
+    returnShape: string | null;
+    provenance: 'repo-symbol-index';
+}
+export interface StructuralReuseFinding {
+    schemaVersion: 'neurcode.reuse-finding.v1';
+    severity: 'warn';
+    advisory: true;
+    hardBlock: false;
+    changed: StructuralReuseSymbolRef;
+    existing: StructuralReuseSymbolRef;
+    matchType: StructuralReuseMatchType;
+    confidence: StructuralReuseConfidence;
+    reasonCodes: StructuralReuseReasonCode[];
+    evidence: {
+        signatureHash: string | null;
+        tokenFingerprintHash: string | null;
+        tokenShingleSetHash: string | null;
+        tokenOverlap: number | null;
+        changedNormalizedTokenCount: number;
+        existingNormalizedTokenCount: number;
+    };
+    action: 'review_existing_helper_before_merging';
+    message: string;
+    provenance: 'repo-symbol-index';
+}
+export interface StructuralRepoSymbolIndexSummary {
+    schemaVersion: 'neurcode.repo-symbol-index.v1';
+    language: 'typescript/javascript';
+    modelUsed: false;
+    sourceUploaded: false;
+    sourceStored: false;
+    indexedFileCount: number;
+    indexedSymbolCount: number;
+    exportedSymbolCount: number;
+    localFunctionCount: number;
+    methodCount: number;
+    classCount: number;
+    changedCandidateCount: number;
+    unsupportedLanguages: ['python'];
+    indexHash: string;
+    fingerprintAlgorithm: 'typescript-scanner-normalized-token-shingles-v1';
+    signatureAlgorithm: 'name-insensitive-kind-arity-param-return-shape-v1';
+    provenance: 'repo-symbol-index';
+}
 export interface StructuralUnderstandingArtifact {
     schemaVersion: typeof STRUCTURAL_UNDERSTANDING_SCHEMA_VERSION;
     generatedAt: string;
@@ -305,7 +363,7 @@ export interface StructuralUnderstandingArtifact {
         changeType: DiffFile['changeType'];
         addedLines: number;
         removedLines: number;
-        provenance: 'git-diff';
+        provenance: 'git-diff' | 'git-untracked';
     }>;
     changedSymbols: StructuralChangedSymbol[];
     references: StructuralReference[];
@@ -314,6 +372,8 @@ export interface StructuralUnderstandingArtifact {
     testReferences: StructuralReference[];
     digest: StructuralDigest;
     consequenceUnderstanding: ConsequenceUnderstandingArtifact;
+    repoSymbolIndex: StructuralRepoSymbolIndexSummary;
+    reuseFindings: StructuralReuseFinding[];
     planAlignment: StructuralPlanAlignment | null;
     boundaryImpact: StructuralBoundaryImpact[];
     limitations: string[];

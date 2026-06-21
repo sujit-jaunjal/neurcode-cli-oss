@@ -139,7 +139,15 @@ function freshnessFor(repoRoot, session, force) {
         return cached.signal;
     const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
     const action = (0, v0_governance_1.profileFreshnessActionForSession)(staleness, session?.profileHash);
-    const signal = (0, v0_governance_1.buildProfileFreshnessSignal)(staleness, action);
+    const signal = (0, v0_governance_1.buildProfileFreshnessSignal)(staleness, action, {
+        sessionProfileHash: session?.profileHash,
+        ...(action === 'session_restart_required'
+            ? {
+                recoveryReason: 'active_session_profile_changed',
+                recoveryCommand: 'neurcode session reset-stale --force',
+            }
+            : {}),
+    });
     freshnessCache.set(repoRoot, { expiresAt: Date.now() + PROFILE_FRESHNESS_CACHE_MS, signal });
     return signal;
 }

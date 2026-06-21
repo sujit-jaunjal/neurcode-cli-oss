@@ -649,6 +649,48 @@ function runtimeCommand(program) {
         .description('Read-only runtime cloud verification for governed agent sessions');
     (0, runtime_identity_1.registerRuntimeIdentityCommand)(runtime);
     runtime
+        .command('privacy-audit')
+        .description('Audit local runtime privacy boundaries without printing prompt or payload content')
+        .option('--repair', 'Rewrite only pending outbox entries after a restricted local backup')
+        .option('--dir <path>', 'Repository root (default: current directory)')
+        .option('--json', 'Output machine-readable aggregate counts')
+        .action((options) => {
+        try {
+            const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+            const report = (0, runtime_outbox_1.auditRuntimePrivacy)(repoRoot, { repair: options.repair === true });
+            if (options.json) {
+                console.log(JSON.stringify(report, null, 2));
+            }
+            else {
+                console.log('');
+                console.log(chalk.bold('Runtime privacy audit'));
+                console.log(chalk.dim('-'.repeat(64)));
+                console.log(`Files scanned:      ${report.filesScanned}`);
+                console.log(`Entries scanned:    ${report.entriesScanned}`);
+                console.log(`Safe:               ${report.safe}`);
+                console.log(`Migrated:           ${report.migrated}`);
+                console.log(`Unsafe/quarantined: ${report.quarantined}`);
+                console.log(`Quarantined stored: ${report.quarantinedTotal}`);
+                console.log(`Quarantined this run:${String(report.quarantinedThisRun).padStart(2, ' ')}`);
+                console.log(`Rejected:           ${report.rejected}`);
+                console.log(`Schemas:            ${report.schemaVersions.join(', ')}`);
+                console.log(`Reason-code counts: ${Object.entries(report.reasonCodeCounts).map(([key, count]) => `${key}=${count}`).join(', ') || 'none'}`);
+                console.log(`Next action:        ${report.nextRecoveryAction}`);
+                console.log('');
+            }
+            if (report.quarantined > 0 || report.rejected > 0)
+                process.exitCode = 1;
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (options.json)
+                console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+            else
+                console.error(chalk.red(`Runtime privacy audit failed: ${message}`));
+            process.exitCode = 1;
+        }
+    });
+    runtime
         .command('cloud-status')
         .description('Read dashboard/runtime cloud state without mutating approvals or sessions')
         .option('--session-id <id>', 'Governance session ID (default: active local session or latest live session)')

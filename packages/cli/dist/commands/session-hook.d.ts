@@ -19,6 +19,7 @@
  */
 import type { Command } from 'commander';
 import { checkFileBoundary, type GovernanceSession, type RuntimeBlockType } from '@neurcode-ai/governance-runtime';
+import type { TrustedProposedChangeAdapterId } from '@neurcode-ai/contracts';
 export interface HookSessionResolution {
     session: GovernanceSession | null;
     requestedSessionId?: string;
@@ -27,6 +28,10 @@ export interface HookSessionResolution {
 export declare function resolveSessionForHook(repoRoot: string, requestedSessionId?: string): HookSessionResolution;
 export declare function normalizeHookFilePathForRepo(rawPath: string, repoRoot: string): string;
 export declare function hookFilePathCandidates(hookInput: Record<string, unknown>): string[];
+export declare function proposedSourceFromHookInput(hookInput: Record<string, unknown>): {
+    source: string | null;
+    sourceKind: 'write_content' | 'edit_new_string' | 'multi_edit_new_strings' | 'not_available';
+};
 export interface NoActiveSessionWriteDecision {
     block: boolean;
     filePath: string;
@@ -39,5 +44,17 @@ export declare function shouldKeepSessionActiveForPendingApproval(session: Gover
     suggestedApprovalPath?: string | null;
     blockType?: RuntimeBlockType;
 } | null): boolean;
+/**
+ * Bind the attested host posture to the session's established launcher posture.
+ * A governed session launched by a cooperative or observe-only agent can never
+ * be re-labelled as host-enforced hard pre-write by a later check, even if the
+ * check declares a hard adapter string. Changing adapters requires an explicit
+ * re-handshake that re-launches the session. This is posture binding, not a
+ * cryptographic host-attestation claim.
+ */
+export declare function reconcileTrustedAdapterPosture(declared: TrustedProposedChangeAdapterId, launched: TrustedProposedChangeAdapterId | undefined): {
+    adapterId: TrustedProposedChangeAdapterId;
+    downgraded: boolean;
+};
 export declare function sessionHookCommand(program: Command): void;
 //# sourceMappingURL=session-hook.d.ts.map
