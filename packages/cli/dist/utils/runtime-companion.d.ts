@@ -1,6 +1,8 @@
 import { normalizeArchitectureObligationPolicy, summarizeArchitectureObligations, type AgentPlan, type AgentPlanAmendmentProposal, type ArchitectureObligation, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
 import { type ProfileFreshnessSignal } from './v0-governance';
 import { type RuntimeOutboxStatus } from './runtime-outbox';
+import { readBrainLifecycle } from './brain-lifecycle';
+import { inspectRuntimeAuthority } from './runtime-authority';
 export declare const RUNTIME_COMPANION_SCHEMA_VERSION: "neurcode.runtime-companion.v1";
 export interface RuntimeCompanionPlan {
     revision: number;
@@ -64,6 +66,26 @@ export interface RuntimeCompanionSnapshot {
         hardDenyAvailable: false;
         detail: string;
     };
+    runtimeAuthority: ReturnType<typeof inspectRuntimeAuthority>;
+    pairing: {
+        repositoryOwnershipBound: boolean;
+        machineAuthenticated: boolean;
+        agentIntegrationActive: boolean;
+        cloudTransportConnected: boolean;
+        repoBrainReady: boolean;
+        governedSessionActive: boolean;
+        evidenceSynchronized: boolean;
+    };
+    topology: null | {
+        artifactHash: string;
+        trackedFileCount: number;
+        deterministicFacts: number;
+        advisoryFacts: number;
+        brainParticipated: boolean;
+        brainFreshness: string | null;
+        limitations: string[];
+    };
+    brain: ReturnType<typeof readBrainLifecycle>;
     profileFreshness: ProfileFreshnessSignal & {
         sessionProfileHash: string | null;
     };
@@ -73,12 +95,20 @@ export interface RuntimeCompanionSnapshot {
     session: null | {
         sessionId: string;
         status: GovernanceSession['status'];
+        completionStatus: GovernanceSession['completionStatus'] | null;
         repoName: string;
         goal: string;
         profileHash: string;
         scopeMode: GovernanceSession['contract']['scopeMode'];
         planCoherenceMode: NonNullable<GovernanceSession['contract']['planCoherenceMode']>;
         allowedGlobs: string[];
+        scopeEvidence: Array<{
+            glob: string;
+            evidenceType: string;
+            authority: 'deterministic' | 'advisory' | 'explicit';
+            confidence: string;
+            reason: string;
+        }>;
         approvalRequiredGlobs: string[];
         approvedPaths: string[];
         launcher: null | {

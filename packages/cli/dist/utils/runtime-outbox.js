@@ -276,8 +276,20 @@ function createRestrictedBackup(repoRoot, outbox) {
 function preparePayload(eventType, payload) {
     assertSourceFree(payload);
     const rawValidation = (0, governance_runtime_1.validatePrivacySafeCloudPayload)(payload);
+    const trustedTopologyRootMarkers = new Set();
+    const rawSession = recordValue(payload.session);
+    const rawContract = recordValue(rawSession?.contract);
+    const rawTopology = recordValue(rawContract?.repositoryTopology);
+    if (Array.isArray(rawTopology?.facts)) {
+        rawTopology.facts.forEach((fact, index) => {
+            if (recordValue(fact)?.path === '.') {
+                trustedTopologyRootMarkers.add(`payload.session.contract.repositoryTopology.facts[${index}].path`);
+            }
+        });
+    }
     const semanticPathIssues = rawValidation.issues.filter((issue) => /\.(?:path|filePath|paths|pathTokens|expectedFiles|expectedGlobs|allowedGlobs|sensitiveGlobs|approvalRequiredGlobs|approvedPaths|safeSupportGlobs|ignoredGlobs|expectedPathGlobs|supportPathGlobs|outOfScopeGlobs|addedFiles|addedGlobs|blockedPath|suggestedApprovalPath|requiredPath|appliedPath)(?:\[|\.|$)/i
-        .test(issue.fieldPath));
+        .test(issue.fieldPath)
+        && !trustedTopologyRootMarkers.has(issue.fieldPath));
     if (semanticPathIssues.length > 0) {
         const description = semanticPathIssues
             .slice(0, 12)
@@ -318,6 +330,7 @@ function assertRuntimeSessionShape(value) {
         'repoName',
         'profileHash',
         'status',
+        'completionStatus',
         'startedAt',
         'finishedAt',
         'replayHash',
@@ -370,6 +383,7 @@ function assertRuntimeSessionShape(value) {
         'planVersionCount',
         'pendingPlanAmendmentCount',
         'architecture',
+        'scopeAuthority',
         'ruleIds',
     ], 'payload.session.contract');
     const contract = recordValue(session.contract);
@@ -380,6 +394,31 @@ function assertRuntimeSessionShape(value) {
         'waived',
         'criticalPending',
     ], 'payload.session.contract.architecture');
+    if (contract?.scopeAuthority !== undefined) {
+        const scopeAuthority = assertAllowedKeys(contract.scopeAuthority, [
+            'confidence',
+            'expectedFiles',
+            'expectedGlobs',
+            'expectedSymbols',
+            'likelyTests',
+            'affectedPackages',
+            'affectedModules',
+            'prohibitedBoundaries',
+            'selections',
+            'unsupportedAreas',
+            'brain',
+        ], 'payload.session.contract.scopeAuthority');
+        if (Array.isArray(scopeAuthority.selections)) {
+            scopeAuthority.selections.forEach((selection, index) => {
+                assertAllowedKeys(selection, [
+                    'target', 'targetType', 'source', 'confidence', 'authority', 'evidenceType', 'factId', 'reason',
+                ], `payload.session.contract.scopeAuthority.selections[${index}]`);
+            });
+        }
+        assertAllowedKeys(scopeAuthority.brain, [
+            'evaluated', 'freshness', 'reason',
+        ], 'payload.session.contract.scopeAuthority.brain');
+    }
     if (!Array.isArray(session.events)) {
         throw new Error('intent privacy validation failed (payload.session.events:invalid_schema)');
     }
@@ -465,6 +504,10 @@ function assertRuntimeCloudPayloadShape(eventType, payload) {
             'profileHash',
             'topologyHash',
             'profileFreshness',
+            'runtimeAuthority',
+            'topology',
+            'brain',
+            'pairing',
             'source',
         ], 'payload.repo');
         if (repo.profileFreshness !== undefined) {
@@ -486,6 +529,55 @@ function assertRuntimeCloudPayloadShape(eventType, payload) {
                 'recoveryCommand',
                 'unresolvedHumanDecisions',
             ], 'payload.repo.profileFreshness');
+        }
+        if (repo.runtimeAuthority !== undefined) {
+            assertAllowedKeys(repo.runtimeAuthority, [
+                'status',
+                'manifestHash',
+                'cliVersion',
+                'packageOrBuildHash',
+                'installationSource',
+                'activatedAt',
+                'integrationCount',
+                'repairCommand',
+            ], 'payload.repo.runtimeAuthority');
+        }
+        if (repo.topology !== undefined) {
+            assertAllowedKeys(repo.topology, [
+                'schemaVersion',
+                'artifactHash',
+                'trackedFileCount',
+                'deterministicFacts',
+                'advisoryFacts',
+                'brainParticipated',
+                'brainFreshness',
+            ], 'payload.repo.topology');
+        }
+        if (repo.brain !== undefined) {
+            assertAllowedKeys(repo.brain, [
+                'state',
+                'updatedAt',
+                'filesScanned',
+                'filesIndexed',
+                'totalFiles',
+                'percent',
+                'reasonCodes',
+                'unsupportedFacts',
+                'retryCommand',
+                'cancelCommand',
+                'recoverCommand',
+            ], 'payload.repo.brain');
+        }
+        if (repo.pairing !== undefined) {
+            assertAllowedKeys(repo.pairing, [
+                'repositoryOwnershipBound',
+                'machineAuthenticated',
+                'agentIntegrationActive',
+                'cloudTransportConnected',
+                'repoBrainReady',
+                'governedSessionActive',
+                'evidenceSynchronized',
+            ], 'payload.repo.pairing');
         }
     }
     assertRuntimeSessionShape(envelope.session);

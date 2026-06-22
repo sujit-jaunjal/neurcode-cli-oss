@@ -20,6 +20,8 @@ const admission_artifact_1 = require("../utils/admission-artifact");
 const local_repo_brain_1 = require("../utils/local-repo-brain");
 const repo_brain_impact_1 = require("../utils/repo-brain-impact");
 const runtime_privacy_1 = require("../utils/runtime-privacy");
+const cli_runtime_1 = require("@neurcode-ai/cli-runtime");
+const brain_lifecycle_1 = require("../utils/brain-lifecycle");
 let chalk;
 try {
     chalk = require('chalk');
@@ -422,6 +424,10 @@ function buildCompactUploadSession(repoRoot, record) {
 }
 function buildUploadPayloadFromSessions(repoRoot, sessions) {
     const profile = readJsonFile((0, path_1.join)(repoRoot, '.neurcode', 'profile.json'));
+    const manifest = (0, cli_runtime_1.readActivatedRuntimeManifest)(repoRoot);
+    const lifecycle = (0, brain_lifecycle_1.readBrainLifecycle)(repoRoot);
+    const repositoryTopology = profile?.repositoryTopology;
+    const topologyFacts = Array.isArray(repositoryTopology?.facts) ? repositoryTopology.facts : [];
     const freshness = (0, v0_governance_1.buildProfileFreshnessSignal)((0, v0_governance_1.getProfileStaleness)(repoRoot));
     const remote = gitValue(repoRoot, ['config', '--get', 'remote.origin.url']);
     const repoName = typeof profile?.repo?.name === 'string' && profile.repo.name.trim()
@@ -437,6 +443,55 @@ function buildUploadPayloadFromSessions(repoRoot, sessions) {
             profileFreshness: {
                 ...freshness,
                 profilePath: '.neurcode/profile.json',
+            },
+            runtimeAuthority: {
+                status: manifest ? 'activated' : 'missing',
+                manifestHash: manifest?.manifestHash ?? null,
+                cliVersion: manifest?.runtime.cliVersion ?? null,
+                packageOrBuildHash: manifest?.runtime.packageOrBuildHash ?? null,
+                installationSource: manifest?.runtime.installationSource ?? null,
+                activatedAt: manifest?.activatedAt ?? null,
+                integrationCount: manifest?.integrations.length ?? 0,
+                repairCommand: 'neurcode runtime repair',
+            },
+            topology: repositoryTopology ? {
+                schemaVersion: repositoryTopology.schemaVersion ?? null,
+                artifactHash: repositoryTopology.artifactHash ?? null,
+                trackedFileCount: repositoryTopology.trackedFileCount ?? null,
+                deterministicFacts: topologyFacts.filter((fact) => fact?.evidence?.authority === 'deterministic').length,
+                advisoryFacts: topologyFacts.filter((fact) => fact?.evidence?.authority === 'advisory').length,
+                brainParticipated: repositoryTopology.brain?.participated === true,
+                brainFreshness: repositoryTopology.brain?.freshness ?? null,
+            } : {
+                schemaVersion: null,
+                artifactHash: null,
+                trackedFileCount: null,
+                deterministicFacts: 0,
+                advisoryFacts: 0,
+                brainParticipated: false,
+                brainFreshness: null,
+            },
+            brain: {
+                state: lifecycle?.state ?? 'missing',
+                updatedAt: lifecycle?.updatedAt ?? null,
+                filesScanned: lifecycle?.progress.filesScanned ?? 0,
+                filesIndexed: lifecycle?.progress.filesIndexed ?? 0,
+                totalFiles: lifecycle?.progress.totalFiles ?? null,
+                percent: lifecycle?.progress.percent ?? null,
+                reasonCodes: lifecycle?.reasonCodes ?? ['graph_missing'],
+                unsupportedFacts: lifecycle?.unsupportedFacts ?? [],
+                retryCommand: lifecycle?.recoveryCommands.retry ?? 'neurcode brain retry',
+                cancelCommand: lifecycle?.recoveryCommands.cancel ?? 'neurcode brain cancel',
+                recoverCommand: lifecycle?.recoveryCommands.recover ?? 'neurcode brain repo-recover',
+            },
+            pairing: {
+                repositoryOwnershipBound: Boolean(profile),
+                machineAuthenticated: true,
+                agentIntegrationActive: Boolean(manifest?.integrations.length),
+                cloudTransportConnected: true,
+                repoBrainReady: lifecycle?.state === 'fresh' || lifecycle?.state === 'partial',
+                governedSessionActive: sessions.some((session) => session.status === 'active'),
+                evidenceSynchronized: false,
             },
             source: 'local',
         },

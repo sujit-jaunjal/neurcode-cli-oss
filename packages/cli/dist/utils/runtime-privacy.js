@@ -179,6 +179,56 @@ function architectureSummary(session) {
         criticalPending: obligations.filter((item) => item.status === 'pending' && item.severity === 'critical').length,
     };
 }
+function scopeAuthoritySummary(session) {
+    const intent = session.contract.intentContract;
+    const authority = intent?.scopeAuthority;
+    if (!intent || !authority) {
+        return {
+            confidence: intent?.confidence ?? 'low',
+            expectedFiles: [],
+            expectedGlobs: [],
+            expectedSymbols: [],
+            likelyTests: [],
+            affectedPackages: [],
+            affectedModules: [],
+            prohibitedBoundaries: [],
+            selections: [],
+            unsupportedAreas: ['scope_authority_unavailable'],
+            brain: { evaluated: false, freshness: null, reason: 'Scope authority is unavailable for this session.' },
+        };
+    }
+    return {
+        confidence: intent.confidence,
+        expectedFiles: safePaths(authority.expectedFiles, 100),
+        expectedGlobs: safePaths(authority.expectedGlobs, 100),
+        expectedSymbols: stringArray(authority.expectedSymbols, 100),
+        likelyTests: safePaths(authority.likelyTests, 100),
+        affectedPackages: safePaths(authority.affectedPackages, 100),
+        affectedModules: safePaths(authority.affectedModules, 100),
+        prohibitedBoundaries: safePaths(authority.prohibitedBoundaries, 100),
+        selections: authority.selections.slice(0, 100).flatMap((selection) => {
+            const target = safePaths([selection.target], 1)[0];
+            if (!target)
+                return [];
+            return [{
+                    target,
+                    targetType: selection.targetType,
+                    source: selection.source,
+                    confidence: selection.confidence,
+                    authority: selection.authority,
+                    evidenceType: stringValue(selection.evidenceType, 120),
+                    factId: stringValue(selection.factId, 200),
+                    reason: stringValue(selection.reason, 500),
+                }];
+        }),
+        unsupportedAreas: stringArray(authority.unsupportedAreas, 50),
+        brain: {
+            evaluated: authority.brain.evaluated,
+            freshness: stringValue(authority.brain.freshness, 80),
+            reason: stringValue(authority.brain.reason, 500),
+        },
+    };
+}
 function buildCloudSafeRuntimeSession(session) {
     const events = session.events.slice(-80).map(cloudSafeEvent);
     const safe = {
@@ -189,6 +239,7 @@ function buildCloudSafeRuntimeSession(session) {
         repoName: stringValue(session.repoName, 200),
         profileHash: stringValue(session.profileHash, 200),
         status: session.status,
+        completionStatus: session.completionStatus ?? null,
         startedAt: sessionStartedAt(session),
         finishedAt: timestamp(session.finishedAt),
         replayHash: stringValue(session.replayHash, 200),
@@ -203,6 +254,7 @@ function buildCloudSafeRuntimeSession(session) {
             planVersionCount: session.contract.agentPlanRevisions?.length ?? (session.contract.agentPlan ? 1 : 0),
             pendingPlanAmendmentCount: session.contract.planAmendmentProposals?.filter((item) => item.status === 'pending').length ?? 0,
             architecture: architectureSummary(session),
+            scopeAuthority: scopeAuthoritySummary(session),
             ruleIds: Array.from(new Set(session.contract.architectureObligations?.map((item) => item.id).filter(Boolean) ?? [])).sort().slice(0, 64),
         },
         events,

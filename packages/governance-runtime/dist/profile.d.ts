@@ -10,6 +10,7 @@
  */
 import { type ArchitectureObligationPolicy } from './architecture-obligations';
 import { type ModuleImportRecord, type RepoArchitectureGraph } from './architecture-graph';
+import { type GeneratedProvenanceEvidence, type RepositoryManifestEvidence, type RepositoryTopologyArtifact, type TopologyBrainFact } from './repository-topology';
 export interface SensitiveBoundary {
     glob: string;
     tag: 'auth' | 'crypto' | 'secrets' | 'payments' | 'migrations' | 'security' | 'custom';
@@ -34,6 +35,8 @@ export interface RepoGovernanceProfile {
         /** Present only when a dependency graph was derived (imports supplied). */
         architectureHash?: string | null;
     };
+    /** Canonical source-free topology facts used by runtime scope compilation. */
+    repositoryTopology?: RepositoryTopologyArtifact;
     runtimeConfig: RuntimeGovernanceConfig;
     stack: {
         primaryLanguage: string;
@@ -75,6 +78,15 @@ export interface ProfileInput {
     repoName: string;
     source: 'local' | 'github';
     runtimeConfig?: Partial<RuntimeGovernanceConfig> | null;
+    /** All tracked package/workspace manifests available to the local compiler. */
+    manifests?: RepositoryManifestEvidence[];
+    /** Proven generated-output relationships discovered locally. */
+    generatedEvidence?: GeneratedProvenanceEvidence[];
+    /** Freshness-qualified source-free Repo Brain facts. */
+    brain?: {
+        freshness: string | null;
+        facts: TopologyBrainFact[];
+    } | null;
     /**
      * Per-file import specifiers, read locally by the caller. When supplied, the
      * builder derives the architecture dependency graph. Source-free: only module

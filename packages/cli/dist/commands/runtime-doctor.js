@@ -12,6 +12,7 @@ const runtime_outbox_1 = require("../utils/runtime-outbox");
 const hook_heartbeat_1 = require("../utils/hook-heartbeat");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const profile_drift_recovery_1 = require("../utils/profile-drift-recovery");
+const runtime_authority_1 = require("../utils/runtime-authority");
 /** True when the goal produced an over-broad approval scope (e.g. `**`). */
 function hasOverBroadApprovalScope(session) {
     const globs = session.contract?.approvalRequiredGlobs ?? [];
@@ -173,7 +174,9 @@ function runtimeDoctorCommand(options = {}) {
         ...(profileAction === 'session_restart_required'
             ? {
                 recoveryReason: 'active_session_profile_changed',
-                recoveryCommand: profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND,
+                recoveryCommand: activeSession
+                    ? `neurcode session end --local --session-id ${activeSession.sessionId} --outcome superseded`
+                    : profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND,
                 unresolvedHumanDecisions: pendingProfileDecisions.length > 0,
             }
             : {}),
@@ -195,6 +198,24 @@ function runtimeDoctorCommand(options = {}) {
     const checks = [];
     const dashboardSyncFailed = Boolean(connection?.autoSync.enabled && connection.autoSync.lastStatus === 'failed');
     const dashboardSyncRecovered = dashboardSyncFailed && transport.health === 'healthy' && Boolean(transport.lastDeliveredAt);
+    const runtimeAuthority = (0, runtime_authority_1.inspectRuntimeAuthority)(repoRoot, activeAdapter ?? 'cli');
+    checks.push({
+        id: 'runtime_identity_authority',
+        label: 'Runtime identity authority',
+        status: runtimeAuthority.status === 'current_registry_runtime'
+            || runtimeAuthority.status === 'current_workspace_runtime'
+            || runtimeAuthority.status === 'machine_specific_pinned_hook_valid'
+            ? 'pass'
+            : runtimeAuthority.status === 'missing_runtime'
+                ? 'warn'
+                : 'fail',
+        message: runtimeAuthority.status === 'machine_specific_pinned_hook_valid'
+            ? 'Machine-specific pinned hook is valid for the activated build hash.'
+            : runtimeAuthority.ok
+                ? `Executing ${runtimeAuthority.status.replace(/_/g, ' ')} matches the activated manifest.`
+                : `${runtimeAuthority.status.replace(/_/g, ' ')}: ${runtimeAuthority.mismatches[0]?.message || 'runtime activation is missing or stale'}`,
+        recommendation: runtimeAuthority.ok ? undefined : `Run exactly: \`${runtimeAuthority.repairCommand}\`.`,
+    });
     checks.push({
         id: 'profile',
         label: 'Governance profile',
@@ -219,7 +240,7 @@ function runtimeDoctorCommand(options = {}) {
                 : `Enforcement stopped because session profile ${activeSession.profileHash.slice(0, 12)} differs from current profile ${profileFreshness.currentProfileHash.slice(0, 12)}. ` +
                     `${pendingProfileDecisions.length} unresolved human decision${pendingProfileDecisions.length === 1 ? '' : 's'} prevent automatic recovery.`,
         recommendation: activeSession && profileFreshness.sessionCompatibility === 'incompatible'
-            ? `Run exactly: \`${profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND}\`. The --force flag abandons unresolved operator state; then start a new governed session.`
+            ? `Run exactly: \`neurcode session end --local --session-id ${activeSession.sessionId} --outcome superseded\`, then start a new governed session.`
             : undefined,
     });
     // ── Claude Code hooks (on-disk correctness) ────────────────────────────────
@@ -645,6 +666,7 @@ function runtimeDoctorCommand(options = {}) {
         repoRoot,
         profileStatus: staleness.status,
         profileFreshness,
+        runtimeAuthority,
         restartRequired: liveness.status === 'fail' ||
             profileFreshness.sessionCompatibility === 'incompatible',
         hooks: {

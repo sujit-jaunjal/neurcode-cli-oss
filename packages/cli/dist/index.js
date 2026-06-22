@@ -1063,13 +1063,21 @@ sessionCmd
     .option('--session-id <id>', 'Session ID to end (defaults to current session)')
     .option('--project-id <id>', 'Project ID')
     .option('--local', 'Restrict resolution to local governance sessions')
+    .option('--outcome <status>', 'completed | denied | abandoned | attention_required | expired | superseded')
     .option('--dir <path>', 'Repository root for local governance session resolution')
     .option('--json', 'Output stable machine-readable JSON')
     .action(async (options) => {
+    const outcomes = ['completed', 'denied', 'abandoned', 'attention_required', 'expired', 'superseded'];
+    if (options.outcome && !outcomes.includes(options.outcome)) {
+        console.error(`Unsupported session outcome: ${options.outcome}`);
+        process.exitCode = 2;
+        return;
+    }
     await (0, session_1.endSessionCommand)({
         sessionId: options.sessionId,
         projectId: options.projectId,
         local: options.local === true,
+        completionStatus: options.outcome,
         dir: options.dir,
         json: options.json === true,
     });
@@ -1175,6 +1183,23 @@ sessionCmd
     await (0, session_1.resetStaleGovernanceSessionCommand)({
         maxAgeMinutes: Number.isFinite(options.maxAgeMinutes) ? options.maxAgeMinutes : undefined,
         force: options.force === true,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+sessionCmd
+    .command('cleanup-stale')
+    .description('Selectively expire one stale session while preserving unresolved-decision evidence')
+    .option('--session-id <id>', 'Only clean this session id')
+    .option('--max-age-minutes <n>', 'Only clean sessions idle at least this many minutes (default: 120)', (value) => Number.parseFloat(value))
+    .option('--abandon', 'Explicitly abandon the selected session even if it is fresh or has unresolved decisions')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.resetStaleGovernanceSessionCommand)({
+        sessionId: options.sessionId,
+        maxAgeMinutes: Number.isFinite(options.maxAgeMinutes) ? options.maxAgeMinutes : undefined,
+        force: options.abandon === true,
         dir: options.dir,
         json: options.json === true,
     });

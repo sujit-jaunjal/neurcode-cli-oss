@@ -8,7 +8,7 @@
  * - neurcode session end     - End the current or specified session
  * - neurcode session status  - Show status of current session
  */
-import { type AgentPlan, type AgentPlanAmendmentProposal, type AIChangeRecord, type AgentInvocationSummary, type AgentGuardPostureSummary, type ArchitectureObligation, type GovernanceSession, type SessionEvent } from '@neurcode-ai/governance-runtime';
+import { type AgentPlan, type AgentPlanAmendmentProposal, type AIChangeRecord, type AgentInvocationSummary, type AgentGuardPostureSummary, type ArchitectureObligation, type GovernanceSession, type SessionCompletionStatus, type SessionEvent } from '@neurcode-ai/governance-runtime';
 import { type DiffFile } from '@neurcode-ai/diff-parser';
 import { type ProfileFreshnessSignal } from '../utils/v0-governance';
 import { type RuntimeConnection } from '../utils/runtime-connection';
@@ -55,6 +55,7 @@ interface SessionCommandOptions {
     decision?: 'accept' | 'reject';
     decidedBy?: string;
     force?: boolean;
+    completionStatus?: SessionCompletionStatus;
     maxAgeMinutes?: number;
     latest?: boolean;
     staged?: boolean;

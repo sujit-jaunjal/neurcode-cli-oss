@@ -46,6 +46,8 @@ const structural_understanding_1 = require("../utils/structural-understanding");
 const consequence_nudges_1 = require("../utils/consequence-nudges");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const local_repo_brain_1 = require("../utils/local-repo-brain");
+const runtime_authority_1 = require("../utils/runtime-authority");
+const brain_lifecycle_1 = require("../utils/brain-lifecycle");
 const proposed_change_analysis_1 = require("../utils/proposed-change-analysis");
 const repo_intelligence_v2_1 = require("../utils/repo-intelligence-v2");
 const runtime_companion_1 = require("../utils/runtime-companion");
@@ -1157,6 +1159,20 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
     const hookInput = readHookInput();
     const effectiveCwd = cwdFromHookInput(hookInput, cmdCwd);
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
+    try {
+        (0, runtime_authority_1.assertProtectedRuntimeAuthority)(repoRoot, trustedAdapterId);
+    }
+    catch (error) {
+        denyPreToolUse(error instanceof Error ? error.message : String(error), {
+            blockContext: blockContext({
+                blockType: 'profile_or_runtime_health_block',
+                message: error instanceof Error ? error.message : String(error),
+                runtimeMode: 'strict',
+                nextAction: 'Run `neurcode runtime repair`, restart the agent integration if requested, and retry.',
+            }),
+        });
+        return;
+    }
     (0, hook_heartbeat_1.recordHookHeartbeat)({ repoRoot, eventType: 'check' });
     const requestedSessionId = sessionIdFromHookInput(hookInput);
     const toolName = hookInput['tool_name'] ||
@@ -1973,6 +1989,13 @@ async function handleFinish(cmdCwd) {
         const supervisorStop = (0, agent_guard_supervisor_1.stopSupervisorOnSessionCompletion)(repoRoot);
         if (supervisorStop.signaled) {
             diagnostic(`agent guard supervisor stop requested (pid ${supervisorStop.state?.pid ?? 'unknown'})`);
+        }
+        try {
+            const brain = await (0, brain_lifecycle_1.scheduleBrainIndex)(repoRoot, { force: true });
+            diagnostic(`repository Brain refresh ${brain.state}`);
+        }
+        catch (brainError) {
+            diagnostic(`repository Brain refresh scheduling failed: ${brainError instanceof Error ? brainError.message : String(brainError)}`);
         }
         const blockCount = finished.events.filter((e) => e.type === 'check_block').length;
         const warnCount = finished.events.filter((e) => e.type === 'check_warn').length;

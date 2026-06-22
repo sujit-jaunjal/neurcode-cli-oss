@@ -121,7 +121,13 @@ function calculateScore(exportItem, intentTokens, intent = '' // Full intent str
     const isBackendApi = filePath.includes('services/api') ||
         filePath.includes('backend') ||
         filePath.includes('server');
-    if (isBackendApi) {
+    const backendIntent = lowerIntent.includes('api')
+        || lowerIntent.includes('backend')
+        || lowerIntent.includes('server');
+    const lexicalMatch = intentTokens.some((token) => fuzzyMatch(token, exportItem.name)
+        || fileNameWithoutExt.includes(token)
+        || extractFolderNames(exportItem.filePath).some((folder) => folder.toLowerCase().includes(token)));
+    if (isBackendApi && (backendIntent || lexicalMatch)) {
         score += 50; // Strong additive boost for backend files
     }
     // CLI/Tools penalty: -50 points if path contains packages/cli or scripts (unless CLI is explicitly mentioned)
@@ -186,12 +192,11 @@ function isCoreTool(exportItem) {
     // Check exact match
     if (CORE_TOOLS.has(name))
         return true;
-    // Check if name contains core tool (e.g., "generatePlan" contains "plan")
-    for (const coreTool of CORE_TOOLS) {
-        if (name.includes(coreTool) || coreTool.includes(name)) {
-            return true;
-        }
-    }
+    // Command wrappers are also core. Avoid substring matching: names such as
+    // initPostgresDatabase are not governance commands merely because they
+    // contain "init".
+    if (name.endsWith('command') && CORE_TOOLS.has(name.slice(0, -'command'.length)))
+        return true;
     return false;
 }
 /**
@@ -264,7 +269,9 @@ function getTopKTools(intent, exports, k = 20) {
         };
         return (typePriority[b.export.type] || 0) - (typePriority[a.export.type] || 0);
     });
-    // Combine: core tools first, then top-scoring regular exports
+    // Keep the relevance-ranked results first while reserving room for every
+    // exact core command. Core presence is a safety invariant, not a claim that
+    // those commands are more relevant than repository symbols for this intent.
     const coreToolItems = coreTools.map(item => item.export);
     const topRegularExports = regularExports
         .slice(0, Math.max(0, k - coreToolItems.length))
@@ -272,7 +279,7 @@ function getTopKTools(intent, exports, k = 20) {
     // Remove duplicates (in case a core tool also scored high)
     const seen = new Set();
     const result = [];
-    for (const exp of [...coreToolItems, ...topRegularExports]) {
+    for (const exp of [...topRegularExports, ...coreToolItems]) {
         const key = `${exp.filePath}:${exp.name}`;
         if (!seen.has(key)) {
             seen.add(key);

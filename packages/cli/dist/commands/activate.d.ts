@@ -72,6 +72,12 @@ export interface ActivateResult {
         autoSyncEnabled: boolean;
         keyPrefix?: string;
     };
+    runtimeAuthority?: {
+        manifestPath: string;
+        manifestHash: string;
+        changed: boolean;
+        brainState: string;
+    };
     next: string[];
 }
 export declare function activateClaudeCommand(options?: ActivateOptions): Promise<ActivateResult>;

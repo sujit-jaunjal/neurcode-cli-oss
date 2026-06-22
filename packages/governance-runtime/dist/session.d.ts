@@ -8,6 +8,7 @@ import { type OwnershipBoundary, type PlanCoherenceMode, type RepoSymbolDuplicat
 import { type AgentPlan, type AgentPlanSource, type PlanCoherenceResult } from './agent-plan';
 import { type ArchitectureObligation, type ArchitectureObligationPolicy, type ArchitectureObligationWaiver, type ArchitectureObligationWaiverSource } from './architecture-obligations';
 import type { RepoArchitectureGraph } from './architecture-graph';
+import { type RepositoryTopologyArtifact } from './repository-topology';
 import { INTENT_PRIVACY_POLICY_VERSION, type IntentRedactionReasonCode } from './intent-privacy';
 export type EventType = 'session_start' | 'check_ok' | 'check_warn' | 'check_block' | 'approval_decision' | 'user_decision' | 'plan_captured' | 'plan_amended' | 'plan_amendment_proposed' | 'plan_amendment_decision' | 'obligation_state_changed' | 'obligation_waiver_decision' | 'agent_session_launched' | 'agent_handshake' | 'agent_runtime_call' | 'agent_guard_started' | 'agent_guard_status' | 'agent_guard_finished' | 'agent_guard_supervisor_started' | 'agent_guard_supervisor_stopped' | 'structural_understanding' | 'consequence_nudge' | 'session_finish';
 export interface SessionEvent {
@@ -39,6 +40,32 @@ export interface IntentObligation {
     description: string;
     severity: 'info' | 'warn' | 'critical';
 }
+export interface IntentScopeSelection {
+    target: string;
+    targetType: 'file' | 'glob';
+    source: 'explicit_user_path' | 'active_agent_plan' | 'repository_topology' | 'repo_brain' | 'support_surface';
+    confidence: IntentConfidence;
+    authority: 'deterministic' | 'advisory';
+    evidenceType: string;
+    factId?: string;
+    reason: string;
+}
+export interface IntentScopeAuthority {
+    expectedFiles: string[];
+    expectedGlobs: string[];
+    expectedSymbols: string[];
+    likelyTests: string[];
+    affectedPackages: string[];
+    affectedModules: string[];
+    prohibitedBoundaries: string[];
+    selections: IntentScopeSelection[];
+    unsupportedAreas: string[];
+    brain: {
+        evaluated: boolean;
+        freshness: string | null;
+        reason: string;
+    };
+}
 export interface IntentContract {
     schemaVersion: 1;
     summary: string;
@@ -50,6 +77,7 @@ export interface IntentContract {
         expectedPathGlobs: string[];
         supportPathGlobs: string[];
     };
+    scopeAuthority: IntentScopeAuthority;
     obligations: IntentObligation[];
     outOfScopeGlobs: string[];
     riskNotes: string[];
@@ -140,6 +168,8 @@ export interface SessionContract {
      * structural obligations as the agent edits. Optional for pre-V2 sessions.
      */
     architectureGraph?: RepoArchitectureGraph;
+    /** Source-free repository topology authority captured at session start. */
+    repositoryTopology?: RepositoryTopologyArtifact;
 }
 export type AgentPlanRevisionKind = 'captured' | 'amended';
 export type AgentPlanAmendmentActor = 'agent' | 'human' | 'system';
@@ -254,6 +284,7 @@ export interface GovernanceSession {
     replayHash?: string;
     finishedAt?: string;
     status: 'active' | 'finished';
+    completionStatus?: SessionCompletionStatus;
     privacy?: {
         policyVersion: typeof INTENT_PRIVACY_POLICY_VERSION;
         classification: 'local_private';
@@ -264,6 +295,7 @@ export interface GovernanceSession {
     };
 }
 export type { RuntimeBlockType, RuntimeLocalMode };
+export type SessionCompletionStatus = 'completed' | 'denied' | 'abandoned' | 'attention_required' | 'expired' | 'superseded';
 export interface UnresolvedApprovalBlock {
     filePath: string;
     suggestedApprovalPath: string;
@@ -279,6 +311,7 @@ export interface FinishSessionOptions {
     unresolvedApprovalBlocks?: UnresolvedApprovalBlock[];
     unresolvedActionableBlocks?: UnresolvedActionableBlock[];
     reason?: string;
+    completionStatus?: SessionCompletionStatus;
 }
 export declare function sessionsDir(projectRoot: string): string;
 export declare function sessionPath(projectRoot: string, sessionId: string): string;

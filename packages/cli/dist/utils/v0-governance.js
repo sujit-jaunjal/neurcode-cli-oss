@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.PROFILE_STALENESS_CACHE_TTL_MS = exports.CLAUDE_GOVERNANCE_HOOKS = exports.MANIFEST_CANDIDATES = exports.CODEOWNERS_CANDIDATES = void 0;
 exports.resolveRepoRoot = resolveRepoRoot;
 exports.gitLsFiles = gitLsFiles;
+exports.readGeneratedProvenanceEvidence = readGeneratedProvenanceEvidence;
 exports.governanceConfigPath = governanceConfigPath;
 exports.readRuntimeGovernanceConfig = readRuntimeGovernanceConfig;
 exports.readModuleImports = readModuleImports;
@@ -30,11 +31,32 @@ const fs_1 = require("fs");
 const os_1 = require("os");
 const path_1 = require("path");
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
+const brain_1 = require("@neurcode-ai/brain");
+const glob_match_1 = require("../governance/intent/glob-match");
 exports.CODEOWNERS_CANDIDATES = ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEOWNERS'];
-exports.MANIFEST_CANDIDATES = ['package.json', 'pyproject.toml', 'go.mod', 'Cargo.toml', 'pom.xml'];
+exports.MANIFEST_CANDIDATES = [
+    'package.json',
+    'pnpm-workspace.yaml',
+    'lerna.json',
+    'nx.json',
+    'turbo.json',
+    'rush.json',
+    'workspace.json',
+    'pyproject.toml',
+    'setup.py',
+    'setup.cfg',
+    'go.mod',
+    'Cargo.toml',
+    'pom.xml',
+    'build.gradle',
+    'build.gradle.kts',
+    'Gemfile',
+    'composer.json',
+    'Package.swift',
+];
 const CLAUDE_MCP_ENTRY = Object.freeze({
     command: 'npx',
-    args: ['-y', '@neurcode-ai/mcp-server@0.2.4'],
+    args: ['-y', '@neurcode-ai/mcp-server@0.3.1'],
 });
 const CLAUDE_PRE_TOOL_MATCHER = 'Bash|Edit|Write|MultiEdit';
 const COPILOT_HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'Stop'];
@@ -206,6 +228,168 @@ function readFirstExisting(cwd, candidates) {
         }
     }
     return { path: null, content: null };
+}
+function readManifestBundle(cwd, paths) {
+    const manifestNames = new Set(exports.MANIFEST_CANDIDATES);
+    return paths
+        .filter((pathValue) => manifestNames.has((0, path_1.basename)(pathValue)))
+        .sort()
+        .map((pathValue) => {
+        try {
+            return { path: pathValue, content: (0, fs_1.readFileSync)((0, path_1.join)(cwd, pathValue), 'utf8') };
+        }
+        catch {
+            return { path: pathValue, content: null };
+        }
+    });
+}
+const GENERATED_HEADER_RE = /(?:@generated\b|\b(?:generated (?:file|code)|do not edit|automatically generated)\b)/i;
+const GENERATOR_CONFIG_RE = /(?:^|\/)(?:openapi-generator[^/]*|buf\.gen|orval\.config|graphql-codegen)[^/]*\.(?:json|ya?ml|[cm]?[jt]s)$/i;
+function normalizeGeneratedPath(value) {
+    return value.trim().replace(/^['"]|['"],?$/g, '').replace(/\\/g, '/').replace(/^\.\//, '');
+}
+function nearestGenerationCommand(outputPath, manifests) {
+    const candidates = manifests
+        .filter((manifest) => (0, path_1.basename)(manifest.path) === 'package.json' && manifest.content)
+        .map((manifest) => {
+        try {
+            const parsed = JSON.parse(manifest.content);
+            const script = Object.keys(parsed.scripts ?? {})
+                .filter((name) => /(?:^|:)(?:generate|codegen|gen)(?::|$)/i.test(name))
+                .sort()[0];
+            const root = (0, path_1.dirname)(manifest.path) === '.' ? '' : (0, path_1.dirname)(manifest.path).replace(/\\/g, '/');
+            return script && (!root || outputPath === root || outputPath.startsWith(`${root}/`))
+                ? { root, command: `pnpm${root ? ` --dir ${root}` : ''} run ${script}` }
+                : null;
+        }
+        catch {
+            return null;
+        }
+    })
+        .filter((candidate) => Boolean(candidate))
+        .sort((left, right) => right.root.length - left.root.length);
+    return candidates[0]?.command ?? null;
+}
+function resolveGeneratedSource(outputPath, candidate, tracked) {
+    if (!candidate)
+        return null;
+    const normalized = normalizeGeneratedPath(candidate);
+    if (tracked.has(normalized))
+        return normalized;
+    const relativeCandidate = normalizeGeneratedPath((0, path_1.join)((0, path_1.dirname)(outputPath), normalized));
+    return tracked.has(relativeCandidate) ? relativeCandidate : null;
+}
+function readGeneratedProvenanceEvidence(repoRoot, paths, manifests) {
+    const tracked = new Set(paths);
+    const evidence = new Map();
+    const record = (item) => {
+        const outputPath = normalizeGeneratedPath(item.outputPath);
+        if (!tracked.has(outputPath))
+            return;
+        const command = item.command ?? nearestGenerationCommand(outputPath, manifests);
+        evidence.set(`${outputPath}:${item.evidenceType}:${item.sourcePath ?? ''}`, {
+            ...item,
+            outputPath,
+            command,
+        });
+    };
+    const attributesPath = (0, path_1.join)(repoRoot, '.gitattributes');
+    if (tracked.has('.gitattributes') && (0, fs_1.existsSync)(attributesPath)) {
+        try {
+            for (const rawLine of (0, fs_1.readFileSync)(attributesPath, 'utf8').split('\n')) {
+                const line = rawLine.trim();
+                if (!line || line.startsWith('#') || !/\blinguist-generated(?:=true)?\b/i.test(line))
+                    continue;
+                const pattern = normalizeGeneratedPath(line.split(/\s+/)[0] ?? '');
+                for (const pathValue of paths) {
+                    if (pathValue !== '.gitattributes' && (0, glob_match_1.matchesGlob)(pattern, pathValue)) {
+                        record({ outputPath: pathValue, evidenceType: 'gitattributes' });
+                    }
+                }
+            }
+        }
+        catch {
+            // Unreadable attributes are non-authoritative; other provenance still applies.
+        }
+    }
+    for (const outputPath of paths.slice(0, MAX_GRAPH_FILES)) {
+        if (outputPath.endsWith('.sha256')) {
+            const target = outputPath.slice(0, -'.sha256'.length);
+            if (tracked.has(target))
+                record({ outputPath: target, evidenceType: 'checksum' });
+            continue;
+        }
+        const absolute = (0, path_1.join)(repoRoot, outputPath);
+        let head = '';
+        try {
+            if (!(0, fs_1.existsSync)(absolute))
+                continue;
+            head = (0, fs_1.readFileSync)(absolute, 'utf8').slice(0, 12_000);
+        }
+        catch {
+            continue;
+        }
+        if (GENERATED_HEADER_RE.test(head)) {
+            const sourceMatch = head.match(/(?:generated from|source(?: of truth)?)[\s:=]+['"]?([A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)/i);
+            record({
+                outputPath,
+                sourcePath: resolveGeneratedSource(outputPath, sourceMatch?.[1], tracked),
+                evidenceType: 'generated-header',
+            });
+        }
+        if (GENERATOR_CONFIG_RE.test(outputPath)) {
+            const outputMatch = head.match(/(?:output|outDir|outputDir|outputDirectory)[\s:="'{]+([A-Za-z0-9_./-]+)/i);
+            if (!outputMatch?.[1])
+                continue;
+            const outputRoot = normalizeGeneratedPath((0, path_1.join)((0, path_1.dirname)(outputPath), outputMatch[1]));
+            const sourceMatch = head.match(/(?:inputSpec|schema|source)[\s:="'{]+([A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)/i);
+            for (const candidate of paths.filter((pathValue) => pathValue === outputRoot || pathValue.startsWith(`${outputRoot}/`))) {
+                record({
+                    outputPath: candidate,
+                    sourcePath: resolveGeneratedSource(outputPath, sourceMatch?.[1], tracked),
+                    evidenceType: 'generator-config',
+                });
+            }
+        }
+    }
+    return Array.from(evidence.values()).sort((left, right) => left.outputPath.localeCompare(right.outputPath) || left.evidenceType.localeCompare(right.evidenceType));
+}
+function readTopologyBrainFacts(repoRoot) {
+    const graph = (0, brain_1.readRepositoryGraph)(repoRoot);
+    if (!graph)
+        return null;
+    const facts = [];
+    for (const node of graph.nodes) {
+        if (!node.path)
+            continue;
+        if (node.kind === 'symbol' || node.kind === 'package' || node.kind === 'test') {
+            facts.push({
+                kind: node.kind,
+                path: node.path,
+                name: node.name,
+            });
+        }
+    }
+    for (const edge of graph.edges) {
+        const from = graph.nodes.find((node) => node.id === edge.fromId);
+        const to = graph.nodes.find((node) => node.id === edge.toId);
+        if (!from?.path || !to?.path)
+            continue;
+        const kind = edge.type === 'imports'
+            ? 'import'
+            : edge.type === 'tests'
+                ? 'test'
+                : 'reference';
+        facts.push({
+            kind,
+            path: from.path,
+            relatedPath: to.path,
+        });
+    }
+    return {
+        freshness: graph.freshness.state,
+        facts: facts.slice(0, 20_000),
+    };
 }
 function prefixCodeownersContent(content, baseDir) {
     const prefix = baseDir.replace(/\\/g, '/').replace(/\/$/, '');
@@ -443,16 +627,22 @@ function buildCurrentGovernanceProfile(repoRoot, options = {}) {
     const paths = gitLsFiles(root);
     const codeowners = readCodeownersBundle(root, paths);
     const manifest = readFirstExisting(root, exports.MANIFEST_CANDIDATES);
+    const manifests = readManifestBundle(root, paths);
     const governance = readRuntimeGovernanceConfig(root);
     const imports = readModuleImports(root, paths);
+    const brain = readTopologyBrainFacts(root);
+    const generatedEvidence = readGeneratedProvenanceEvidence(root, paths, manifests);
     const profile = (0, governance_runtime_1.buildRepoGovernanceProfile)({
         paths,
         codeownersContent: codeowners.content,
         manifestContent: manifest.content,
+        manifests,
         repoName: (0, path_1.basename)(root),
         source: 'local',
         runtimeConfig: governance.config,
         imports,
+        brain,
+        generatedEvidence,
     });
     if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
         writeProfileBuildFileCache(root, profile, stateFingerprint);

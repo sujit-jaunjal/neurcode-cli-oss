@@ -51,14 +51,15 @@ function run() {
     'demo',
     'start [options] [intent...]',
     'replay [options]',
-    'neurcode generate',
-    'neurcode fix',
-    'neurcode patch',
-    'neurcode export',
-    'neurcode daemon',
+    'eval',
   ];
   for (const command of requiredCommands) {
     assertContains(rootHelp, command, 'root help output');
+  }
+
+  for (const command of ['generate', 'fix', 'patch', 'export', 'daemon']) {
+    const compatibilityHelp = runCli([command, '--help']);
+    assertContains(compatibilityHelp, `Usage: neurcode ${command}`, `${command} compatibility help output`);
   }
 
   const agentHelp = runCli(['agent', '--help']);

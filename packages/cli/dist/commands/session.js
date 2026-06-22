@@ -665,6 +665,8 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
     const recovered = [];
     const skipped = [];
     for (const active of records.active) {
+        if (options.sessionId && active.sessionId !== options.sessionId)
+            continue;
         const ageMinutes = sessionAgeMinutes(active, now);
         const pending = pendingApprovalBlock(active, now);
         const stale = ageMinutes >= maxAgeMinutes;
@@ -680,6 +682,18 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
             });
             continue;
         }
+        if (pending && !stale && options.force !== true) {
+            skipped.push({
+                sessionId: active.sessionId,
+                reason: 'fresh_pending_approval',
+                reasonCode,
+                ageMinutes: Number(ageMinutes.toFixed(2)),
+                filePath: pending.filePath,
+                owners: pending.owners,
+                suggestedApprovalPath: pending.suggestedApprovalPath,
+            });
+            continue;
+        }
         if (!stale && options.force !== true) {
             skipped.push({
                 sessionId: active.sessionId,
@@ -687,18 +701,6 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
                 reasonCode,
                 ageMinutes: Number(ageMinutes.toFixed(2)),
                 pendingApproval: pending,
-            });
-            continue;
-        }
-        if (pending && options.force !== true) {
-            skipped.push({
-                sessionId: active.sessionId,
-                reason: 'pending_approval',
-                reasonCode,
-                ageMinutes: Number(ageMinutes.toFixed(2)),
-                filePath: pending.filePath,
-                owners: pending.owners,
-                suggestedApprovalPath: pending.suggestedApprovalPath,
             });
             continue;
         }
@@ -725,7 +727,18 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
             : null;
         let finished = null;
         try {
-            finished = (0, governance_runtime_1.finishSession)(repoRoot, active.sessionId, { reason: reasonCode });
+            finished = (0, governance_runtime_1.finishSession)(repoRoot, active.sessionId, {
+                reason: reasonCode,
+                ...(pending ? {
+                    unresolvedApprovalBlocks: [{
+                            filePath: pending.filePath || pending.suggestedApprovalPath || 'unknown',
+                            suggestedApprovalPath: pending.suggestedApprovalPath || pending.filePath || 'unknown',
+                        }],
+                    completionStatus: options.force === true ? 'abandoned' : 'attention_required',
+                } : {
+                    completionStatus: options.force === true ? 'abandoned' : 'expired',
+                }),
+            });
         }
         finally {
             if (preservedLivePointer !== null) {
@@ -746,6 +759,7 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
             sessionId: finished.sessionId,
             previousGoal: finished.contract.goal,
             status: finished.status,
+            completionStatus: finished.completionStatus,
             reasonCode,
             replayHash: finished.replayHash,
             replayVerified: replay.matchesOriginal,
@@ -778,19 +792,20 @@ async function resetStaleGovernanceSessionCommand(options = {}) {
         return;
     }
     const primary = skipped.find((item) => item.sessionId === pointer.sessionId) ?? skipped[0];
-    if (primary?.reason === 'pending_approval') {
+    if (primary?.reason === 'fresh_pending_approval') {
         output({
             ok: false,
             reset: false,
             repoRoot,
             ...primary,
+            reason: 'pending_approval',
             maxAgeMinutes,
             pointerState: pointer.state,
             malformedRecords: records.malformed,
-            message: 'Active session is waiting on an unresolved approval; refusing to reset without --force.',
+            message: 'Active session is fresh and waiting on an unresolved approval; no cleanup was performed.',
             next: [
                 `Approve exactly ${primary.suggestedApprovalPath} from the dashboard or MCP.`,
-                'Or run `neurcode session reset-stale --force` if this is abandoned rehearsal state.',
+                `Or explicitly abandon only this session with \`neurcode session cleanup-stale --session-id ${primary.sessionId} --abandon\`.`,
             ],
         }, 2);
         return;
@@ -2005,7 +2020,7 @@ function endSessionOutput(options, payload, exitCode = 0) {
     }
     process.exitCode = exitCode;
 }
-async function finishLocalGovernanceSession(repoRoot, session) {
+async function finishLocalGovernanceSession(repoRoot, session, completionStatus) {
     if (session.status === 'finished') {
         return {
             ok: true,
@@ -2029,6 +2044,7 @@ async function finishLocalGovernanceSession(repoRoot, session) {
     });
     const finished = (0, governance_runtime_1.finishSession)(repoRoot, session.sessionId, {
         reason: 'local_session_end_requested',
+        completionStatus: completionStatus ?? 'completed',
     });
     if (!finished)
         throw new Error(`Local governance session ${session.sessionId} could not be finished.`);
@@ -2046,6 +2062,7 @@ async function finishLocalGovernanceSession(repoRoot, session) {
         ended: true,
         mode: 'local',
         status: finished.status,
+        completionStatus: finished.completionStatus,
         sessionId: finished.sessionId,
         replayHash: finished.replayHash,
         replayVerified: replay.matchesOriginal,
@@ -2064,7 +2081,7 @@ async function endSessionCommandWithDependencies(options, dependencies = {}) {
         if (options.sessionId) {
             const local = (0, governance_runtime_1.loadSession)(repoRoot, options.sessionId);
             if (local) {
-                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, local));
+                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, local, options.completionStatus));
                 return;
             }
             if (options.local) {
@@ -2082,7 +2099,7 @@ async function endSessionCommandWithDependencies(options, dependencies = {}) {
         else {
             const records = scanSessionRecords(repoRoot);
             if (records.active.length === 1) {
-                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, records.active[0]));
+                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, records.active[0], options.completionStatus));
                 return;
             }
             if (records.active.length > 1) {
@@ -2117,7 +2134,7 @@ async function endSessionCommandWithDependencies(options, dependencies = {}) {
                     }, 2);
                     return;
                 }
-                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, records.active[selected - 1]));
+                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, records.active[selected - 1], options.completionStatus));
                 return;
             }
             if (options.local) {
@@ -2145,7 +2162,7 @@ async function endSessionCommandWithDependencies(options, dependencies = {}) {
             const stateSessionId = (0, state_1.getSessionId)() || undefined;
             if (stateSessionId && (0, governance_runtime_1.loadSession)(repoRoot, stateSessionId)) {
                 const local = (0, governance_runtime_1.loadSession)(repoRoot, stateSessionId);
-                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, local));
+                endSessionOutput(options, await finishLocalGovernanceSession(repoRoot, local, options.completionStatus));
                 return;
             }
             sessionId = stateSessionId;

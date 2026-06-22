@@ -1,4 +1,4 @@
-import { type ModuleImportRecord, type RepoGovernanceProfile, type RuntimeGovernanceConfig } from '@neurcode-ai/governance-runtime';
+import { type GeneratedProvenanceEvidence, type ModuleImportRecord, type RepositoryManifestEvidence, type RepoGovernanceProfile, type RuntimeGovernanceConfig } from '@neurcode-ai/governance-runtime';
 export declare const CODEOWNERS_CANDIDATES: string[];
 export declare const MANIFEST_CANDIDATES: string[];
 declare const COPILOT_HOOK_EVENTS: readonly ["UserPromptSubmit", "PreToolUse", "Stop"];
@@ -159,6 +159,7 @@ export interface GovernanceConfigReadResult {
 }
 export declare function resolveRepoRoot(cwd?: string): string;
 export declare function gitLsFiles(cwd: string): string[];
+export declare function readGeneratedProvenanceEvidence(repoRoot: string, paths: string[], manifests: RepositoryManifestEvidence[]): GeneratedProvenanceEvidence[];
 export declare function governanceConfigPath(repoRoot: string): string;
 export declare function readRuntimeGovernanceConfig(repoRoot: string): GovernanceConfigReadResult;
 /**

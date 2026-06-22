@@ -15,6 +15,7 @@ exports.evaluateArchitectureObligationFeedback = evaluateArchitectureObligationF
 exports.evaluateArchitectureEdit = evaluateArchitectureEdit;
 const micromatch_1 = __importDefault(require("micromatch"));
 const architecture_graph_1 = require("./architecture-graph");
+const repository_topology_1 = require("./repository-topology");
 exports.ARCHITECTURE_OBLIGATION_SCHEMA_VERSION = 1;
 exports.DEFAULT_ARCHITECTURE_OBLIGATION_POLICY = Object.freeze({
     mode: 'warn',
@@ -73,6 +74,9 @@ function approvalRequiredPaths(events) {
 }
 function pathMatchesApprovalRequiredGlob(filePath, approvalRequiredGlobs) {
     return approvalRequiredGlobs.some((glob) => matchesPath(filePath, glob.replace(/^\//, '')));
+}
+function matchingTopologyFacts(topology, kinds, candidatePaths) {
+    return (0, repository_topology_1.topologyFacts)(topology, kinds).filter((fact) => candidatePaths.some((candidate) => matchesPath(candidate, fact.glob) || matchesPath(fact.path, candidate)));
 }
 /**
  * Paths the accepted agent plan declares that sit inside approval-required /
@@ -352,9 +356,16 @@ function deriveArchitectureObligations(input) {
                 : [],
         });
     }
-    const migrationTriggered = /\b(migration|migrate|schema change|database migration|backfill)\b/i.test(combinedText) ||
-        input.agentPlan?.expectedFiles.some((filePath) => /(^|\/)(migrations?|schema)(\/|$)/i.test(filePath));
+    const candidatePaths = graphCandidatePaths(input, events);
+    const migrationFacts = matchingTopologyFacts(input.topology, ['migration', 'schema'], candidatePaths);
+    const explicitMigrationPath = input.agentPlan?.expectedFiles.some((filePath) => /\.sql$/i.test(filePath) || matchingTopologyFacts(input.topology, ['migration', 'schema'], [filePath]).length > 0);
+    const migrationIntent = /\b(migration|migrate|schema change|database migration|backfill)\b/i.test(combinedText);
+    const migrationTriggered = migrationFacts.length > 0 || Boolean(migrationIntent && explicitMigrationPath);
     if (migrationTriggered) {
+        const migrationPaths = unique([
+            ...migrationFacts.map((fact) => fact.path),
+            ...(input.agentPlan?.expectedFiles.filter((filePath) => /\.sql$/i.test(filePath)) ?? []),
+        ]);
         const rollbackCommitment = /\b(rollback|reversible|down migration|backfill safety|restore strategy)\b/i.test(acceptedPlanText);
         drafts.push({
             id: 'data-model:migration-rollback-plan',
@@ -362,11 +373,65 @@ function deriveArchitectureObligations(input) {
             title: 'State the migration rollback strategy',
             description: 'Schema and migration work needs an accepted-plan commitment for rollback or reversibility.',
             severity: 'critical',
-            triggeredBy: ['intent or accepted plan references migration, schema change, or backfill'],
+            triggeredBy: migrationPaths.map((path) => `runtime topology identifies migration/schema surface: ${path}`),
             requiredEvidence: ['Add a rollback, reversible migration, or restore-strategy commitment to the accepted agent plan.'],
             observedEvidence: rollbackCommitment
                 ? [evidence('accepted-plan', 'Accepted plan states a rollback or reversibility strategy.')]
                 : [],
+        });
+        const compatibilityCommitment = /\b(backward compat|forward compat|mixed[- ]version|expand[- ]contract|serialization|schema compatibility)\b/i.test(acceptedPlanText);
+        drafts.push({
+            id: 'data-model:migration-compatibility-plan',
+            category: 'data-model',
+            title: 'State migration compatibility and deployment sequencing',
+            description: 'Migration work needs an accepted-plan commitment for compatibility across application and schema rollout order.',
+            severity: 'critical',
+            triggeredBy: migrationPaths.map((path) => `runtime topology identifies migration/schema surface: ${path}`),
+            requiredEvidence: ['Add compatibility and deployment-sequencing commitments to the accepted agent plan.'],
+            observedEvidence: compatibilityCommitment
+                ? [evidence('accepted-plan', 'Accepted plan states migration compatibility or deployment sequencing.')]
+                : [],
+        });
+        const migrationTest = trajectoryPaths.find(isTestPath);
+        drafts.push({
+            id: 'data-model:migration-test',
+            category: 'data-model',
+            title: 'Exercise the migration path',
+            description: 'Migration work should include a guarded migration/schema compatibility test.',
+            severity: 'warn',
+            triggeredBy: migrationPaths.map((path) => `runtime topology identifies migration/schema surface: ${path}`),
+            requiredEvidence: ['Edit a test/spec path covering migration or schema compatibility in this session.'],
+            observedEvidence: migrationTest
+                ? [evidence('change-trajectory', `Guarded migration test edit observed: ${migrationTest}`, migrationTest)]
+                : [],
+        });
+    }
+    const generatedFacts = matchingTopologyFacts(input.topology, ['generated-output'], candidatePaths);
+    for (const fact of generatedFacts) {
+        const sourceOfTruth = fact.details?.sourceOfTruth;
+        const regenerationCommand = fact.details?.regenerationCommand;
+        const planAddressesGeneration = Boolean(sourceOfTruth && acceptedPlanText.includes(sourceOfTruth.toLowerCase())
+            || regenerationCommand && acceptedPlanText.includes(regenerationCommand.toLowerCase())
+            || /\b(regenerate|generator|codegen|source of truth)\b/i.test(acceptedPlanText));
+        drafts.push({
+            id: `behavior:generated-output:${fact.id}`,
+            category: 'behavior',
+            title: `Regenerate ${fact.path} from its source of truth`,
+            description: sourceOfTruth
+                ? `${fact.path} is a generated output whose source of truth is ${sourceOfTruth}.`
+                : `${fact.path} is a generated output with deterministic provenance but no source path recorded.`,
+            severity: fact.details?.directEdit === 'block' ? 'critical' : 'warn',
+            triggeredBy: [`${fact.evidence.type} proves generated provenance for ${fact.path}`],
+            requiredEvidence: [
+                sourceOfTruth ? `Edit or review source of truth ${sourceOfTruth}.` : 'Identify and review the generator source of truth.',
+                regenerationCommand ? `Regenerate with: ${regenerationCommand}` : 'Run the repository-declared generator.',
+                fact.details?.checksumExpected ? 'Verify the generated checksum or sidecar evidence.' : 'Verify repeatable generated output.',
+                'Record reviewer awareness for the generated artifact.',
+            ],
+            observedEvidence: planAddressesGeneration
+                ? [evidence('accepted-plan', 'Accepted plan addresses generated provenance and regeneration.')]
+                : [],
+            requiredPath: fact.glob,
         });
     }
     const refactorTriggered = input.intentContract?.primaryAction === 'refactor' ||

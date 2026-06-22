@@ -10,6 +10,7 @@ const config_1 = require("../config");
 const state_1 = require("../utils/state");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
+const runtime_authority_1 = require("../utils/runtime-authority");
 let chalk;
 try {
     chalk = require('chalk');
@@ -391,6 +392,9 @@ function renderActivation(result, mcpSkipped) {
     console.log(`Profile: ${result.profile.refreshed ? chalk.green('refreshed') : chalk.green('fresh')} ` +
         chalk.dim(`${result.profile.profileHash} / topology ${result.profile.topologyHash}`));
     console.log(`Files:   ${result.profile.trackedFileCount} tracked`);
+    if (result.runtimeAuthority) {
+        console.log(`Runtime: ${chalk.green('activated')} ${chalk.dim(result.runtimeAuthority.manifestHash)} · Brain ${result.runtimeAuthority.brainState}`);
+    }
     if (result.profile.reasons.length > 0) {
         console.log(chalk.dim(`Reason:  ${result.profile.reasons.join('; ')}`));
     }
@@ -495,6 +499,19 @@ function normalizeActivationAgent(input) {
         return 'action';
     return null;
 }
+function runtimeAdaptersForActivation(agent) {
+    if (agent === 'claude')
+        return ['claude-code-hooks', 'generic-mcp'];
+    if (agent === 'copilot')
+        return ['copilot-hooks'];
+    if (agent === 'codex')
+        return ['codex-mcp', 'supervisor'];
+    if (agent === 'cursor')
+        return ['cursor-mcp', 'supervisor'];
+    if (agent === 'vscode')
+        return ['vscode-extension', 'daemon'];
+    return ['github-action'];
+}
 function activateCommand(program) {
     program
         .command('activate [agent]')
@@ -529,6 +546,13 @@ function activateCommand(program) {
                 : agent === 'claude'
                     ? await activateClaudeCommand(options)
                     : await activateCompatibilityCommand(agent, options);
+            const runtimeAuthority = await (0, runtime_authority_1.recordActivatedRuntime)(result.repoRoot, runtimeAdaptersForActivation(agent));
+            result.runtimeAuthority = {
+                manifestPath: runtimeAuthority.manifestPath,
+                manifestHash: runtimeAuthority.manifestHash,
+                changed: runtimeAuthority.changed,
+                brainState: runtimeAuthority.brain.state,
+            };
             if (options.json) {
                 console.log(JSON.stringify(result, null, 2));
             }

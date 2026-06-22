@@ -1,6 +1,7 @@
 import type { AgentPlan } from './agent-plan';
 import type { BoundaryVerdict } from './profile';
 import { type ArchitectureSurfaceKind, type RepoArchitectureGraph } from './architecture-graph';
+import { type RepositoryTopologyArtifact } from './repository-topology';
 export declare const ARCHITECTURE_OBLIGATION_SCHEMA_VERSION: 1;
 export type ArchitectureObligationCategory = 'reliability' | 'data-model' | 'behavior' | 'ownership' | 'security' | 'payments' | 'api-contract' | 'dependency';
 export type ArchitectureObligationSeverity = 'warn' | 'critical';
@@ -82,6 +83,8 @@ export interface DeriveArchitectureObligationsInput {
     previous?: ArchitectureObligation[];
     /** V2: repository architecture graph used to derive structural obligations. */
     graph?: RepoArchitectureGraph | null;
+    /** Runtime-compiled repository topology used for generated/migration authority. */
+    topology?: RepositoryTopologyArtifact | null;
     now?: string;
 }
 export interface ArchitectureObligationSummary {

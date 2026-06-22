@@ -11,6 +11,9 @@ const v0_governance_1 = require("./v0-governance");
 const agent_session_launcher_1 = require("./agent-session-launcher");
 const runtime_outbox_1 = require("./runtime-outbox");
 const runtime_connection_1 = require("./runtime-connection");
+const brain_lifecycle_1 = require("./brain-lifecycle");
+const runtime_authority_1 = require("./runtime-authority");
+const v0_governance_2 = require("./v0-governance");
 exports.RUNTIME_COMPANION_SCHEMA_VERSION = 'neurcode.runtime-companion.v1';
 const PROFILE_FRESHNESS_CACHE_MS = 5_000;
 const freshnessCache = new Map();
@@ -158,6 +161,30 @@ function buildRuntimeCompanionSnapshot(repoRoot, options = {}) {
     const session = (0, governance_runtime_1.loadActiveSession)(repoRoot);
     const profileFreshness = freshnessFor(repoRoot, session, options.forceFreshness === true);
     const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
+    const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+    const runtimeAuthority = (0, runtime_authority_1.inspectRuntimeAuthority)(repoRoot);
+    const profile = (0, v0_governance_2.readGovernanceProfile)(repoRoot).profile;
+    const topology = profile?.repositoryTopology ?? session?.contract.repositoryTopology ?? null;
+    const brain = (0, brain_lifecycle_1.readBrainLifecycle)(repoRoot);
+    const launcher = session ? shapeLauncher(session) : null;
+    const scopeEvidence = (session?.contract.allowedGlobs ?? []).map((glob) => {
+        const fact = topology?.facts.find((candidate) => candidate.glob === glob || candidate.path === glob);
+        return fact
+            ? {
+                glob,
+                evidenceType: fact.evidence.type,
+                authority: fact.evidence.authority,
+                confidence: fact.evidence.confidence,
+                reason: fact.evidence.reason,
+            }
+            : {
+                glob,
+                evidenceType: 'explicit-user-or-plan',
+                authority: 'explicit',
+                confidence: 'high',
+                reason: 'This exact path/glob came from explicit user intent or the accepted agent plan.',
+            };
+    });
     return {
         schemaVersion: exports.RUNTIME_COMPANION_SCHEMA_VERSION,
         generatedAt: new Date().toISOString(),
@@ -174,27 +201,52 @@ function buildRuntimeCompanionSnapshot(repoRoot, options = {}) {
             hardDenyAvailable: false,
             detail: 'The VS Code companion reflects CLI runtime state. Claude Code hooks provide pre-write hard deny; editor observation does not.',
         },
+        runtimeAuthority,
+        pairing: {
+            repositoryOwnershipBound: Boolean(profile),
+            machineAuthenticated: Boolean(connection),
+            agentIntegrationActive: Boolean(launcher || runtimeAuthority.activated?.integrations.length),
+            cloudTransportConnected: Boolean(connection),
+            repoBrainReady: brain?.state === 'fresh' || brain?.state === 'partial',
+            governedSessionActive: Boolean(session),
+            evidenceSynchronized: Boolean(connection)
+                && transport.pendingEvents === 0
+                && transport.deadLetterEvents === 0
+                && transport.quarantinedEvents === 0,
+        },
+        topology: topology ? {
+            artifactHash: topology.artifactHash,
+            trackedFileCount: topology.trackedFileCount,
+            deterministicFacts: topology.facts.filter((fact) => fact.evidence.authority === 'deterministic').length,
+            advisoryFacts: topology.facts.filter((fact) => fact.evidence.authority === 'advisory').length,
+            brainParticipated: topology.brain.participated,
+            brainFreshness: topology.brain.freshness,
+            limitations: [...topology.limitations],
+        } : null,
+        brain,
         profileFreshness: {
             ...profileFreshness,
             sessionProfileHash: session?.profileHash ?? null,
         },
         transport: {
             ...transport,
-            connected: Boolean((0, runtime_connection_1.loadRuntimeConnection)(repoRoot)),
+            connected: Boolean(connection),
         },
         session: session
             ? {
                 sessionId: session.sessionId,
                 status: session.status,
+                completionStatus: session.completionStatus ?? null,
                 repoName: session.repoName,
                 goal: session.contract.goal,
                 profileHash: session.profileHash,
                 scopeMode: session.contract.scopeMode,
                 planCoherenceMode: session.contract.planCoherenceMode ?? 'warn',
                 allowedGlobs: [...session.contract.allowedGlobs],
+                scopeEvidence,
                 approvalRequiredGlobs: [...session.contract.approvalRequiredGlobs],
                 approvedPaths: (0, governance_runtime_1.activeApprovalPaths)(session.contract),
-                launcher: shapeLauncher(session),
+                launcher,
                 plan: shapePlan(session),
                 obligations: shapeObligations(session),
                 latestBlock: shapeLatestBlock(session),

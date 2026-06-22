@@ -21,6 +21,7 @@ const node_crypto_1 = require("node:crypto");
 const micromatch_1 = __importDefault(require("micromatch"));
 const architecture_obligations_1 = require("./architecture-obligations");
 const architecture_graph_1 = require("./architecture-graph");
+const repository_topology_1 = require("./repository-topology");
 exports.DEFAULT_PLAN_COHERENCE_MODE = 'warn';
 exports.DEFAULT_RUNTIME_LOCAL_MODE = 'advisory';
 exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE = 'warn';
@@ -469,6 +470,34 @@ function buildRepoGovernanceProfile(input) {
     const architectureHash = architecture?.architectureHash ?? null;
     const profileHash = computeProfileHash(paths, sensitiveBoundaries, ownershipBoundaries, runtimeConfig, architectureHash);
     const topology = computeTopology(paths, codeownersContent, manifestContent, runtimeConfig, architectureHash);
+    const fallbackManifestPath = paths.find((pathValue) => /(^|\/)(package\.json|pyproject\.toml|setup\.py|setup\.cfg|go\.mod|Cargo\.toml|pom\.xml|build\.gradle(?:\.kts)?|Gemfile|composer\.json|Package\.swift|pnpm-workspace\.yaml|lerna\.json|nx\.json|turbo\.json|rush\.json|workspace\.json)$/.test(pathValue));
+    const topologyManifests = input.manifests && input.manifests.length > 0
+        ? input.manifests
+        : fallbackManifestPath
+            ? [{ path: fallbackManifestPath, content: manifestContent }]
+            : [];
+    const repositoryTopology = (0, repository_topology_1.compileRepositoryTopology)({
+        paths,
+        manifests: topologyManifests,
+        codeownersContent,
+        protectedGlobs: [
+            ...runtimeConfig.approvalRequiredGlobs,
+            ...runtimeConfig.sensitiveGlobs,
+        ],
+        generatedEvidence: input.generatedEvidence,
+        brain: input.brain,
+        compiledAt: new Date().toISOString(),
+    });
+    topology.hash = architectureHash
+        ? (0, node_crypto_1.createHash)('sha256')
+            .update(JSON.stringify({
+            repositoryTopology: repositoryTopology.artifactHash,
+            architecture: architectureHash,
+        }))
+            .digest('hex')
+            .slice(0, 24)
+        : repositoryTopology.artifactHash;
+    topology.trackedFileCount = repositoryTopology.trackedFileCount;
     const agentCompat = stack.confidence >= 0.5
         ? 'supported'
         : stack.primaryLanguage !== 'unknown'
@@ -478,6 +507,7 @@ function buildRepoGovernanceProfile(input) {
         schemaVersion: 1,
         repo: { name: repoName, source },
         topology,
+        repositoryTopology,
         runtimeConfig,
         stack: {
             primaryLanguage: stack.primaryLanguage,

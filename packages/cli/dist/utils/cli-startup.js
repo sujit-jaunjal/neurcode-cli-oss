@@ -15,6 +15,13 @@ function isSupervisorChild() {
 function isIdentityCommand(argv) {
     return argv.includes('runtime') && argv.includes('identity');
 }
+function isAuthorityBootstrapCommand(argv) {
+    return isIdentityCommand(argv)
+        || (argv.includes('runtime') && argv.includes('repair'))
+        || argv.includes('activate')
+        || argv.includes('--version')
+        || argv.includes('--help');
+}
 function runStartupConsistencyChecks(input) {
     if (isIdentityCommand(input.argv)) {
         return null;
@@ -51,6 +58,19 @@ function runStartupConsistencyChecks(input) {
         catch (error) {
             console.error(error instanceof Error ? error.message : String(error));
             process.exit(1);
+        }
+    }
+    if (!isAuthorityBootstrapCommand(input.argv)) {
+        const authority = (0, cli_runtime_1.assessRuntimeAuthority)({
+            repoRoot: process.cwd(),
+            current: report.identity,
+            adapter: 'cli',
+            protectedOperation: false,
+            manifest: (0, cli_runtime_1.readActivatedRuntimeManifest)(process.cwd()),
+            installations: report.installations,
+        });
+        if (!authority.ok) {
+            console.error(`[neurcode-cli] degraded runtime authority: ${authority.status}. Run \`${authority.repairCommand}\`.`);
         }
     }
     return report;

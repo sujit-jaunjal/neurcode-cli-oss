@@ -46,6 +46,7 @@ const child_process_1 = require("child_process");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const brain_1 = require("@neurcode-ai/brain");
+const cli_runtime_1 = require("@neurcode-ai/cli-runtime");
 const brain_cache_1 = require("../utils/brain-cache");
 const local_repo_brain_1 = require("../utils/local-repo-brain");
 const repo_brain_impact_1 = require("../utils/repo-brain-impact");
@@ -60,6 +61,8 @@ const semantic_1 = require("../semantic");
 const ask_cache_1 = require("../utils/ask-cache");
 const proposed_change_analysis_1 = require("../utils/proposed-change-analysis");
 const team_memory_path_hygiene_1 = require("../utils/team-memory-path-hygiene");
+const brain_lifecycle_1 = require("../utils/brain-lifecycle");
+const v0_governance_1 = require("../utils/v0-governance");
 // Import chalk with fallback
 let chalk;
 try {
@@ -85,6 +88,12 @@ function safeFileSize(path) {
     catch {
         return null;
     }
+}
+function refreshActivatedProfileAfterBrain(repoRoot) {
+    if (!(0, cli_runtime_1.readActivatedRuntimeManifest)(repoRoot))
+        return;
+    const profile = (0, v0_governance_1.buildCurrentGovernanceProfile)(repoRoot, { bypassCache: true });
+    (0, cli_runtime_1.updateActivatedRuntimeManifestProfileHash)(repoRoot, profile.profileHash);
 }
 function countOccurrences(haystack, needle) {
     if (!haystack || !needle)
@@ -726,6 +735,7 @@ function brainCommand(program) {
         .action(async (options) => {
         const scope = getBrainScope();
         try {
+            (0, brain_lifecycle_1.markBrainBuilding)(scope.cwd);
             const limits = {
                 ...(Number.isFinite(options.maxFiles) ? { maxFiles: options.maxFiles } : {}),
                 ...(Number.isFinite(options.maxTotalBytes) ? { maxTotalBytes: options.maxTotalBytes } : {}),
@@ -738,9 +748,12 @@ function brainCommand(program) {
                 renamedPaths: parseRenameList(options.rename),
                 limits,
             });
+            (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result);
+            refreshActivatedProfileAfterBrain(scope.cwd);
             printRepositoryGraphIndexResult(scope.cwd, result, options.json);
         }
         catch (error) {
+            (0, brain_lifecycle_1.markBrainFailed)(scope.cwd, error instanceof brain_1.RepositoryGraphLockedError ? 'index_locked' : 'index_failed');
             repositoryGraphError(error, options.json);
         }
     });
@@ -760,6 +773,8 @@ function brainCommand(program) {
                 deletedPaths: splitChangedPathList(options.deleted),
                 renamedPaths: parseRenameList(options.rename),
             });
+            (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result);
+            refreshActivatedProfileAfterBrain(scope.cwd);
             printRepositoryGraphIndexResult(scope.cwd, result, options.json);
         }
         catch (error) {
@@ -816,6 +831,51 @@ function brainCommand(program) {
         catch (error) {
             repositoryGraphError(error, options.json);
         }
+    });
+    brain
+        .command('lifecycle')
+        .description('Show truthful Repo Brain lifecycle, progress, freshness, and recovery commands')
+        .option('--json', 'Output stable source-free JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        const lifecycle = await (0, brain_lifecycle_1.inspectBrainLifecycle)(scope.cwd);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: lifecycle.state !== 'failed', lifecycle }, null, 2));
+            return;
+        }
+        console.log(chalk.bold('\n🧠 Repo Brain Lifecycle\n'));
+        console.log(chalk.dim(`State:       ${lifecycle.state}`));
+        console.log(chalk.dim(`Progress:    ${lifecycle.progress.filesIndexed}/${lifecycle.progress.totalFiles ?? '?'} files${lifecycle.progress.percent === null ? '' : ` (${lifecycle.progress.percent}%)`}`));
+        console.log(chalk.dim(`Freshness:   ${lifecycle.freshness?.state ?? 'not evaluated'}`));
+        console.log(chalk.dim(`Unsupported: ${lifecycle.unsupportedFacts.join(', ') || 'none disclosed'}`));
+        console.log(chalk.dim(`Retry:       ${lifecycle.recoveryCommands.retry}`));
+        console.log(chalk.dim(`Cancel:      ${lifecycle.recoveryCommands.cancel}`));
+        console.log(chalk.dim(`Selective:   ${lifecycle.recoveryCommands.selectiveRebuild}`));
+        console.log(chalk.dim(`Recover:     ${lifecycle.recoveryCommands.recover}`));
+    });
+    brain
+        .command('cancel')
+        .description('Cancel a scheduled or building Repo Brain index without deleting the last usable graph')
+        .option('--json', 'Output stable source-free JSON')
+        .action((options) => {
+        const scope = getBrainScope();
+        const lifecycle = (0, brain_lifecycle_1.cancelBrainIndex)(scope.cwd);
+        if (options.json)
+            console.log(JSON.stringify({ ok: true, lifecycle }, null, 2));
+        else
+            console.log(chalk.yellow(`Repo Brain indexing cancelled. Retry with \`${lifecycle.recoveryCommands.retry}\`.`));
+    });
+    brain
+        .command('retry')
+        .description('Retry Repo Brain indexing with bounded default budgets')
+        .option('--json', 'Output stable source-free JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        const lifecycle = await (0, brain_lifecycle_1.scheduleBrainIndex)(scope.cwd, { force: true });
+        if (options.json)
+            console.log(JSON.stringify({ ok: true, lifecycle }, null, 2));
+        else
+            console.log(chalk.green(`Repo Brain indexing scheduled (pid ${lifecycle.pid ?? 'pending'}).`));
     });
     brain
         .command('repo-explain <query...>')

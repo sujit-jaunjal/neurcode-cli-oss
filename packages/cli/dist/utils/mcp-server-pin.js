@@ -18,7 +18,7 @@ const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
 const node_child_process_1 = require("node:child_process");
 exports.MCP_SERVER_PACKAGE = '@neurcode-ai/mcp-server';
-exports.MIN_MCP_SERVER_VERSION = '0.2.5';
+exports.MIN_MCP_SERVER_VERSION = '0.3.1';
 /** Legacy relative paths fail when Cursor MCP cwd is not the workspace root. */
 exports.PINNED_MCP_ENTRY_RELATIVE = 'mcp-server/node_modules/@neurcode-ai/mcp-server/dist/index.js';
 function pinnedMcpBaseRoot(repoRoot, global = false) {
@@ -37,7 +37,7 @@ function ensurePinnedMcpServer(baseRoot) {
     }
     const installDir = mcpServerPinDir(baseRoot);
     (0, node_fs_1.mkdirSync)(installDir, { recursive: true });
-    const versionsToTry = [exports.MIN_MCP_SERVER_VERSION, '0.2.3', '0.2.2'].filter((version, index, all) => all.indexOf(version) === index);
+    const versionsToTry = [exports.MIN_MCP_SERVER_VERSION, '0.3.0', '0.2.5'].filter((version, index, all) => all.indexOf(version) === index);
     let lastMessage = `Failed to install pinned MCP server (${exports.MCP_SERVER_PACKAGE}).`;
     for (const version of versionsToTry) {
         const install = (0, node_child_process_1.spawnSync)('npm', [

@@ -86,6 +86,10 @@ export interface RuntimeEvidenceUploadRequest {
         profileHash?: string;
         topologyHash?: string;
         profileFreshness?: Record<string, unknown>;
+        runtimeAuthority?: Record<string, unknown>;
+        topology?: Record<string, unknown>;
+        brain?: Record<string, unknown>;
+        pairing?: Record<string, boolean>;
         source?: string;
     };
     cliVersion?: string;
