@@ -100,7 +100,7 @@ interface PresentLocalGovernanceStatus {
     sensitiveGlobs: string[];
     approvalRequiredGlobs: string[];
     approvedPaths: string[];
-    recentEvents: SessionEvent[];
+    recentEvents: SourceFreeSessionEvent[];
     agentInvocation: AgentInvocationSummary;
     agentGuard: AgentGuardPostureSummary;
     agentSupervisor: AgentGuardSupervisorInspection;
@@ -116,6 +116,9 @@ interface PresentLocalGovernanceStatus {
     runtimeState: RuntimeStateAssessment;
 }
 type LocalGovernanceStatus = MissingLocalGovernanceStatus | PresentLocalGovernanceStatus;
+type SourceFreeSessionEvent = Omit<SessionEvent, 'detail'> & {
+    detail?: Record<string, unknown>;
+};
 type UnderstandingDiffFile = DiffFile & {
     provenance?: 'git-diff' | 'git-untracked';
 };

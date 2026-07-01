@@ -119,6 +119,21 @@ catch {
 // Re-export for callers that import from this module
 var operator_identity_2 = require("../utils/operator-identity");
 Object.defineProperty(exports, "deriveLocalOperatorIdentity", { enumerable: true, get: function () { return operator_identity_2.deriveLocalOperatorIdentity; } });
+const SOURCE_LIKE_EVENT_DETAIL_KEYS = new Set([
+    'content',
+    'fileContent',
+    'file_content',
+    'sourceText',
+    'source_text',
+    'sourceCode',
+    'source_code',
+    'diff',
+    'diffText',
+    'diff_text',
+    'patch',
+    'before',
+    'after',
+]);
 /**
  * Prompt user for input
  */
@@ -353,6 +368,108 @@ function pendingApprovalBlock(session, now = new Date()) {
     }
     return null;
 }
+function summarizeProposedChangeEnvelope(value) {
+    if (!value || typeof value !== 'object') {
+        return {
+            present: false,
+            reasonCode: 'proposed_change_not_object',
+        };
+    }
+    const envelope = value;
+    const target = envelope['target'] && typeof envelope['target'] === 'object'
+        ? envelope['target']
+        : {};
+    const contentMetadata = envelope['content'] && typeof envelope['content'] === 'object'
+        ? envelope['content']
+        : {};
+    const facts = envelope['facts'] && typeof envelope['facts'] === 'object'
+        ? envelope['facts']
+        : {};
+    const host = envelope['host'] && typeof envelope['host'] === 'object'
+        ? envelope['host']
+        : {};
+    const privacy = envelope['privacy'] && typeof envelope['privacy'] === 'object'
+        ? envelope['privacy']
+        : {};
+    return {
+        schemaVersion: typeof envelope['schemaVersion'] === 'string' ? envelope['schemaVersion'] : null,
+        target: {
+            path: typeof target['path'] === 'string' ? target['path'] : null,
+            operation: typeof target['operation'] === 'string' ? target['operation'] : null,
+            language: typeof target['language'] === 'string' ? target['language'] : null,
+        },
+        contentMetadata: {
+            present: contentMetadata['present'] === true,
+            availabilityReason: typeof contentMetadata['availabilityReason'] === 'string'
+                ? contentMetadata['availabilityReason']
+                : null,
+            contentHash: typeof contentMetadata['contentHash'] === 'string' ? contentMetadata['contentHash'] : null,
+            rawRetained: contentMetadata['rawRetained'] === true,
+        },
+        factCounts: {
+            symbols: Array.isArray(facts['symbols']) ? facts['symbols'].length : 0,
+            imports: Array.isArray(facts['imports']) ? facts['imports'].length : 0,
+            exports: Array.isArray(facts['exports']) ? facts['exports'].length : 0,
+            relationships: Array.isArray(facts['relationships']) ? facts['relationships'].length : 0,
+            references: Array.isArray(facts['references']) ? facts['references'].length : 0,
+            calls: Array.isArray(facts['calls']) ? facts['calls'].length : 0,
+            boundaries: Array.isArray(facts['boundaries']) ? facts['boundaries'].length : 0,
+        },
+        parserDepth: typeof facts['parserDepth'] === 'string' ? facts['parserDepth'] : null,
+        extractionErrors: Array.isArray(facts['extractionErrors'])
+            ? facts['extractionErrors'].filter((item) => typeof item === 'string').slice(0, 12)
+            : [],
+        host: {
+            adapterId: typeof host['adapterId'] === 'string' ? host['adapterId'] : null,
+            capability: typeof host['capability'] === 'string' ? host['capability'] : null,
+            timing: typeof host['timing'] === 'string' ? host['timing'] : null,
+        },
+        privacy: {
+            sourceUploaded: privacy['sourceUploaded'] === true,
+            rawRetained: privacy['rawRetained'] === true,
+        },
+    };
+}
+function sanitizeSourceFreeDetailValue(value) {
+    if (Array.isArray(value)) {
+        return value.map((item) => sanitizeSourceFreeDetailValue(item));
+    }
+    if (!value || typeof value !== 'object')
+        return value;
+    const output = {};
+    for (const [key, child] of Object.entries(value)) {
+        if (SOURCE_LIKE_EVENT_DETAIL_KEYS.has(key)) {
+            output[`${key}Metadata`] = {
+                omitted: true,
+                reasonCode: 'source_like_key',
+            };
+            continue;
+        }
+        output[key] = sanitizeSourceFreeDetailValue(child);
+    }
+    return output;
+}
+function sourceFreeSessionEvent(event) {
+    const detail = event.detail;
+    if (!detail || typeof detail !== 'object')
+        return event;
+    const output = { ...event, detail: {} };
+    for (const [key, value] of Object.entries(detail)) {
+        if (key === 'proposedChange') {
+            output.detail[key] = summarizeProposedChangeEnvelope(value);
+            continue;
+        }
+        if (SOURCE_LIKE_EVENT_DETAIL_KEYS.has(key)) {
+            output.detail[`${key}Metadata`] = {
+                omitted: true,
+                reasonCode: 'source_like_key',
+            };
+            continue;
+        }
+        output.detail[key] = sanitizeSourceFreeDetailValue(value);
+    }
+    return output;
+}
 function activePointerInspection(repoRoot) {
     const path = (0, node_path_1.join)(repoRoot, '.neurcode', 'active-session.json');
     if (!(0, node_fs_1.existsSync)(path))
@@ -472,7 +589,7 @@ function buildLocalGovernanceStatus(options = {}) {
             runtimeState,
         };
     }
-    const recentEvents = session.events.slice(-10);
+    const recentEvents = session.events.slice(-10).map(sourceFreeSessionEvent);
     const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
     const profileAction = (0, v0_governance_1.profileFreshnessActionForSession)(staleness, session.profileHash);
     const pendingProfileDecisions = (0, profile_drift_recovery_1.pendingProfileDriftDecisions)(session);
