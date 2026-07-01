@@ -12,6 +12,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_OBLIGATION_WAIVER_TTL_MS = exports.DEFAULT_APPROVAL_TTL_MS = void 0;
 exports.sessionsDir = sessionsDir;
 exports.sessionPath = sessionPath;
+exports.activateSession = activateSession;
+exports.clearActiveSession = clearActiveSession;
+exports.removeSession = removeSession;
 exports.createSession = createSession;
 exports.loadActiveSession = loadActiveSession;
 exports.loadSession = loadSession;
@@ -35,16 +38,24 @@ exports.evaluateSessionPlanCoherence = evaluateSessionPlanCoherence;
 exports.evaluatePlanCoherencePolicy = evaluatePlanCoherencePolicy;
 exports.activeAgentPlanRevision = activeAgentPlanRevision;
 exports.buildPlanTimeline = buildPlanTimeline;
+exports.derivePlanPhase = derivePlanPhase;
+exports.freezePlan = freezePlan;
+exports.unfreezePlan = unfreezePlan;
+exports.buildPlanNegotiationView = buildPlanNegotiationView;
 const node_crypto_1 = require("node:crypto");
+const node_child_process_1 = require("node:child_process");
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const micromatch_1 = __importDefault(require("micromatch"));
 const profile_1 = require("./profile");
+const runtime_safety_kernel_1 = require("./runtime-safety-kernel");
 const agent_plan_1 = require("./agent-plan");
 const architecture_obligations_1 = require("./architecture-obligations");
 const ai_change_record_1 = require("./ai-change-record");
 const repository_topology_1 = require("./repository-topology");
 const intent_privacy_1 = require("./intent-privacy");
+const repo_path_authority_1 = require("./repo-path-authority");
+const relationship_authority_1 = require("./relationship-authority");
 exports.DEFAULT_APPROVAL_TTL_MS = 60 * 60 * 1000;
 exports.DEFAULT_OBLIGATION_WAIVER_TTL_MS = 60 * 60 * 1000;
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -56,6 +67,127 @@ function sessionPath(projectRoot, sessionId) {
 }
 function activePointerPath(projectRoot) {
     return (0, node_path_1.join)(projectRoot, '.neurcode', 'active-session.json');
+}
+/**
+ * Atomic file write: write to a unique temp file then rename over the target. A crash or
+ * concurrent reader never observes a half-written session record or active pointer
+ * (P0-D: no partial session, no corrupt active pointer).
+ */
+function atomicWriteFileSync(targetPath, contents) {
+    (0, node_fs_1.mkdirSync)((0, node_path_1.dirname)(targetPath), { recursive: true });
+    const temporaryPath = `${targetPath}.tmp.${process.pid}.${(0, node_crypto_1.randomBytes)(4).toString('hex')}`;
+    let descriptor = null;
+    try {
+        descriptor = (0, node_fs_1.openSync)(temporaryPath, 'w', 0o600);
+        (0, node_fs_1.writeFileSync)(descriptor, contents, 'utf8');
+        (0, node_fs_1.fsyncSync)(descriptor);
+        (0, node_fs_1.closeSync)(descriptor);
+        descriptor = null;
+        if (process.env.NODE_ENV === 'test'
+            && process.env.NEURCODE_TEST_SESSION_ATOMIC_WRITE_FAIL_PHASE === 'before_rename'
+            && targetPath.includes(`${node_path_1.sep}.neurcode${node_path_1.sep}sessions${node_path_1.sep}`)
+            && !targetPath.includes('.events.lock')) {
+            const injected = new Error('injected session atomic write failure');
+            injected.code = 'ENOSPC';
+            throw injected;
+        }
+        (0, node_fs_1.renameSync)(temporaryPath, targetPath);
+        try {
+            const directory = (0, node_fs_1.openSync)((0, node_path_1.dirname)(targetPath), 'r');
+            try {
+                (0, node_fs_1.fsyncSync)(directory);
+            }
+            finally {
+                (0, node_fs_1.closeSync)(directory);
+            }
+        }
+        catch {
+            // Directory fsync is unavailable on some platforms.
+        }
+    }
+    catch (error) {
+        if (descriptor !== null) {
+            try {
+                (0, node_fs_1.closeSync)(descriptor);
+            }
+            catch { /* best effort */ }
+        }
+        try {
+            if ((0, node_fs_1.existsSync)(temporaryPath))
+                (0, node_fs_1.rmSync)(temporaryPath, { force: true });
+        }
+        catch { /* best effort */ }
+        throw error;
+    }
+}
+function persistSession(projectRoot, session) {
+    atomicWriteFileSync(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n');
+}
+function withActivePointerLock(projectRoot, operation) {
+    return withSessionEventLock(projectRoot, '__active_pointer__', operation);
+}
+/**
+ * Publish the active-session pointer. Call ONLY after the session record is durably
+ * persisted (P0-D: never publish the pointer before durable persistence). Verifies the
+ * referenced session record exists and loads before committing the pointer.
+ */
+function activateSession(projectRoot, sessionId) {
+    withActivePointerLock(projectRoot, () => {
+        if (!(0, node_fs_1.existsSync)(sessionPath(projectRoot, sessionId)) || !loadSession(projectRoot, sessionId)) {
+            throw new Error(`cannot activate session ${sessionId} (durable session record is missing or unreadable)`);
+        }
+        atomicWriteFileSync(activePointerPath(projectRoot), JSON.stringify({ sessionId }, null, 2) + '\n');
+    });
+}
+/** Clear the active-session pointer (idempotent). */
+function clearActiveSession(projectRoot, expectedSessionId) {
+    withActivePointerLock(projectRoot, () => {
+        const pointer = activePointerPath(projectRoot);
+        if ((0, node_fs_1.existsSync)(pointer)) {
+            if (expectedSessionId) {
+                try {
+                    const current = JSON.parse((0, node_fs_1.readFileSync)(pointer, 'utf8'));
+                    if (current.sessionId !== expectedSessionId)
+                        return;
+                }
+                catch {
+                    // A malformed pointer is evidence, not permission to clear an unknown owner.
+                    return;
+                }
+            }
+            atomicWriteFileSync(pointer, JSON.stringify({ sessionId: null }, null, 2) + '\n');
+        }
+    });
+}
+/**
+ * Roll back a session: remove its durable record and clear the active pointer if it
+ * points at this session. Used to undo a session whose start failed validation so no
+ * partial session and no dangling active pointer survive (P0-D).
+ */
+function removeSession(projectRoot, sessionId) {
+    try {
+        withActivePointerLock(projectRoot, () => {
+            const pointer = activePointerPath(projectRoot);
+            if ((0, node_fs_1.existsSync)(pointer)) {
+                try {
+                    const parsed = JSON.parse((0, node_fs_1.readFileSync)(pointer, 'utf8'));
+                    if (parsed.sessionId === sessionId)
+                        (0, node_fs_1.rmSync)(pointer, { force: true });
+                }
+                catch {
+                    // Preserve corrupt evidence without leaving it as the active pointer.
+                    (0, node_fs_1.renameSync)(pointer, `${pointer}.corrupt.${Date.now()}`);
+                }
+            }
+        });
+    }
+    catch { /* best effort pointer cleanup; fall through to record removal */ }
+    try {
+        const record = sessionPath(projectRoot, sessionId);
+        if ((0, node_fs_1.existsSync)(record))
+            (0, node_fs_1.rmSync)(record, { force: true });
+    }
+    catch { /* best effort */ }
 }
 function uniquePrivacyReasons(values) {
     return Array.from(new Set(values)).sort((left, right) => left.localeCompare(right));
@@ -157,16 +289,89 @@ function sanitizeSessionEventForLocalPrivate(event) {
     };
 }
 const SESSION_EVENT_LOCK_TIMEOUT_MS = 2_000;
-const SESSION_EVENT_LOCK_STALE_MS = 30_000;
 const SESSION_EVENT_LOCK_WAIT_MS = 10;
 const SESSION_EVENT_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+function sessionProcessExists(pid) {
+    if (!Number.isSafeInteger(pid) || pid <= 0)
+        return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error
+            ? String(error.code)
+            : '';
+        return code === 'EPERM';
+    }
+}
+function sessionProcessStartFingerprint(pid) {
+    if (!sessionProcessExists(pid))
+        return null;
+    const result = (0, node_child_process_1.spawnSync)('ps', ['-o', 'lstart=', '-p', String(pid)], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 1_000,
+    });
+    if ((result.status ?? 1) !== 0)
+        return null;
+    const started = String(result.stdout || '').trim();
+    return started
+        ? (0, node_crypto_1.createHash)('sha256').update(`ps:${started}`).digest('hex').slice(0, 24)
+        : null;
+}
+const SESSION_PROCESS_START_FINGERPRINT = sessionProcessStartFingerprint(process.pid);
+function readSessionMutationLockOwner(lockPath) {
+    try {
+        const parsed = JSON.parse((0, node_fs_1.readFileSync)((0, node_path_1.join)(lockPath, 'owner.json'), 'utf8'));
+        if (typeof parsed.token !== 'string'
+            || !parsed.token
+            || !Number.isSafeInteger(parsed.pid)
+            || Number(parsed.pid) <= 0)
+            return null;
+        return {
+            token: parsed.token,
+            pid: Number(parsed.pid),
+            processStartFingerprint: typeof parsed.processStartFingerprint === 'string'
+                ? parsed.processStartFingerprint
+                : null,
+            createdAt: typeof parsed.createdAt === 'string' ? parsed.createdAt : '',
+        };
+    }
+    catch {
+        return null;
+    }
+}
+function sessionMutationOwnerState(owner) {
+    if (!sessionProcessExists(owner.pid))
+        return 'dead';
+    if (!owner.processStartFingerprint)
+        return 'unknown';
+    const actual = sessionProcessStartFingerprint(owner.pid);
+    if (!actual)
+        return 'unknown';
+    return actual === owner.processStartFingerprint ? 'alive_same' : 'reused';
+}
 function withSessionEventLock(projectRoot, sessionId, operation) {
     const lockPath = `${sessionPath(projectRoot, sessionId)}.events.lock`;
     (0, node_fs_1.mkdirSync)(sessionsDir(projectRoot), { recursive: true });
     const deadline = Date.now() + SESSION_EVENT_LOCK_TIMEOUT_MS;
+    const owner = {
+        token: (0, node_crypto_1.randomBytes)(16).toString('hex'),
+        pid: process.pid,
+        processStartFingerprint: SESSION_PROCESS_START_FINGERPRINT,
+        createdAt: new Date().toISOString(),
+    };
     while (true) {
         try {
             (0, node_fs_1.mkdirSync)(lockPath);
+            try {
+                (0, node_fs_1.writeFileSync)((0, node_path_1.join)(lockPath, 'owner.json'), JSON.stringify(owner), { encoding: 'utf8', mode: 0o600 });
+            }
+            catch (error) {
+                (0, node_fs_1.rmSync)(lockPath, { recursive: true, force: true });
+                throw error;
+            }
             break;
         }
         catch (error) {
@@ -175,14 +380,17 @@ function withSessionEventLock(projectRoot, sessionId, operation) {
                 : '';
             if (code !== 'EEXIST')
                 throw error;
-            try {
-                if (Date.now() - (0, node_fs_1.statSync)(lockPath).mtimeMs > SESSION_EVENT_LOCK_STALE_MS) {
+            const currentOwner = readSessionMutationLockOwner(lockPath);
+            if (currentOwner) {
+                const state = sessionMutationOwnerState(currentOwner);
+                const verified = readSessionMutationLockOwner(lockPath);
+                if ((state === 'dead' || state === 'reused')
+                    && verified?.token === currentOwner.token
+                    && verified.pid === currentOwner.pid
+                    && verified.processStartFingerprint === currentOwner.processStartFingerprint) {
                     (0, node_fs_1.rmSync)(lockPath, { recursive: true, force: true });
                     continue;
                 }
-            }
-            catch {
-                continue;
             }
             if (Date.now() >= deadline) {
                 throw new Error(`Timed out waiting to mutate session ${sessionId}.`);
@@ -194,17 +402,19 @@ function withSessionEventLock(projectRoot, sessionId, operation) {
         return operation();
     }
     finally {
-        (0, node_fs_1.rmSync)(lockPath, { recursive: true, force: true });
+        if (readSessionMutationLockOwner(lockPath)?.token === owner.token) {
+            (0, node_fs_1.rmSync)(lockPath, { recursive: true, force: true });
+        }
     }
 }
 // ── CRUD ──────────────────────────────────────────────────────────────────────
-function createSession(projectRoot, profile, goal) {
+function createSession(projectRoot, profile, goal, options = {}) {
     const sessionId = (0, node_crypto_1.randomBytes)(6).toString('hex');
     const dir = sessionsDir(projectRoot);
     if (!(0, node_fs_1.existsSync)(dir))
         (0, node_fs_1.mkdirSync)(dir, { recursive: true });
-    const { allowedGlobs, scopeMode } = deriveAllowedGlobs(goal, profile);
-    const intentContract = deriveIntentContract(goal, profile, allowedGlobs, scopeMode);
+    const { allowedGlobs, scopeMode } = deriveAllowedGlobs(projectRoot, goal, profile);
+    const intentContract = deriveIntentContract(projectRoot, goal, profile, allowedGlobs, scopeMode);
     const startedAt = new Date().toISOString();
     const architectureObligationPolicy = (0, architecture_obligations_1.normalizeArchitectureObligationPolicy)(profile.runtimeConfig?.architectureObligations);
     const architectureGraph = profile.architecture;
@@ -239,6 +449,8 @@ function createSession(projectRoot, profile, goal) {
             approvalGrants: [],
             intentContract: localIntentContract,
             planCoherenceMode: profile.runtimeConfig?.planCoherence ?? profile_1.DEFAULT_PLAN_COHERENCE_MODE,
+            planMode: profile.runtimeConfig?.planMode ?? profile_1.DEFAULT_PLAN_CONTROL_MODE,
+            runtimeSafetyPolicyId: profile.runtimeConfig?.runtimeSafetyPolicy?.id ?? runtime_safety_kernel_1.ENTERPRISE_RUNTIME_SAFETY_V1_PROFILE_ID,
             runtimeMode: profile.runtimeConfig?.localMode ?? profile_1.DEFAULT_RUNTIME_LOCAL_MODE,
             repoSymbolDuplicateMode: profile.runtimeConfig?.repoSymbolDuplicateMode ?? 'warn',
             architectureObligations: localArchitectureObligations,
@@ -257,6 +469,8 @@ function createSession(projectRoot, profile, goal) {
                     scopeMode,
                     intentContract: localIntentContract,
                     planCoherenceMode: profile.runtimeConfig?.planCoherence ?? profile_1.DEFAULT_PLAN_COHERENCE_MODE,
+                    planMode: profile.runtimeConfig?.planMode ?? profile_1.DEFAULT_PLAN_CONTROL_MODE,
+                    runtimeSafetyPolicyId: profile.runtimeConfig?.runtimeSafetyPolicy?.id ?? runtime_safety_kernel_1.ENTERPRISE_RUNTIME_SAFETY_V1_PROFILE_ID,
                     runtimeMode: profile.runtimeConfig?.localMode ?? profile_1.DEFAULT_RUNTIME_LOCAL_MODE,
                     repoSymbolDuplicateMode: profile.runtimeConfig?.repoSymbolDuplicateMode ?? 'warn',
                     architectureObligations: localArchitectureObligations,
@@ -267,11 +481,14 @@ function createSession(projectRoot, profile, goal) {
         status: 'active',
     };
     markLocalPrivateSession(session, localReasons, startedAt);
-    (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
-    const neurcodeDir = (0, node_path_1.join)(projectRoot, '.neurcode');
-    if (!(0, node_fs_1.existsSync)(neurcodeDir))
-        (0, node_fs_1.mkdirSync)(neurcodeDir, { recursive: true });
-    (0, node_fs_1.writeFileSync)(activePointerPath(projectRoot), JSON.stringify({ sessionId }, null, 2) + '\n', 'utf8');
+    // Persist the durable session record atomically BEFORE publishing the active pointer.
+    atomicWriteFileSync(sessionPath(projectRoot, sessionId), JSON.stringify(session, null, 2) + '\n');
+    // Publish the active pointer only after the record is durable. Deferred activation
+    // (activate: false) lets the caller validate post-creation steps and activate
+    // explicitly, so a start that fails afterwards leaves no active pointer (P0-D).
+    if (options.activate !== false) {
+        activateSession(projectRoot, sessionId);
+    }
     return session;
 }
 function loadActiveSession(projectRoot) {
@@ -307,7 +524,7 @@ function appendEvent(projectRoot, sessionId, event) {
         const sanitized = sanitizeSessionEventForLocalPrivate(event);
         session.events.push(sanitized.event);
         markLocalPrivateSession(session, sanitized.reasonCodes, sanitized.event.ts);
-        (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
+        persistSession(projectRoot, session);
         return session;
     });
 }
@@ -355,12 +572,14 @@ function recomputeArchitectureObligations(session, now = new Date().toISOString(
     return next;
 }
 function refreshArchitectureObligations(projectRoot, sessionId, now = new Date().toISOString()) {
-    const session = loadSession(projectRoot, sessionId);
-    if (!session)
-        return null;
-    recomputeArchitectureObligations(session, now);
-    (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
-    return session;
+    return withSessionEventLock(projectRoot, sessionId, () => {
+        const session = loadSession(projectRoot, sessionId);
+        if (!session)
+            return null;
+        recomputeArchitectureObligations(session, now);
+        persistSession(projectRoot, session);
+        return session;
+    });
 }
 /**
  * Append an explicit approval for a path/glob to the active (or named) session.
@@ -395,7 +614,24 @@ function normaliseApprovalPath(projectRoot, raw) {
             const reason = sanitized.reasonCodes[0] || 'unsafe_path';
             throw new Error(`approvedPath rejected (${reason}).`);
         }
-        return sanitized.path;
+        const firstWildcard = sanitized.path.search(/[*?]/);
+        const concreteRelative = firstWildcard >= 0
+            ? sanitized.path.slice(0, firstWildcard).replace(/\/$/, '')
+            : sanitized.path;
+        const physicalRepo = resolveThroughExistingAncestor(projectRoot);
+        const physicalCandidate = resolveThroughExistingAncestor((0, node_path_1.join)(projectRoot, concreteRelative || '.'));
+        const physicalRelative = (0, node_path_1.relative)(physicalRepo, physicalCandidate);
+        if (physicalRelative === '..' || physicalRelative.startsWith(`..${node_path_1.sep}`) || (0, node_path_1.isAbsolute)(physicalRelative)) {
+            throw new Error('approvedPath rejected (symlink_escape).');
+        }
+        const finalAuthority = sanitized.path.includes('*') || sanitized.path.includes('?')
+            ? (0, repo_path_authority_1.validateRepoGlob)(projectRoot, sanitized.path)
+            : (0, repo_path_authority_1.validateRepoFilePath)(projectRoot, sanitized.path, { allowPlannedMissing: true });
+        if (!finalAuthority.ok) {
+            const reason = finalAuthority.reasonCodes[0] || 'unsafe_path';
+            throw new Error(`approvedPath rejected (${reason}).`);
+        }
+        return finalAuthority.path || sanitized.path;
     };
     const isGlob = trimmed.includes('*') || trimmed.includes('?');
     if (isGlob) {
@@ -426,8 +662,7 @@ function normaliseApprovalPath(projectRoot, raw) {
             resolvedConcrete = (0, node_fs_1.realpathSync)(concretePart.replace(/\/$/, '') || '/');
         }
         catch {
-            resolvedConcrete = (0, node_path_1.resolve)(concretePart);
-            absRepo = (0, node_path_1.resolve)(projectRoot);
+            resolvedConcrete = resolveThroughExistingAncestor(concretePart);
         }
         if (!resolvedConcrete.startsWith(absRepo + '/') && resolvedConcrete !== absRepo) {
             throw new Error(`Approval path "${trimmed}" is outside the repo root "${projectRoot}". ` +
@@ -455,9 +690,9 @@ function normaliseApprovalPath(projectRoot, raw) {
             absPath = (0, node_fs_1.realpathSync)(trimmed);
         }
         catch {
-            // File may not exist yet — fall back to syntactic resolution
-            absPath = (0, node_path_1.resolve)(trimmed);
-            absRepo = (0, node_path_1.resolve)(projectRoot);
+            // File may not exist yet. Resolve the nearest existing ancestor so a
+            // symlinked parent cannot turn an apparently in-repo path into an escape.
+            absPath = resolveThroughExistingAncestor(trimmed);
         }
         if (!absPath.startsWith(absRepo + '/') && absPath !== absRepo) {
             throw new Error(`Approval path "${trimmed}" is outside the repo root "${projectRoot}". ` +
@@ -471,6 +706,25 @@ function normaliseApprovalPath(projectRoot, raw) {
     }
     // Already relative — remove a leading ./ if present
     return safeApprovalPath(trimmed.replace(/^\.\//, ''));
+}
+function resolveThroughExistingAncestor(value) {
+    let cursor = (0, node_path_1.resolve)(value);
+    const suffix = [];
+    while (!(0, node_fs_1.existsSync)(cursor)) {
+        const parent = (0, node_path_1.dirname)(cursor);
+        if (parent === cursor)
+            break;
+        suffix.unshift((0, node_path_1.basename)(cursor));
+        cursor = parent;
+    }
+    let physical = cursor;
+    try {
+        physical = (0, node_fs_1.realpathSync)(cursor);
+    }
+    catch {
+        physical = (0, node_path_1.resolve)(cursor);
+    }
+    return (0, node_path_1.resolve)(physical, ...suffix);
 }
 function normaliseApprovalArgs(reasonOrOptions, sessionId) {
     if (reasonOrOptions && typeof reasonOrOptions === 'object') {
@@ -520,53 +774,55 @@ function activeApprovalPaths(contract, checkedAt = new Date().toISOString()) {
         .map((grant) => grant.path)));
 }
 function expireSessionApprovals(projectRoot, sessionId, checkedAt = new Date().toISOString()) {
-    const session = loadSession(projectRoot, sessionId);
-    if (!session)
-        return null;
-    const grants = approvalGrants(session.contract);
-    if (grants.length === 0)
-        return session;
-    const checkedAtMs = Date.parse(checkedAt);
-    const expired = grants.filter((grant) => {
-        if (!grant.expiresAt || grant.revokedAt)
-            return false;
-        const expiresAtMs = Date.parse(grant.expiresAt);
-        if (!Number.isFinite(expiresAtMs) || !Number.isFinite(checkedAtMs))
-            return false;
-        return expiresAtMs <= checkedAtMs;
-    });
-    if (expired.length === 0) {
-        const activePaths = activeApprovalPaths(session.contract, checkedAt);
-        if (JSON.stringify(activePaths) !==
-            JSON.stringify(session.contract.approvedPaths ?? [])) {
-            session.contract.approvedPaths = activePaths;
-            recomputeArchitectureObligations(session, checkedAt);
-            (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
-        }
-        return session;
-    }
-    const alreadyRecorded = new Set(session.events
-        .filter((event) => event.type === 'approval_decision' && event.decision === 'expired')
-        .map((event) => String(event.detail?.approvalEventId || '')));
-    for (const grant of expired) {
-        if (alreadyRecorded.has(grant.eventId))
-            continue;
-        session.events.push({
-            type: 'approval_decision',
-            ts: checkedAt,
-            filePath: grant.path,
-            decision: 'expired',
-            detail: {
-                reason: 'approval expired',
-                approvalEventId: grant.eventId,
-                expiresAt: grant.expiresAt,
-            },
+    return withSessionEventLock(projectRoot, sessionId, () => {
+        const session = loadSession(projectRoot, sessionId);
+        if (!session)
+            return null;
+        const grants = approvalGrants(session.contract);
+        if (grants.length === 0)
+            return session;
+        const checkedAtMs = Date.parse(checkedAt);
+        const expired = grants.filter((grant) => {
+            if (!grant.expiresAt || grant.revokedAt)
+                return false;
+            const expiresAtMs = Date.parse(grant.expiresAt);
+            if (!Number.isFinite(expiresAtMs) || !Number.isFinite(checkedAtMs))
+                return false;
+            return expiresAtMs <= checkedAtMs;
         });
-    }
-    session.contract.approvedPaths = activeApprovalPaths(session.contract, checkedAt);
-    recomputeArchitectureObligations(session, checkedAt);
-    (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
-    return session;
+        if (expired.length === 0) {
+            const activePaths = activeApprovalPaths(session.contract, checkedAt);
+            if (JSON.stringify(activePaths) !==
+                JSON.stringify(session.contract.approvedPaths ?? [])) {
+                session.contract.approvedPaths = activePaths;
+                recomputeArchitectureObligations(session, checkedAt);
+                persistSession(projectRoot, session);
+            }
+            return session;
+        }
+        const alreadyRecorded = new Set(session.events
+            .filter((event) => event.type === 'approval_decision' && event.decision === 'expired')
+            .map((event) => String(event.detail?.approvalEventId || '')));
+        for (const grant of expired) {
+            if (alreadyRecorded.has(grant.eventId))
+                continue;
+            session.events.push({
+                type: 'approval_decision',
+                ts: checkedAt,
+                filePath: grant.path,
+                decision: 'expired',
+                detail: {
+                    reason: 'approval expired',
+                    approvalEventId: grant.eventId,
+                    expiresAt: grant.expiresAt,
+                },
+            });
+        }
+        session.contract.approvedPaths = activeApprovalPaths(session.contract, checkedAt);
+        recomputeArchitectureObligations(session, checkedAt);
+        persistSession(projectRoot, session);
+        return session;
+    });
 }
 function resolveDecisionExpiry(expiresAt, ttlMs, decidedAt, defaultTtlMs, label) {
     if (expiresAt === null || ttlMs === null)
@@ -585,114 +841,121 @@ function resolveDecisionExpiry(expiresAt, ttlMs, decidedAt, defaultTtlMs, label)
     return new Date(Date.parse(decidedAt) + ttl).toISOString();
 }
 function expireArchitectureObligationWaivers(projectRoot, sessionId, checkedAt = new Date().toISOString()) {
-    const session = loadSession(projectRoot, sessionId);
-    if (!session)
-        return null;
-    const waivers = Array.isArray(session.contract.architectureObligationWaivers)
-        ? session.contract.architectureObligationWaivers
-        : [];
-    if (waivers.length === 0)
-        return session;
-    const checkedAtMs = Date.parse(checkedAt);
-    const expired = waivers.filter((waiver) => {
-        if (!waiver.expiresAt || waiver.revokedAt)
-            return false;
-        const expiresAtMs = Date.parse(waiver.expiresAt);
-        if (!Number.isFinite(expiresAtMs) || !Number.isFinite(checkedAtMs))
-            return false;
-        return expiresAtMs <= checkedAtMs;
-    });
-    const alreadyRecorded = new Set(session.events
-        .filter((event) => event.type === 'obligation_waiver_decision' && event.decision === 'expired')
-        .map((event) => String(event.detail?.waiverEventId || '')));
-    let recorded = false;
-    for (const waiver of expired) {
-        if (alreadyRecorded.has(waiver.eventId))
-            continue;
-        recorded = true;
-        session.events.push({
-            type: 'obligation_waiver_decision',
-            ts: checkedAt,
-            decision: 'expired',
-            detail: {
-                obligationId: waiver.obligationId,
-                reason: 'obligation waiver expired',
-                waiverEventId: waiver.eventId,
-                expiresAt: waiver.expiresAt,
-            },
+    return withSessionEventLock(projectRoot, sessionId, () => {
+        const session = loadSession(projectRoot, sessionId);
+        if (!session)
+            return null;
+        const waivers = Array.isArray(session.contract.architectureObligationWaivers)
+            ? session.contract.architectureObligationWaivers
+            : [];
+        if (waivers.length === 0)
+            return session;
+        const checkedAtMs = Date.parse(checkedAt);
+        const expired = waivers.filter((waiver) => {
+            if (!waiver.expiresAt || waiver.revokedAt)
+                return false;
+            const expiresAtMs = Date.parse(waiver.expiresAt);
+            if (!Number.isFinite(expiresAtMs) || !Number.isFinite(checkedAtMs))
+                return false;
+            return expiresAtMs <= checkedAtMs;
         });
-    }
-    recomputeArchitectureObligations(session, checkedAt);
-    if (recorded || expired.length > 0) {
-        (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
-    }
-    return session;
+        const alreadyRecorded = new Set(session.events
+            .filter((event) => event.type === 'obligation_waiver_decision' && event.decision === 'expired')
+            .map((event) => String(event.detail?.waiverEventId || '')));
+        let recorded = false;
+        for (const waiver of expired) {
+            if (alreadyRecorded.has(waiver.eventId))
+                continue;
+            recorded = true;
+            session.events.push({
+                type: 'obligation_waiver_decision',
+                ts: checkedAt,
+                decision: 'expired',
+                detail: {
+                    obligationId: waiver.obligationId,
+                    reason: 'obligation waiver expired',
+                    waiverEventId: waiver.eventId,
+                    expiresAt: waiver.expiresAt,
+                },
+            });
+        }
+        recomputeArchitectureObligations(session, checkedAt);
+        if (recorded || expired.length > 0) {
+            persistSession(projectRoot, session);
+        }
+        return session;
+    });
 }
 function waiveArchitectureObligation(projectRoot, obligationId, options = {}) {
     const id = obligationId.trim();
     if (!id)
         throw new Error('obligationId must not be empty.');
-    const session = options.sessionId
+    const initialSession = options.sessionId
         ? loadSession(projectRoot, options.sessionId)
         : loadActiveSession(projectRoot);
-    if (!session)
+    if (!initialSession)
         throw new Error('No active session found. Run a task first.');
-    if (session.status !== 'active')
-        throw new Error(`Session ${session.sessionId} is already finished.`);
-    recomputeArchitectureObligations(session, options.waivedAt || new Date().toISOString());
-    const target = session.contract.architectureObligations?.find((item) => item.id === id);
-    if (!target)
-        throw new Error(`Architecture obligation not found: ${id}`);
-    if (target.status === 'satisfied')
-        throw new Error(`Architecture obligation is already satisfied: ${id}`);
-    const waivedAt = options.waivedAt || new Date().toISOString();
-    const expiresAt = resolveDecisionExpiry(options.expiresAt, options.ttlMs, waivedAt, exports.DEFAULT_OBLIGATION_WAIVER_TTL_MS, 'obligation waiver');
-    const eventId = `obligation_waiver_${Date.now()}_${(0, node_crypto_1.randomBytes)(3).toString('hex')}`;
-    const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.reason?.trim() || 'human accepted obligation risk in session', 2_000);
-    const localWaivedBy = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.waivedBy || '', 200);
-    const waiver = {
-        obligationId: id,
-        reason: localReason.value,
-        waivedAt,
-        expiresAt,
-        source: options.source || 'local_cli',
-        eventId,
-        waivedBy: localWaivedBy.value || null,
-    };
-    const existingWaivers = Array.isArray(session.contract.architectureObligationWaivers)
-        ? session.contract.architectureObligationWaivers
-        : [];
-    session.contract.architectureObligationWaivers = [
-        ...existingWaivers.filter((existing) => existing.obligationId !== id || existing.revokedAt),
-        waiver,
-    ];
-    session.events.push({
-        type: 'obligation_waiver_decision',
-        ts: waivedAt,
-        decision: 'waived',
-        detail: {
+    return withSessionEventLock(projectRoot, initialSession.sessionId, () => {
+        const session = loadSession(projectRoot, initialSession.sessionId);
+        if (!session)
+            throw new Error(`Session ${initialSession.sessionId} was not found.`);
+        if (session.status !== 'active')
+            throw new Error(`Session ${session.sessionId} is already finished.`);
+        recomputeArchitectureObligations(session, options.waivedAt || new Date().toISOString());
+        const target = session.contract.architectureObligations?.find((item) => item.id === id);
+        if (!target)
+            throw new Error(`Architecture obligation not found: ${id}`);
+        if (target.status === 'satisfied')
+            throw new Error(`Architecture obligation is already satisfied: ${id}`);
+        const waivedAt = options.waivedAt || new Date().toISOString();
+        const expiresAt = resolveDecisionExpiry(options.expiresAt, options.ttlMs, waivedAt, exports.DEFAULT_OBLIGATION_WAIVER_TTL_MS, 'obligation waiver');
+        const eventId = `obligation_waiver_${Date.now()}_${(0, node_crypto_1.randomBytes)(3).toString('hex')}`;
+        const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.reason?.trim() || 'human accepted obligation risk in session', 2_000);
+        const localWaivedBy = (0, intent_privacy_1.sanitizeLocalPrivateText)(options.waivedBy || '', 200);
+        const waiver = {
             obligationId: id,
-            reason: waiver.reason,
-            eventId,
+            reason: localReason.value,
+            waivedAt,
             expiresAt,
-            source: waiver.source,
-            waivedBy: waiver.waivedBy,
-        },
+            source: options.source || 'local_cli',
+            eventId,
+            waivedBy: localWaivedBy.value || null,
+        };
+        const existingWaivers = Array.isArray(session.contract.architectureObligationWaivers)
+            ? session.contract.architectureObligationWaivers
+            : [];
+        session.contract.architectureObligationWaivers = [
+            ...existingWaivers.filter((existing) => existing.obligationId !== id || existing.revokedAt),
+            waiver,
+        ];
+        session.events.push({
+            type: 'obligation_waiver_decision',
+            ts: waivedAt,
+            decision: 'waived',
+            detail: {
+                obligationId: id,
+                reason: waiver.reason,
+                eventId,
+                expiresAt,
+                source: waiver.source,
+                waivedBy: waiver.waivedBy,
+            },
+        });
+        markLocalPrivateSession(session, [
+            ...localReason.reasonCodes,
+            ...localWaivedBy.reasonCodes,
+        ], waivedAt);
+        const architectureObligations = recomputeArchitectureObligations(session, waivedAt);
+        persistSession(projectRoot, session);
+        return {
+            sessionId: session.sessionId,
+            obligationId: id,
+            waiver,
+            expiresAt,
+            eventId,
+            architectureObligations,
+        };
     });
-    markLocalPrivateSession(session, [
-        ...localReason.reasonCodes,
-        ...localWaivedBy.reasonCodes,
-    ], waivedAt);
-    const architectureObligations = recomputeArchitectureObligations(session, waivedAt);
-    (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
-    return {
-        sessionId: session.sessionId,
-        obligationId: id,
-        waiver,
-        expiresAt,
-        eventId,
-        architectureObligations,
-    };
 }
 function approveSession(projectRoot, approvedPath, reason, sessionId) {
     const options = normaliseApprovalArgs(reason, sessionId);
@@ -723,7 +986,8 @@ function approveSession(projectRoot, approvedPath, reason, sessionId) {
             expiresAt,
             source: options.source || 'local_cli',
             eventId,
-            approvedBy: localApprovedBy.value || null,
+            approvedBy: localApprovedBy.value || 'unknown_local_actor',
+            assurance: options.assurance ?? 'unknown',
             requestId: localRequestId.value || null,
         };
         const grants = approvalGrants(session.contract).filter((existing) => existing.path !== normalised);
@@ -755,7 +1019,7 @@ function approveSession(projectRoot, approvedPath, reason, sessionId) {
             ...localRequestId.reasonCodes,
         ], approvedAt);
         recomputeArchitectureObligations(session, approvedAt);
-        (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
+        persistSession(projectRoot, session);
         return {
             sessionId: session.sessionId,
             approvedPath: normalised,
@@ -821,7 +1085,7 @@ function revokeSessionApproval(projectRoot, approvedPath, options = {}) {
         session.contract.approvalGrants = grants;
         session.contract.approvedPaths = activeApprovalPaths(session.contract, revokedAt);
         recomputeArchitectureObligations(session, revokedAt);
-        (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
+        persistSession(projectRoot, session);
         return {
             sessionId: session.sessionId,
             revokedPath: target.path,
@@ -880,11 +1144,12 @@ function finishSession(projectRoot, sessionId, options = {}) {
             },
         });
         markLocalPrivateSession(session, finishReasons, session.finishedAt);
-        (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
-        (0, ai_change_record_1.writeAIChangeRecord)(projectRoot, session);
-        const ptr = activePointerPath(projectRoot);
-        if ((0, node_fs_1.existsSync)(ptr)) {
-            (0, node_fs_1.writeFileSync)(ptr, JSON.stringify({ sessionId: null }, null, 2) + '\n', 'utf8');
+        persistSession(projectRoot, session);
+        try {
+            (0, ai_change_record_1.writeAIChangeRecord)(projectRoot, session);
+        }
+        finally {
+            clearActiveSession(projectRoot, sessionId);
         }
         return session;
     });
@@ -935,11 +1200,16 @@ function removeTrimmed(existing, removals) {
 function normalizePlanPath(pathValue) {
     return pathValue.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\//, '').trim();
 }
-function normalizePlanPaths(values) {
+function normalizePlanPaths(repoRoot, values) {
     return uniqueTrimmed(Array.from(values).flatMap((value) => {
         const normalized = normalizePlanPath(String(value ?? ''));
-        const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(normalized, { allowGlobs: true });
-        return sanitized.path ? [sanitized.path] : [];
+        if (!normalized)
+            return [];
+        const isGlob = normalized.includes('*') || normalized.includes('?');
+        const authority = isGlob
+            ? (0, repo_path_authority_1.validateRepoGlob)(repoRoot, normalized)
+            : (0, repo_path_authority_1.validateRepoFilePath)(repoRoot, normalized, { allowPlannedMissing: true });
+        return authority.ok && authority.path ? [authority.path] : [];
     }));
 }
 function normalizeGoal(goal) {
@@ -1156,14 +1426,139 @@ function pathMatchesAny(filePath, globs) {
             micromatch_1.default.isMatch(filePath, glob, { dot: true, matchBase: true }));
     });
 }
-function deriveIntentContract(goal, profile, allowedGlobs, scopeMode) {
+function mergeNotEvaluatedRecommendations(...groups) {
+    const byKey = new Map();
+    for (const group of groups) {
+        for (const entry of group ?? []) {
+            byKey.set(`${entry.target}:${entry.reasonCode}`, entry);
+        }
+    }
+    return Array.from(byKey.values()).sort((left, right) => left.target.localeCompare(right.target));
+}
+function graphCoverageCompleteFromTopology(topology) {
+    if (!topology?.brain.participated)
+        return false;
+    return topology.brain.freshness !== 'partial' && topology.brain.freshness !== 'stale';
+}
+function buildScopeRecommendationBuckets(input) {
+    const provenRequiredFiles = unique(input.selections
+        .filter((selection) => selection.authority === 'deterministic'
+        && (selection.source === 'active_agent_plan' || selection.source === 'explicit_user_path'))
+        .map((selection) => selection.target));
+    const advisoryCandidates = unique(input.selections
+        .filter((selection) => selection.authority === 'advisory')
+        .map((selection) => selection.target));
+    const notEvaluatedRecommendations = [];
+    for (const entry of Array.from(input.quarantine).sort()) {
+        if (!entry.startsWith('inferred_scope_quarantined:'))
+            continue;
+        const parts = entry.split(':');
+        notEvaluatedRecommendations.push({
+            target: parts[2] || 'unknown',
+            reasonCode: parts[3] || 'unsafe_path',
+            manualDiscoveryRecommendation: null,
+        });
+    }
+    if (!input.graphCoverageComplete) {
+        notEvaluatedRecommendations.push({
+            target: '*',
+            reasonCode: 'not_evaluated_due_to_coverage',
+            manualDiscoveryRecommendation: 'Repository graph coverage is incomplete; relationship search may omit paths.',
+        });
+    }
+    return {
+        provenRequiredFiles,
+        advisoryCandidates,
+        notEvaluatedRecommendations,
+    };
+}
+function filterTopologyTestsByRelationshipAuthority(relationships, graphCoverageComplete) {
+    const proven = [];
+    const advisory = [];
+    const notEvaluated = [];
+    for (const relationship of relationships) {
+        const target = relationship.to;
+        const authority = (0, relationship_authority_1.classifyRelationshipAuthority)({
+            language: relationship.sourceLanguage ?? 'unknown',
+            parserId: relationship.parserId ?? 'repository-topology',
+            parserDepth: relationship.parserDepth ?? 'metadata_only',
+            graphCoverageComplete,
+            pathInCoverage: true,
+            relationshipKind: 'tested_by',
+            directEvidence: relationship.directEvidence === true,
+            inferredFromNaming: relationship.inferredFromNaming === true,
+        });
+        if (authority.class === 'not_evaluated' || authority.class === 'unsupported') {
+            notEvaluated.push({
+                target,
+                reasonCode: authority.reasonCodes[0] || 'not_evaluated_due_to_coverage',
+                manualDiscoveryRecommendation: authority.recommendedManualDiscovery ?? null,
+            });
+            continue;
+        }
+        if (authority.class === 'deterministic_exact' || authority.class === 'deterministic_structural' || authority.enforcementEligible) {
+            proven.push(target);
+            continue;
+        }
+        if (authority.class === 'bounded_inference' || authority.class === 'advisory_heuristic') {
+            advisory.push(target);
+            continue;
+        }
+        notEvaluated.push({
+            target,
+            reasonCode: authority.reasonCodes[0] || 'relationship_not_grounded',
+            manualDiscoveryRecommendation: authority.recommendedManualDiscovery ?? null,
+        });
+    }
+    return { proven, advisory, notEvaluated };
+}
+/**
+ * Quarantine AUTOMATICALLY INFERRED scope candidates that would otherwise fail the
+ * intent privacy path validator (intent-privacy: validatePathFieldValue).
+ *
+ * Path inference can legitimately surface candidates the validator rejects — absolute
+ * paths leaking from topology, traversal, credential-shaped or over-deep segments. A
+ * single invalid INFERRED candidate must never invalidate an otherwise legitimate
+ * session (Apache Airflow dogfood P0-B: `run claude` / `session-hook start` /
+ * `session-hook approve` fail-closed on `scopeAuthority.likelyTests[*]:unsafe_path`).
+ *
+ * We drop only the invalid candidates — never broadening scope — and record a
+ * source-free reason code (field + reason only, no path body) in `quarantineLog` so the
+ * downgrade is observable via `unsupportedAreas`. The keep predicate
+ * (`sanitized.path === value`) is intentionally identical to the validator's reject
+ * predicate, guaranteeing every retained value passes `validatePrivacySafeCloudPayload`.
+ *
+ * This applies to INFERRED candidates only. User-supplied explicit scope
+ * (contract.allowedGlobs / approvalRequiredGlobs) remains authoritative and fail-closed.
+ */
+function quarantineInferredScopePaths(repoRoot, values, kind, field, quarantineLog) {
+    const safe = [];
+    for (const value of values) {
+        const isGlob = kind === 'glob' || (kind === 'mixed' && (value.includes('*') || value.includes('?')));
+        const authority = isGlob
+            ? (0, repo_path_authority_1.validateRepoGlob)(repoRoot, value)
+            : (0, repo_path_authority_1.validateRepoFilePath)(repoRoot, value, { allowPlannedMissing: true });
+        if (authority.ok && authority.path) {
+            safe.push(authority.path);
+        }
+        else {
+            const reason = authority.reasonCodes[0] ?? 'unsafe_path';
+            quarantineLog.add(`inferred_scope_quarantined:${field}:${reason}`);
+        }
+    }
+    return safe;
+}
+function deriveIntentContract(projectRoot, goal, profile, allowedGlobs, scopeMode) {
     const lower = goal.toLowerCase();
     const excludedPrefixes = deriveExcludedScopePrefixes(goal);
-    const pathTokens = extractPathTokens(goal, profile)
-        .filter((token) => !excludedPrefixes.some((prefix) => token === prefix.replace(/\/$/, '') || token.startsWith(prefix)));
+    // Inferred candidates are quarantined (invalid dropped, source-free reasons logged)
+    // so the runtime never rejects its own inference and fail-closes the session.
+    const inferredScopeQuarantine = new Set();
+    const pathTokens = quarantineInferredScopePaths(projectRoot, extractPathTokens(goal, profile)
+        .filter((token) => !excludedPrefixes.some((prefix) => token === prefix.replace(/\/$/, '') || token.startsWith(prefix))), 'mixed', 'path_tokens', inferredScopeQuarantine);
     const primaryAction = primaryActionForGoal(lower);
     const domainKeywords = domainKeywordsForGoal(lower);
-    const supportPathGlobs = supportGlobsForIntent(goal, profile);
+    const supportPathGlobs = quarantineInferredScopePaths(projectRoot, supportGlobsForIntent(goal, profile), 'mixed', 'likely_tests', inferredScopeQuarantine);
     const supportSet = new Set(supportPathGlobs);
     const expectedPathGlobs = unique(allowedGlobs).filter((glob) => !supportSet.has(glob));
     const confidence = scopeMode === 'explicit' ? 'high' : scopeMode === 'inferred' ? 'medium' : 'low';
@@ -1237,10 +1632,10 @@ function deriveIntentContract(goal, profile, allowedGlobs, scopeMode) {
             reason: fact?.evidence.reason ?? 'Repository configuration identifies this observed support surface.',
         });
     }
-    const expectedFiles = expectedPathGlobs.filter((target) => !target.includes('*') && isFileScopeToken(target));
-    const expectedGlobs = unique(expectedPathGlobs
+    const expectedFiles = quarantineInferredScopePaths(projectRoot, expectedPathGlobs.filter((target) => !target.includes('*') && isFileScopeToken(target)), 'exact', 'expected_files', inferredScopeQuarantine);
+    const expectedGlobs = quarantineInferredScopePaths(projectRoot, unique(expectedPathGlobs
         .filter((target) => target.includes('*') || !isFileScopeToken(target))
-        .map((target) => target.includes('*') ? target : `${target.replace(/\/$/, '')}/**`));
+        .map((target) => target.includes('*') ? target : `${target.replace(/\/$/, '')}/**`)), 'glob', 'expected_globs', inferredScopeQuarantine);
     const brainFacts = profile.repositoryTopology?.brain.participated
         ? profile.repositoryTopology.brain.facts
         : [];
@@ -1264,7 +1659,15 @@ function deriveIntentContract(goal, profile, allowedGlobs, scopeMode) {
             ? [`repo_brain_not_evaluated:${profile.repositoryTopology.brain.freshness ?? 'missing'}`]
             : []),
         ...(profile.repositoryTopology?.brain.freshness === 'partial' ? ['repo_brain_partial_coverage'] : []),
+        ...Array.from(inferredScopeQuarantine).sort(),
     ]);
+    const graphCoverageComplete = graphCoverageCompleteFromTopology(profile.repositoryTopology);
+    const selections = Array.from(selectionByTarget.values()).sort((left, right) => left.target.localeCompare(right.target));
+    const recommendationBuckets = buildScopeRecommendationBuckets({
+        selections,
+        quarantine: inferredScopeQuarantine,
+        graphCoverageComplete,
+    });
     return {
         schemaVersion: 1,
         summary: normalizeGoal(goal),
@@ -1281,15 +1684,18 @@ function deriveIntentContract(goal, profile, allowedGlobs, scopeMode) {
             expectedGlobs,
             expectedSymbols,
             likelyTests: supportPathGlobs,
+            ...recommendationBuckets,
             affectedPackages,
             affectedModules,
             prohibitedBoundaries: outOfScopeGlobs,
-            selections: Array.from(selectionByTarget.values()).sort((left, right) => left.target.localeCompare(right.target)),
+            selections,
             unsupportedAreas,
             brain: {
                 evaluated: profile.repositoryTopology?.brain.participated === true,
                 freshness: profile.repositoryTopology?.brain.freshness ?? null,
                 reason: profile.repositoryTopology?.brain.reason ?? 'Repository topology is unavailable.',
+                coverageComplete: graphCoverageComplete,
+                impactAuthority: graphCoverageComplete ? 'authoritative' : 'not_evaluated_due_to_coverage',
             },
         },
         obligations: intentObligations(goal, primaryAction, domainKeywords, scopeMode),
@@ -1461,7 +1867,7 @@ function recordAgentPlanRevision(args) {
         ...amendmentReasons,
     ], capturedAt);
     recomputeArchitectureObligations(args.session, capturedAt);
-    expandSessionScope(args.session, {
+    expandSessionScope(args.projectRoot, args.session, {
         text: [
             localPlan.plan.summary,
             ...localPlan.plan.steps,
@@ -1469,7 +1875,7 @@ function recordAgentPlanRevision(args) {
         expectedFiles: localPlan.plan.expectedFiles,
         expectedGlobs: localPlan.plan.expectedGlobs,
     });
-    (0, node_fs_1.writeFileSync)(sessionPath(args.projectRoot, args.session.sessionId), JSON.stringify(args.session, null, 2) + '\n', 'utf8');
+    persistSession(args.projectRoot, args.session);
     return args.session;
 }
 /**
@@ -1631,7 +2037,7 @@ function classifyAgentPlanAmendment(contract, proposedPlan) {
         removedConstraints,
     };
 }
-function deriveAmendedPlan(existing, input) {
+function deriveAmendedPlan(projectRoot, existing, input) {
     const source = input.source || 'manual';
     const amendedAt = input.amendedAt || new Date().toISOString();
     const reason = input.reason?.trim() || 'plan updated during session';
@@ -1673,19 +2079,19 @@ function deriveAmendedPlan(existing, input) {
         ...addConstraints,
     ].join('\n'));
     const inferredRemoved = (0, agent_plan_1.extractExpectedTargetsFromText)(removeSteps.join('\n'));
-    const filesToAdd = normalizePlanPaths([
+    const filesToAdd = normalizePlanPaths(projectRoot, [
         ...(input.addExpectedFiles ?? []),
         ...inferredAdded.expectedFiles,
     ]);
-    const filesToRemove = normalizePlanPaths([
+    const filesToRemove = normalizePlanPaths(projectRoot, [
         ...(input.removeExpectedFiles ?? []),
         ...inferredRemoved.expectedFiles,
     ]);
-    const globsToAdd = normalizePlanPaths([
+    const globsToAdd = normalizePlanPaths(projectRoot, [
         ...(input.addExpectedGlobs ?? []),
         ...inferredAdded.expectedGlobs,
     ]);
-    const globsToRemove = normalizePlanPaths([
+    const globsToRemove = normalizePlanPaths(projectRoot, [
         ...(input.removeExpectedGlobs ?? []),
         ...inferredRemoved.expectedGlobs,
     ]);
@@ -1693,8 +2099,8 @@ function deriveAmendedPlan(existing, input) {
         ...base,
         summary: input.summary?.trim() || base.summary || 'Agent plan',
         steps: removeTrimmed([...(base.steps ?? []), ...addSteps], removeSteps),
-        expectedFiles: removeTrimmed(normalizePlanPaths([...(base.expectedFiles ?? []), ...filesToAdd]), filesToRemove),
-        expectedGlobs: removeTrimmed(normalizePlanPaths([...(base.expectedGlobs ?? []), ...globsToAdd]), globsToRemove),
+        expectedFiles: removeTrimmed(normalizePlanPaths(projectRoot, [...(base.expectedFiles ?? []), ...filesToAdd]), filesToRemove),
+        expectedGlobs: removeTrimmed(normalizePlanPaths(projectRoot, [...(base.expectedGlobs ?? []), ...globsToAdd]), globsToRemove),
         constraints: removeTrimmed([...(base.constraints ?? []), ...addConstraints], removeConstraints),
         risks: removeTrimmed([...(base.risks ?? []), ...addRisks], removeRisks),
         capturedAt: amendedAt,
@@ -1730,9 +2136,6 @@ function proposalLedger(contract) {
     return Array.isArray(contract.planAmendmentProposals)
         ? contract.planAmendmentProposals
         : [];
-}
-function persistSession(projectRoot, session) {
-    (0, node_fs_1.writeFileSync)(sessionPath(projectRoot, session.sessionId), JSON.stringify(session, null, 2) + '\n', 'utf8');
 }
 function createPendingPlanProposal(args) {
     const localPlan = sanitizeAgentPlanForLocalPrivate(args.proposedPlan);
@@ -1881,7 +2284,21 @@ function amendAgentPlan(projectRoot, input) {
     if (session.status !== 'active')
         throw new Error(`Session ${session.sessionId} is already finished.`);
     const reason = input.reason?.trim() || 'plan updated during session';
-    const { action, plan, amendment } = deriveAmendedPlan(session.contract.agentPlan, input);
+    const validateAmendmentPaths = (paths, kind) => {
+        for (const candidate of paths) {
+            const result = kind === 'glob'
+                ? (0, repo_path_authority_1.validateRepoGlob)(projectRoot, candidate)
+                : (0, repo_path_authority_1.validateRepoFilePath)(projectRoot, candidate, { allowPlannedMissing: true });
+            if (!result.ok) {
+                throw new Error(`${kind} rejected (${result.reasonCodes[0] || 'unsafe_path'}).`);
+            }
+        }
+    };
+    validateAmendmentPaths(input.addExpectedFiles ?? [], 'file');
+    validateAmendmentPaths(input.removeExpectedFiles ?? [], 'file');
+    validateAmendmentPaths(input.addExpectedGlobs ?? [], 'glob');
+    validateAmendmentPaths(input.removeExpectedGlobs ?? [], 'glob');
+    const { action, plan, amendment } = deriveAmendedPlan(projectRoot, session.contract.agentPlan, input);
     const source = input.source || 'manual';
     const proposedBy = input.proposedBy || 'human';
     const amendedAt = input.amendedAt || plan.capturedAt || new Date().toISOString();
@@ -2203,7 +2620,162 @@ function buildPlanTimeline(session) {
         entries,
     };
 }
-function deriveAllowedGlobs(goal, profile) {
+// ── Plan freeze + negotiation view (V1 plan-negotiation UX) ───────────────────
+/**
+ * Resolve the runtime-safety phase for a session from its explicit freeze state.
+ *
+ * Backward-compatible: when `planFrozen` is undefined (every pre-V1 session),
+ * this reproduces the original implicit rule used at the hook call site — a plan
+ * with expected files is treated as the implementation phase. An explicit
+ * freeze (`true`) forces implementation; an explicit unfreeze (`false`) reopens
+ * planning so the agent/human can amend the plan without plan-drift blocking.
+ */
+function derivePlanPhase(contract) {
+    const planFileCount = contract.agentPlan?.expectedFiles?.length ?? 0;
+    if (contract.planFrozen === true)
+        return 'implementation';
+    if (contract.planFrozen === false)
+        return 'planning';
+    return planFileCount > 0 ? 'implementation' : 'planning';
+}
+function buildPlanFreezeResult(session, changed, eventId) {
+    const contract = session.contract;
+    return {
+        sessionId: session.sessionId,
+        frozen: derivePlanPhase(contract) === 'implementation',
+        changed,
+        planMode: contract.planMode ?? profile_1.DEFAULT_PLAN_CONTROL_MODE,
+        phase: derivePlanPhase(contract),
+        activePlanRevision: currentAgentPlanRevision(contract),
+        frozenRevision: contract.planFrozenRevision ?? null,
+        planFileCount: contract.agentPlan?.expectedFiles?.length ?? 0,
+        frozenAt: contract.planFrozenAt ?? null,
+        frozenBy: contract.planFrozenBy ?? null,
+        eventId,
+    };
+}
+function setPlanFrozen(projectRoot, frozen, eventType, options) {
+    const target = options.sessionId
+        ? loadSession(projectRoot, options.sessionId)
+        : loadActiveSession(projectRoot);
+    if (!target)
+        throw new Error('No active session found. Start a governed task first.');
+    if (target.status !== 'active')
+        throw new Error(`Session ${target.sessionId} is already finished.`);
+    const sessionId = target.sessionId;
+    return withSessionEventLock(projectRoot, sessionId, () => {
+        const session = loadSession(projectRoot, sessionId);
+        if (!session)
+            throw new Error(`Session ${sessionId} disappeared during plan freeze update.`);
+        if (session.contract.planFrozen === frozen) {
+            return buildPlanFreezeResult(session, false, null);
+        }
+        const at = options.at || new Date().toISOString();
+        const activePlanRevision = currentAgentPlanRevision(session.contract);
+        const localBy = (0, intent_privacy_1.sanitizeLocalPrivateText)((options.by ?? '').trim() || 'human', 200);
+        const localReason = (0, intent_privacy_1.sanitizeLocalPrivateText)((options.reason ?? '').trim() || (frozen ? 'plan frozen' : 'plan reopened for planning'), 2_000);
+        const by = localBy.value || 'human';
+        session.contract.planFrozen = frozen;
+        if (frozen) {
+            session.contract.planFrozenAt = at;
+            session.contract.planFrozenRevision = activePlanRevision;
+            session.contract.planFrozenBy = by;
+        }
+        const eventId = makePlanEventId(eventType);
+        session.events.push({
+            type: eventType,
+            ts: at,
+            message: frozen
+                ? `Plan frozen at revision ${activePlanRevision} by ${by}`
+                : `Plan reopened for planning by ${by}`,
+            detail: {
+                planFreeze: {
+                    frozen,
+                    activePlanRevision,
+                    planMode: session.contract.planMode ?? profile_1.DEFAULT_PLAN_CONTROL_MODE,
+                    phase: derivePlanPhase(session.contract),
+                    reason: localReason.value,
+                    by,
+                    eventId,
+                },
+            },
+        });
+        markLocalPrivateSession(session, [...localBy.reasonCodes, ...localReason.reasonCodes], at);
+        persistSession(projectRoot, session);
+        return buildPlanFreezeResult(session, true, eventId);
+    });
+}
+/**
+ * Freeze the active (or named) plan. After a freeze, a session running under
+ * `enforce_after_freeze` blocks writes outside the frozen plan; under `advise`
+ * sensitive surfaces escalate from warn to exact-path approval. Idempotent.
+ */
+function freezePlan(projectRoot, options = {}) {
+    return setPlanFrozen(projectRoot, true, 'plan_frozen', options);
+}
+/**
+ * Reopen the plan for planning. Plan-drift blocking is suspended so the plan can
+ * be amended freely; credential/secret guards remain in force regardless of
+ * phase. Idempotent.
+ */
+function unfreezePlan(projectRoot, options = {}) {
+    return setPlanFrozen(projectRoot, false, 'plan_unfrozen', options);
+}
+/**
+ * Source-free "view active plan" model: the active plan summary/steps/scope,
+ * its revision and freeze state, the plan mode (with plain-language copy), and
+ * negotiation counters (pending amendments, drift, blocks). Derived entirely
+ * from data already persisted on the session — no source, diffs, or prose
+ * beyond the already-source-free plan summary.
+ */
+function buildPlanNegotiationView(session) {
+    const contract = session.contract;
+    const timeline = buildPlanTimeline(session);
+    const plan = contract.agentPlan ?? null;
+    const planMode = contract.planMode ?? profile_1.DEFAULT_PLAN_CONTROL_MODE;
+    const phase = derivePlanPhase(contract);
+    const pending = (contract.planAmendmentProposals ?? [])
+        .filter((proposal) => proposal.status === 'pending')
+        .map((proposal) => ({
+        proposalId: proposal.proposalId,
+        risk: proposal.risk?.level ?? 'low',
+        reason: proposal.reason,
+    }));
+    return {
+        sessionId: session.sessionId,
+        status: session.status,
+        planMode,
+        planModeDescription: (0, runtime_safety_kernel_1.describePlanControlMode)(planMode),
+        frozen: phase === 'implementation',
+        frozenExplicit: typeof contract.planFrozen === 'boolean',
+        frozenAt: contract.planFrozenAt ?? null,
+        frozenBy: contract.planFrozenBy ?? null,
+        frozenRevision: contract.planFrozenRevision ?? null,
+        phase,
+        activePlanRevision: timeline.activePlanRevision,
+        planVersions: timeline.planVersions,
+        hasPlan: Boolean(plan),
+        summary: plan?.summary ?? null,
+        steps: plan?.steps ?? [],
+        expectedFiles: plan?.expectedFiles ?? [],
+        expectedGlobs: plan?.expectedGlobs ?? [],
+        constraints: plan?.constraints ?? [],
+        risks: plan?.risks ?? [],
+        pendingAmendments: pending,
+        driftWarningCount: timeline.driftWarningCount,
+        blockedBoundaryCount: timeline.blockedBoundaryCount,
+        approvedPaths: activeApprovalPaths(contract),
+        planCoherenceMode: contract.planCoherenceMode ?? profile_1.DEFAULT_PLAN_COHERENCE_MODE,
+        enforceAfterFreeze: planMode === 'enforce_after_freeze',
+    };
+}
+function authoritativeScopeGlobs(repoRoot, globs) {
+    return globs.flatMap((glob) => {
+        const authority = (0, repo_path_authority_1.validateRepoGlob)(repoRoot, glob);
+        return authority.ok && authority.path ? [authority.path] : [];
+    });
+}
+function deriveAllowedGlobs(projectRoot, goal, profile) {
     const lower = goal.toLowerCase();
     const approvalPrefixes = profile.approvalRequiredPaths.map((g) => g.replace('/**', '').replace('/*', ''));
     const configuredSupportGlobs = (profile.runtimeConfig?.safeSupportGlobs ?? [])
@@ -2246,8 +2818,9 @@ function deriveAllowedGlobs(goal, profile) {
             ...observedSupport,
             ...(exclusiveExplicitScope ? [] : configuredSupportGlobs),
         ]), excludedPrefixes);
-        if (globs.length > 0)
-            return { allowedGlobs: globs, scopeMode: 'explicit' };
+        if (globs.length > 0) {
+            return { allowedGlobs: authoritativeScopeGlobs(projectRoot, globs), scopeMode: 'explicit' };
+        }
     }
     // ── Topology-aware intent inference ─────────────────────────────────────────
     // Generic language classifiers and semantic terms may select an observed
@@ -2269,30 +2842,30 @@ function deriveAllowedGlobs(goal, profile) {
             matched.add(support);
         const globs = filterExcludedScopePrefixes(excludeApprovalRequired(Array.from(matched)), excludedPrefixes);
         if (globs.length > 0)
-            return { allowedGlobs: globs, scopeMode: 'inferred' };
+            return { allowedGlobs: authoritativeScopeGlobs(projectRoot, globs), scopeMode: 'inferred' };
     }
     // ── Ambiguous fallback ───────────────────────────────────────────────────────
     // No broad write scope is invented. Only repository-configured support globs
     // that resolve to observed topology facts survive, and protected boundaries
     // continue to fail closed independently.
     return {
-        allowedGlobs: filterExcludedScopePrefixes(excludeApprovalRequired(configuredSupportGlobs), excludedPrefixes),
+        allowedGlobs: authoritativeScopeGlobs(projectRoot, filterExcludedScopePrefixes(excludeApprovalRequired(configuredSupportGlobs), excludedPrefixes)),
         scopeMode: 'ambiguous',
     };
 }
-function scopeEntriesFromPaths(paths) {
-    return normalizePlanPaths(paths).map((token) => (isFileScopeToken(token) ? token : `${token.replace(/\/$/, '')}/**`));
+function scopeEntriesFromPaths(repoRoot, paths) {
+    return normalizePlanPaths(repoRoot, paths).map((token) => (isFileScopeToken(token) ? token : `${token.replace(/\/$/, '')}/**`));
 }
-function expandSessionScope(session, input) {
+function expandSessionScope(projectRoot, session, input) {
     const fromText = input.text?.trim()
         ? (0, agent_plan_1.extractExpectedTargetsFromText)(input.text)
         : { expectedFiles: [], expectedGlobs: [] };
     const additions = unique([
-        ...scopeEntriesFromPaths([
+        ...scopeEntriesFromPaths(projectRoot, [
             ...(input.expectedFiles ?? []),
             ...fromText.expectedFiles,
         ]),
-        ...normalizePlanPaths([
+        ...normalizePlanPaths(projectRoot, [
             ...(input.expectedGlobs ?? []),
             ...fromText.expectedGlobs,
         ]),
@@ -2309,13 +2882,13 @@ function expandSessionScope(session, input) {
     const intent = session.contract.intentContract;
     if (!intent)
         return;
-    const planFiles = normalizePlanPaths([
+    const planFiles = normalizePlanPaths(projectRoot, [
         ...(input.expectedFiles ?? []),
         ...fromText.expectedFiles,
     ]);
     const proposedPlanGlobs = unique([
-        ...normalizePlanPaths(input.expectedGlobs ?? []),
-        ...scopeEntriesFromPaths(fromText.expectedGlobs),
+        ...normalizePlanPaths(projectRoot, input.expectedGlobs ?? []),
+        ...scopeEntriesFromPaths(projectRoot, fromText.expectedGlobs),
     ]);
     const topology = session.contract.repositoryTopology;
     const groundedPlanGlobs = proposedPlanGlobs.filter((glob) => topology?.facts.some((fact) => pathMatchesAny(fact.path, [glob]).length > 0));
@@ -2347,20 +2920,38 @@ function expandSessionScope(session, input) {
     const selectedTargets = selections.map((selection) => selection.target);
     const selectedTopologyFacts = topology?.facts.filter((fact) => selectedTargets.some((target) => pathMatchesAny(fact.path, [target]).length > 0
         || pathMatchesAny(target.replace(/\/\*\*$/, ''), [fact.glob]).length > 0)) ?? [];
-    const relatedTests = topology?.relationships
+    const relatedTestRelationships = topology?.relationships
         .filter((relationship) => relationship.kind === 'source-to-test'
-        && planFiles.includes(relationship.from))
-        .map((relationship) => relationship.to) ?? [];
+        && planFiles.includes(relationship.from)) ?? [];
+    const graphCoverageComplete = graphCoverageCompleteFromTopology(topology);
+    const relatedTestsAuthority = filterTopologyTestsByRelationshipAuthority(relatedTestRelationships, graphCoverageComplete);
+    const relatedTests = relatedTestsAuthority.proven;
     intent.target.expectedPathGlobs = unique(selectedTargets);
+    // Re-quarantine inferred scope after regrounding against the accepted plan + topology
+    // (e.g. `relatedTests` sourced from topology relationships) so the regrounded contract
+    // can never reintroduce an inferred candidate the privacy validator would reject.
+    const regroundQuarantine = new Set();
+    const regroundSelections = selections;
+    const recommendationBuckets = buildScopeRecommendationBuckets({
+        selections: regroundSelections,
+        quarantine: regroundQuarantine,
+        graphCoverageComplete,
+    });
     intent.scopeAuthority = {
         ...intent.scopeAuthority,
-        expectedFiles: unique(selections
+        ...recommendationBuckets,
+        advisoryCandidates: unique([
+            ...recommendationBuckets.advisoryCandidates,
+            ...relatedTestsAuthority.advisory,
+        ]),
+        notEvaluatedRecommendations: mergeNotEvaluatedRecommendations(intent.scopeAuthority.notEvaluatedRecommendations, relatedTestsAuthority.notEvaluated, recommendationBuckets.notEvaluatedRecommendations),
+        expectedFiles: quarantineInferredScopePaths(projectRoot, unique(selections
             .filter((selection) => selection.targetType === 'file')
-            .map((selection) => selection.target)),
-        expectedGlobs: unique(selections
+            .map((selection) => selection.target)), 'exact', 'expected_files', regroundQuarantine),
+        expectedGlobs: quarantineInferredScopePaths(projectRoot, unique(selections
             .filter((selection) => selection.targetType === 'glob')
-            .map((selection) => selection.target)),
-        likelyTests: unique([...intent.scopeAuthority.likelyTests, ...relatedTests]),
+            .map((selection) => selection.target)), 'glob', 'expected_globs', regroundQuarantine),
+        likelyTests: quarantineInferredScopePaths(projectRoot, unique([...intent.scopeAuthority.likelyTests, ...relatedTests]), 'mixed', 'likely_tests', regroundQuarantine),
         affectedPackages: (0, repository_topology_1.topologyPackageRootsForPaths)(topology, selectedTargets),
         affectedModules: unique([
             ...intent.scopeAuthority.affectedModules,
@@ -2375,11 +2966,17 @@ function expandSessionScope(session, input) {
             }),
         ]),
         selections,
+        brain: {
+            ...intent.scopeAuthority.brain,
+            coverageComplete: graphCoverageComplete,
+            impactAuthority: graphCoverageComplete ? 'authoritative' : 'not_evaluated_due_to_coverage',
+        },
         unsupportedAreas: unique([
             ...intent.scopeAuthority.unsupportedAreas
                 .filter((area) => area !== 'ambiguous_intent_requires_accepted_plan_or_clarification'
                 && !area.startsWith('agent_plan_glob_not_grounded:')),
             ...ungroundedPlanGlobs.map((glob) => `agent_plan_glob_not_grounded:${glob}`),
+            ...Array.from(regroundQuarantine).sort(),
         ]),
     };
 }

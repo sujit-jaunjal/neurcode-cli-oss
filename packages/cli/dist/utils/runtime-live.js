@@ -11,6 +11,7 @@ const config_1 = require("../config");
 const runtime_connection_1 = require("./runtime-connection");
 const runtime_outbox_1 = require("./runtime-outbox");
 const runtime_privacy_1 = require("./runtime-privacy");
+const runtime_state_1 = require("./runtime-state");
 const SOURCE_LIKE_KEYS = new Set([
     'content',
     'fileContent',
@@ -174,13 +175,20 @@ async function runtimeFetch(repoRoot, path, init, timeoutMs = 1500) {
     }
 }
 async function publishRuntimeLiveStatus(repoRoot, session, options = {}) {
-    const repo = (0, runtime_connection_1.collectRuntimeRepoMetadata)(repoRoot, options.profileFreshness);
-    const body = {
-        repo,
-        generatedAt: new Date().toISOString(),
-        session: (0, runtime_privacy_1.buildCloudSafeRuntimeSession)(session),
-    };
     try {
+        // Cloud projection (payload construction + privacy validation) is a NON-AUTHORITATIVE
+        // reconcile step. It must never throw out of this status-returning function: a
+        // projection failure here previously propagated to callers (e.g. `session-hook approve`)
+        // and was misreported as a failed local operation (Apache Airflow dogfood P0-C).
+        const repo = {
+            ...(0, runtime_connection_1.collectRuntimeRepoMetadata)(repoRoot, options.profileFreshness),
+            runtimeState: (0, runtime_state_1.classifyRuntimeState)(repoRoot),
+        };
+        const body = {
+            repo,
+            generatedAt: new Date().toISOString(),
+            session: (0, runtime_privacy_1.buildCloudSafeRuntimeSession)(session),
+        };
         (0, runtime_outbox_1.enqueueRuntimeSessionSnapshot)(repoRoot, session.sessionId, body);
         const flushed = await flushRuntimeLiveOutbox(repoRoot, {
             maxEvents: 2,
@@ -402,7 +410,9 @@ async function applyPendingRuntimeLiveActions(repoRoot, sessionId) {
                     sessionId,
                     expiresAt: approval.expiresAt || undefined,
                     source: 'dashboard',
-                    approvedBy: approval.requestedBy || null,
+                    // hosted_verified only when a non-empty authenticated actor is present.
+                    approvedBy: approval.requestedBy?.trim() || 'unknown_local_actor',
+                    assurance: approval.requestedBy?.trim() ? 'hosted_verified' : 'unknown',
                     requestId: approval.id || null,
                 });
             applied += 1;

@@ -44,11 +44,17 @@ const config_1 = require("../config");
 const api_client_1 = require("../api-client");
 const user_context_1 = require("../utils/user-context");
 const state_1 = require("../utils/state");
+const activation_telemetry_1 = require("../utils/activation-telemetry");
 const messages_1 = require("../utils/messages");
 const POLL_INTERVAL = 3000; // 3 seconds
 const MAX_POLL_ATTEMPTS = 100; // 5 minutes total (100 * 3s)
 async function loginCommand(options) {
     try {
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'cli_login_started',
+            commandFamily: 'login',
+            reasonCode: 'login.started',
+        });
         const config = (0, config_1.loadConfig)();
         const apiUrl = config.apiUrl || config_1.DEFAULT_API_URL;
         // If we're in a linked directory, prefer org-scoped auth for that org.
@@ -86,6 +92,11 @@ async function loginCommand(options) {
                 if (!existingProjectId) {
                     (0, messages_1.printInfo)('Next step', 'Bind this repository to a governance workspace:\n   neurcode init');
                 }
+                (0, activation_telemetry_1.trackActivationEvent)({
+                    eventType: 'cli_login_completed',
+                    commandFamily: 'login',
+                    reasonCode: 'login.already_connected',
+                });
                 return;
             }
             catch (error) {
@@ -213,10 +224,21 @@ async function loginCommand(options) {
                     (0, messages_1.printInfo)('Next step', existingProjectId
                         ? 'Confirm state and continue:\n   neurcode whoami\n   neurcode start "what you intend to change"'
                         : 'Bind this repository to a personal or organization workspace:\n   neurcode init');
+                    (0, activation_telemetry_1.trackActivationEvent)({
+                        eventType: 'cli_login_completed',
+                        commandFamily: 'login',
+                        reasonCode: 'login.completed',
+                    });
                     approved = true;
                 }
                 else {
                     (0, messages_1.printWarning)('Browser approved, but the terminal did not receive the connection credential', 'Run neurcode login again. If the browser says the request was already approved, start a fresh login request.');
+                    (0, activation_telemetry_1.trackActivationEvent)({
+                        eventType: 'cli_login_completed',
+                        commandFamily: 'login',
+                        reasonCode: 'login.missing_credential',
+                        success: false,
+                    });
                     approved = true;
                 }
             }
@@ -226,6 +248,12 @@ async function loginCommand(options) {
                     'If this was unintentional, please try: neurcode login',
                     'Contact support if you continue experiencing issues'
                 ]);
+                (0, activation_telemetry_1.trackActivationEvent)({
+                    eventType: 'cli_login_completed',
+                    commandFamily: 'login',
+                    reasonCode: 'login.denied',
+                    success: false,
+                });
                 process.exit(1);
             }
             else if (pollData.status === 'expired') {
@@ -234,6 +262,12 @@ async function loginCommand(options) {
                     'Please try again: neurcode login',
                     'Complete browser approval within 5 minutes'
                 ]);
+                (0, activation_telemetry_1.trackActivationEvent)({
+                    eventType: 'cli_login_completed',
+                    commandFamily: 'login',
+                    reasonCode: 'login.expired',
+                    success: false,
+                });
                 process.exit(1);
             }
             else {
@@ -249,10 +283,22 @@ async function loginCommand(options) {
                 'Complete browser approval promptly',
                 'Check your internet connection if issues persist'
             ]);
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'cli_login_completed',
+                commandFamily: 'login',
+                reasonCode: 'login.timeout',
+                success: false,
+            });
             process.exit(1);
         }
     }
     catch (error) {
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'cli_login_completed',
+            commandFamily: 'login',
+            reasonCode: 'login.failed',
+            success: false,
+        });
         await (0, messages_1.printAuthError)(error);
         process.exit(1);
     }

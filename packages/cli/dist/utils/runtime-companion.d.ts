@@ -3,6 +3,7 @@ import { type ProfileFreshnessSignal } from './v0-governance';
 import { type RuntimeOutboxStatus } from './runtime-outbox';
 import { readBrainLifecycle } from './brain-lifecycle';
 import { inspectRuntimeAuthority } from './runtime-authority';
+import { classifyRuntimeState } from './runtime-state';
 export declare const RUNTIME_COMPANION_SCHEMA_VERSION: "neurcode.runtime-companion.v1";
 export interface RuntimeCompanionPlan {
     revision: number;
@@ -67,6 +68,7 @@ export interface RuntimeCompanionSnapshot {
         detail: string;
     };
     runtimeAuthority: ReturnType<typeof inspectRuntimeAuthority>;
+    runtimeState: ReturnType<typeof classifyRuntimeState>;
     pairing: {
         repositoryOwnershipBound: boolean;
         machineAuthenticated: boolean;

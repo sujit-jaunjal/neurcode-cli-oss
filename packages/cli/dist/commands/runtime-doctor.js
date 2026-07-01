@@ -13,6 +13,7 @@ const hook_heartbeat_1 = require("../utils/hook-heartbeat");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const profile_drift_recovery_1 = require("../utils/profile-drift-recovery");
 const runtime_authority_1 = require("../utils/runtime-authority");
+const runtime_state_1 = require("../utils/runtime-state");
 /** True when the goal produced an over-broad approval scope (e.g. `**`). */
 function hasOverBroadApprovalScope(session) {
     const globs = session.contract?.approvalRequiredGlobs ?? [];
@@ -161,6 +162,7 @@ function inspectAuthorityPosture(repoRoot, connected) {
 }
 function runtimeDoctorCommand(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const runtimeState = (0, runtime_state_1.classifyRuntimeState)(repoRoot);
     const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
     const activation = (0, v0_governance_1.inspectClaudeActivation)(repoRoot);
     const copilotActivation = (0, v0_governance_1.inspectCopilotActivation)(repoRoot);
@@ -196,6 +198,19 @@ function runtimeDoctorCommand(options = {}) {
     const activeCapability = activeAdapter ? (0, governance_runtime_1.getAgentRuntimeAdapterCapability)(activeAdapter) : null;
     const supervisor = activeSession ? (0, agent_guard_supervisor_1.inspectAgentGuardSupervisor)(repoRoot, activeSession.sessionId) : null;
     const checks = [];
+    checks.push({
+        id: 'runtime_state',
+        label: 'Runtime enforcement state',
+        status: runtimeState.state === 'active_compatible_session' || runtimeState.state === 'enforcement_paused'
+            ? 'pass'
+            : runtimeState.state === 'not_installed' || runtimeState.state === 'installed_not_activated'
+                ? 'warn'
+                : 'fail',
+        message: `${runtimeState.state}; governance expected=${runtimeState.governanceExpected}; protected fail-closed=${runtimeState.protectedPathsFailClosed}.`,
+        recommendation: runtimeState.state === 'active_compatible_session'
+            ? undefined
+            : `Run exactly: ${runtimeState.recoveryCommand}`,
+    });
     const dashboardSyncFailed = Boolean(connection?.autoSync.enabled && connection.autoSync.lastStatus === 'failed');
     const dashboardSyncRecovered = dashboardSyncFailed && transport.health === 'healthy' && Boolean(transport.lastDeliveredAt);
     const runtimeAuthority = (0, runtime_authority_1.inspectRuntimeAuthority)(repoRoot, activeAdapter ?? 'cli');
@@ -664,6 +679,7 @@ function runtimeDoctorCommand(options = {}) {
     const payload = {
         ok: summary.fail === 0,
         repoRoot,
+        runtimeState,
         profileStatus: staleness.status,
         profileFreshness,
         runtimeAuthority,
@@ -748,6 +764,7 @@ function runtimeDoctorCommand(options = {}) {
         console.log(chalk.bold('Neurcode runtime doctor'));
         console.log(chalk.dim('-'.repeat(64)));
         console.log(`Repo: ${chalk.white(repoRoot)}`);
+        console.log(`State: ${chalk.white(runtimeState.state)}`);
         console.log('');
         for (const check of checks)
             printCheck(check);

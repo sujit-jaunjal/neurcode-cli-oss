@@ -1,6 +1,6 @@
 {
   "name": "@neurcode-ai/governance-runtime",
-  "version": "0.4.0",
+  "version": "0.4.6",
   "description": "Deterministic plan/diff governance runtime shared by CLI, API, and integrations",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,7 +16,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@neurcode-ai/contracts": "^0.2.0",
+    "@neurcode-ai/contracts": "^0.2.5",
     "micromatch": "^4.0.8"
   }
 }

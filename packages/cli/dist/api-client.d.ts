@@ -366,12 +366,31 @@ export interface RuntimeOperationsStatusResponse {
             migrationLedger: {
                 status: string;
                 lastAppliedAt: string | null;
+                /** 'declared' when sourced from a deploy-set env marker (not a live query). */
+                marker?: string;
             };
         };
-        privacy: {
-            sourceUploaded: false;
-            secretValuesIncluded: false;
-            exposedFields: string[];
+        /** Cross-service commit consistency verdict (source-free; commit ids only). */
+        releaseConsistency?: {
+            status: 'consistent' | 'drift' | 'unknown' | string;
+            comparedSurfaces: string[];
+            mismatchedSurfaces: string[];
+            referenceCommit: string | null;
+            expectedCommit: string | null;
+            note: string;
+        };
+        databaseTls?: {
+            required: boolean;
+            allowInsecure: boolean;
+            caCertConfigured: boolean;
+            status: 'enforced' | 'insecure_allowed' | 'not_required' | string;
+        };
+        /** Source-free fatal-event counts (no message/stack text). */
+        fatal?: {
+            count: number;
+            lastAt: string | null;
+            windowSeconds: number;
+            sinceStartedAt: string;
         };
     };
     runtimeBackend: {
@@ -383,6 +402,20 @@ export interface RuntimeOperationsStatusResponse {
         lastFailureAt: string | null;
         failureCount: number;
         degradedReason: string | null;
+    };
+    /**
+     * Worker release posture aggregated from the latest verify-worker heartbeat.
+     * Present only on the authenticated runtime operations route (the public
+     * /health payload omits it — no DB read there).
+     */
+    worker?: {
+        present: boolean;
+        processRole: string | null;
+        commit: string | null;
+        buildId: string | null;
+        lastSeenAt: string | null;
+        stale: boolean | null;
+        note: string;
     };
     retention: {
         operationalEventsDays: number;

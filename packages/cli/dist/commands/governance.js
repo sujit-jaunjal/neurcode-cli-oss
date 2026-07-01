@@ -3,9 +3,21 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.governanceCommand = governanceCommand;
 const fs_1 = require("fs");
 const path_1 = require("path");
+const contracts_1 = require("@neurcode-ai/contracts");
+const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
 const project_root_1 = require("../utils/project-root");
 const runtime_state_1 = require("../utils/runtime-state");
+const v0_governance_1 = require("../utils/v0-governance");
 const governance_decisions_1 = require("../utils/governance-decisions");
+/** Fixed, source-free fixture paths that the runtime-policy preview classifies. */
+const RUNTIME_POLICY_PREVIEW_FIXTURES = [
+    '.env',
+    'src/auth/login.ts',
+    'migrations/001.sql',
+    'package.json',
+    'dist/x.js',
+    'src/feature/x.ts',
+];
 let chalk;
 try {
     chalk = require('chalk');
@@ -208,6 +220,92 @@ function renderGovernanceStatus(projectRoot, json) {
     }
     console.log(chalk.dim('\nRun `neurcode governance hygiene` for detailed health checks.\n'));
 }
+// readRuntimeGovernanceConfig joins field errors with '; '. None of the
+// individual messages contain that delimiter, so this recovers the structured
+// list for JSON output and credential-violation highlighting.
+function splitGovernanceErrors(error) {
+    if (!error)
+        return [];
+    return error.split('; ').map((part) => part.trim()).filter(Boolean);
+}
+function atomicWriteFile(path, contents, mode) {
+    (0, fs_1.mkdirSync)((0, path_1.dirname)(path), { recursive: true });
+    const temporaryPath = `${path}.tmp.${process.pid}`;
+    (0, fs_1.writeFileSync)(temporaryPath, contents, { encoding: 'utf8', mode });
+    (0, fs_1.renameSync)(temporaryPath, path);
+}
+// Build the source-free export manifest from the (already fail-closed-validated)
+// repo governance config. credentialWrites is pinned to block; planMode mirrors
+// the same reconciliation the profile builder uses (top-level wins, else policy).
+function runtimePolicyManifestFromConfig(config) {
+    const policy = (0, governance_runtime_1.parseRuntimeSafetyPolicyProfile)(config.runtimeSafetyPolicy);
+    const planMode = config.planMode ?? policy.planMode;
+    return (0, contracts_1.buildRuntimePolicyManifest)({
+        approvalRequiredGlobs: config.approvalRequiredGlobs,
+        sensitiveGlobs: config.sensitiveGlobs,
+        safeSupportGlobs: config.safeSupportGlobs,
+        ignoredGlobs: config.ignoredGlobs,
+        planCoherence: config.planCoherence,
+        repoSymbolDuplicateMode: config.repoSymbolDuplicateMode,
+        runtimeSafetyPolicy: {
+            credentialWrites: 'block',
+            authRbac: policy.authRbac,
+            migrations: policy.migrations,
+            dependencyManifests: policy.dependencyManifests,
+            infraDeploy: policy.infraDeploy,
+            sensitiveSurfaces: policy.sensitiveSurfaces,
+            generatedFiles: policy.generatedFiles,
+            ordinaryFeatureFiles: policy.ordinaryFeatureFiles,
+            planMode,
+        },
+    });
+}
+// Merge an imported manifest into an existing governance.json record, replacing
+// only the runtime-policy fields the manifest owns and preserving everything
+// else (e.g. localMode, architectureObligations). manifestId is intentionally
+// not written into governance.json.
+function mergeRuntimePolicyManifest(existing, manifest) {
+    return {
+        ...existing,
+        approvalRequiredGlobs: manifest.approvalRequiredGlobs,
+        sensitiveGlobs: manifest.sensitiveGlobs,
+        safeSupportGlobs: manifest.safeSupportGlobs,
+        ignoredGlobs: manifest.ignoredGlobs,
+        planMode: manifest.planMode,
+        planCoherence: manifest.planCoherence,
+        repoSymbolDuplicateMode: manifest.repoSymbolDuplicateMode,
+        runtimeSafetyPolicy: { ...manifest.runtimeSafetyPolicy },
+    };
+}
+function previewRuntimePolicy(policy) {
+    return RUNTIME_POLICY_PREVIEW_FIXTURES.map((filePath) => {
+        const classification = (0, governance_runtime_1.classifyRuntimeSafetySurface)({ filePath });
+        const action = (0, governance_runtime_1.resolvePolicyActionForClassification)(classification, policy);
+        const reasonCodes = Array.from(new Set(classification.classifications.flatMap((item) => item.reasonCodes.map((code) => code.code))));
+        return {
+            filePath,
+            family: classification.primaryFamily ?? 'runtime_scope',
+            action,
+            reasonCodes,
+        };
+    });
+}
+function effectiveRuntimeSafetyPolicy(config) {
+    const policy = (0, governance_runtime_1.parseRuntimeSafetyPolicyProfile)(config.runtimeSafetyPolicy);
+    return { ...policy, planMode: config.planMode ?? policy.planMode };
+}
+function actionColor(action) {
+    switch (action) {
+        case 'block':
+            return chalk.red;
+        case 'approval_required':
+            return chalk.yellow;
+        case 'warn':
+            return chalk.cyan;
+        default:
+            return chalk.green;
+    }
+}
 function governanceCommand(program) {
     const governance = program
         .command('governance')
@@ -397,6 +495,204 @@ function governanceCommand(program) {
         if (hygiene.errorCount > 0) {
             process.exitCode = 1;
         }
+    });
+    governance
+        .command('validate')
+        .description('Validate .neurcode/governance.json (including runtimeSafetyPolicy); exits 1 on any error')
+        .option('--json', 'Output machine-readable JSON')
+        .action((options) => {
+        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(process.cwd());
+        const result = (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot);
+        const errors = splitGovernanceErrors(result.error);
+        const credentialViolations = errors.filter((message) => message.includes('credentialWrites'));
+        const ok = errors.length === 0;
+        if (options.json) {
+            printJson({
+                ok,
+                path: result.path,
+                exists: result.exists,
+                errors,
+                credentialViolations,
+                runtimeSafetyPolicy: result.config.runtimeSafetyPolicy ?? null,
+            });
+            if (!ok)
+                process.exitCode = 1;
+            return;
+        }
+        console.log(chalk.bold.cyan('\nRuntime Governance Validation'));
+        console.log(chalk.dim(`Config: ${result.path}`));
+        if (!result.exists) {
+            console.log(chalk.yellow('No .neurcode/governance.json found — the safe enterprise defaults apply.'));
+            console.log(chalk.dim('Run `neurcode governance export` to scaffold a manifest you can edit and import.\n'));
+            return;
+        }
+        if (ok) {
+            console.log(chalk.green('Valid. credentialWrites is block (enforced in every plan mode).\n'));
+            return;
+        }
+        if (credentialViolations.length > 0) {
+            console.log(chalk.red('\nCredential invariant violations (credentialWrites must be block):'));
+            credentialViolations.forEach((message) => console.log(chalk.red(`  • ${message}`)));
+        }
+        const otherErrors = errors.filter((message) => !credentialViolations.includes(message));
+        if (otherErrors.length > 0) {
+            console.log(chalk.red('\nValidation errors:'));
+            otherErrors.forEach((message) => console.log(chalk.red(`  • ${message}`)));
+        }
+        console.log('');
+        process.exitCode = 1;
+    });
+    governance
+        .command('export')
+        .description('Emit a source-free neurcode.policy.runtime.v1 manifest from .neurcode/governance.json')
+        .option('--out <path>', 'Write the manifest to a file instead of stdout')
+        .option('--json', 'Output machine-readable JSON')
+        .action((options) => {
+        try {
+            const repoRoot = (0, v0_governance_1.resolveRepoRoot)(process.cwd());
+            const result = (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot);
+            const manifest = runtimePolicyManifestFromConfig(result.config);
+            const serialized = `${JSON.stringify(manifest, null, 2)}\n`;
+            if (options.out) {
+                const outPath = (0, path_1.resolve)(process.cwd(), options.out);
+                // 0644: the manifest is source-free governance config meant to be
+                // shared/committed, unlike the credential-bearing-adjacent config file.
+                atomicWriteFile(outPath, serialized, 0o644);
+                if (options.json) {
+                    printJson({ ok: true, out: outPath, manifestId: manifest.manifestId });
+                }
+                else {
+                    console.log(chalk.green(`\nWrote runtime policy manifest to ${outPath}`));
+                    console.log(chalk.dim('Apply it elsewhere with `neurcode governance import <path>`.\n'));
+                }
+                return;
+            }
+            // Default + --json: emit the manifest JSON to stdout (pipe-friendly).
+            console.log(serialized.trimEnd());
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (options.json) {
+                printJson({ ok: false, error: message });
+            }
+            else {
+                console.error(chalk.red(`\n${message}\n`));
+            }
+            process.exitCode = 1;
+        }
+    });
+    governance
+        .command('import')
+        .argument('<path>', 'Path to a neurcode.policy.runtime.v1 manifest file')
+        .description('Validate a runtime policy manifest and merge it into .neurcode/governance.json')
+        .option('--json', 'Output machine-readable JSON')
+        .action((pathArg, options) => {
+        const fail = (message, errors) => {
+            if (options.json) {
+                printJson({ ok: false, error: message, errors: errors ?? [] });
+            }
+            else {
+                console.error(chalk.red(`\n${message}`));
+                (errors ?? []).forEach((entry) => console.error(chalk.red(`  • ${entry}`)));
+                console.error('');
+            }
+            process.exitCode = 1;
+        };
+        const manifestPath = (0, path_1.resolve)(process.cwd(), pathArg);
+        let raw;
+        try {
+            raw = (0, fs_1.readFileSync)(manifestPath, 'utf8');
+        }
+        catch (error) {
+            fail(`Cannot read manifest ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
+            return;
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(raw);
+        }
+        catch (error) {
+            fail(`Manifest ${manifestPath} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+            return;
+        }
+        const { manifest, errors } = (0, contracts_1.parseRuntimePolicyManifest)(parsed);
+        if (errors.length > 0) {
+            fail('Manifest validation failed — nothing was written.', errors);
+            return;
+        }
+        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(process.cwd());
+        const configPath = (0, v0_governance_1.governanceConfigPath)(repoRoot);
+        let existing = {};
+        if ((0, fs_1.existsSync)(configPath)) {
+            try {
+                const current = JSON.parse((0, fs_1.readFileSync)(configPath, 'utf8'));
+                if (current && typeof current === 'object' && !Array.isArray(current)) {
+                    existing = current;
+                }
+            }
+            catch (error) {
+                fail(`Cannot merge into ${configPath}: existing file is invalid JSON (${error instanceof Error ? error.message : String(error)})`);
+                return;
+            }
+        }
+        const merged = mergeRuntimePolicyManifest(existing, manifest);
+        try {
+            // Atomic temp+rename, mode 0600 — mirrors persistRepoSymbolDuplicateMode.
+            atomicWriteFile(configPath, `${JSON.stringify(merged, null, 2)}\n`, 0o600);
+        }
+        catch (error) {
+            fail(`Failed to write ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
+            return;
+        }
+        // Re-validate what we just wrote; a clean manifest must round-trip clean.
+        const reread = (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot);
+        const rereadErrors = splitGovernanceErrors(reread.error);
+        if (rereadErrors.length > 0) {
+            fail('Imported config failed re-validation after write.', rereadErrors);
+            return;
+        }
+        // Refresh the derived profile so the new policy takes effect immediately.
+        (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: true });
+        if (options.json) {
+            printJson({
+                ok: true,
+                path: configPath,
+                manifestId: manifest.manifestId,
+                runtimeSafetyPolicy: reread.config.runtimeSafetyPolicy ?? null,
+            });
+            return;
+        }
+        console.log(chalk.green(`\nImported runtime policy into ${configPath}`));
+        console.log(chalk.dim('credentialWrites is block (always). Profile refreshed.'));
+        console.log(chalk.dim('Commit .neurcode/governance.json to share this policy with your team.\n'));
+    });
+    governance
+        .command('preview')
+        .description('Classify and resolve runtime-safety actions over fixed fixture paths under the effective policy')
+        .option('--json', 'Output machine-readable JSON')
+        .action((options) => {
+        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(process.cwd());
+        const result = (0, v0_governance_1.readRuntimeGovernanceConfig)(repoRoot);
+        const policy = effectiveRuntimeSafetyPolicy(result.config);
+        const rows = previewRuntimePolicy(policy);
+        const credentialRow = rows.find((row) => row.family === 'credential_or_secret');
+        if (options.json) {
+            printJson({
+                policyId: policy.id,
+                planMode: policy.planMode,
+                credentialInvariant: credentialRow?.action ?? 'block',
+                fixtures: rows,
+            });
+            return;
+        }
+        console.log(chalk.bold.cyan('\nRuntime Policy Preview'));
+        console.log(chalk.dim(`Policy: ${policy.id}  •  plan mode: ${policy.planMode}`));
+        console.log(chalk.dim('Resolved enforcement action per representative surface:\n'));
+        for (const row of rows) {
+            const color = actionColor(row.action);
+            console.log(`  ${color(row.action.padEnd(18))} ${row.filePath}  ${chalk.dim(`[${row.family}]`)}`);
+        }
+        console.log(chalk.dim('\ncredentialWrites is block in every plan mode (.env is always blocked locally).\n'));
     });
 }
 //# sourceMappingURL=governance.js.map

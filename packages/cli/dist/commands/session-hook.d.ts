@@ -18,7 +18,7 @@
  *   plan-coherence policy returns 'block', we deny — intentional enforcement.
  */
 import type { Command } from 'commander';
-import { checkFileBoundary, type GovernanceSession, type RuntimeBlockType } from '@neurcode-ai/governance-runtime';
+import { checkFileBoundary, type GovernanceSession, type RuntimeBlockType, type RuntimeEnforcementState } from '@neurcode-ai/governance-runtime';
 import type { TrustedProposedChangeAdapterId } from '@neurcode-ai/contracts';
 export interface HookSessionResolution {
     session: GovernanceSession | null;
@@ -27,17 +27,33 @@ export interface HookSessionResolution {
 }
 export declare function resolveSessionForHook(repoRoot: string, requestedSessionId?: string): HookSessionResolution;
 export declare function normalizeHookFilePathForRepo(rawPath: string, repoRoot: string): string;
+export declare function assertHookPathAuthority(repoRoot: string, rawPath: string): string;
 export declare function hookFilePathCandidates(hookInput: Record<string, unknown>): string[];
 export declare function proposedSourceFromHookInput(hookInput: Record<string, unknown>): {
     source: string | null;
     sourceKind: 'write_content' | 'edit_new_string' | 'multi_edit_new_strings' | 'not_available';
 };
+/**
+ * Explicit no-session runtime states (P0-E). The hook is installed (it is running), so the
+ * only distinction that matters for fail-open vs fail-closed is whether governance was ever
+ * established for this repository and whether the runtime can currently be evaluated.
+ */
+export type NoSessionRuntimeState = RuntimeEnforcementState;
 export interface NoActiveSessionWriteDecision {
     block: boolean;
     filePath: string;
     result: ReturnType<typeof checkFileBoundary>;
     message: string;
+    runtimeState: NoSessionRuntimeState;
 }
+/**
+ * Whether governance was previously established for this repository — a built profile, an
+ * active-session pointer, or any persisted session record. Used to distinguish ordinary
+ * first-run use (advisory) from a runtime that was expected to govern but is currently
+ * unavailable (fail closed). Dynamic — derived from on-disk governance artifacts only, no
+ * hardcoded repository directory names.
+ */
+export declare function governanceWasExpected(repoRoot: string): boolean;
 export declare function evaluateNoActiveSessionWrite(repoRoot: string, filePath: string): NoActiveSessionWriteDecision;
 export declare function shouldKeepSessionActiveForPendingApproval(session: GovernanceSession, pendingApproval: {
     filePath: string;

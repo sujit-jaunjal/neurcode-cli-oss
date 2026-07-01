@@ -508,6 +508,7 @@ function assertRuntimeCloudPayloadShape(eventType, payload) {
             'topology',
             'brain',
             'pairing',
+            'runtimeState',
             'source',
         ], 'payload.repo');
         if (repo.profileFreshness !== undefined) {
@@ -578,6 +579,45 @@ function assertRuntimeCloudPayloadShape(eventType, payload) {
                 'governedSessionActive',
                 'evidenceSynchronized',
             ], 'payload.repo.pairing');
+        }
+        if (repo.runtimeState !== undefined) {
+            const runtimeState = assertAllowedKeys(repo.runtimeState, [
+                'schemaVersion',
+                'state',
+                'governanceExpected',
+                'protectedPathsFailClosed',
+                'recoveryCommand',
+                'evidence',
+            ], 'payload.repo.runtimeState');
+            if (runtimeState.evidence !== undefined) {
+                const evidence = assertAllowedKeys(runtimeState.evidence, [
+                    'metadataOnly',
+                    'hooksOrAdapterInstalled',
+                    'runtimeManifestPresent',
+                    'profilePresent',
+                    'profileReadable',
+                    'activePointerPresent',
+                    'activeSessionPresent',
+                    'sessionProfileCompatible',
+                    'trackedFileCount',
+                    'ownershipBoundaryCount',
+                    'approvalBoundaryCount',
+                    'sensitiveBoundaryCounts',
+                    'configuredBoundaryCount',
+                    'reasonCodes',
+                ], 'payload.repo.runtimeState.evidence');
+                if (evidence.sensitiveBoundaryCounts !== undefined) {
+                    assertAllowedKeys(evidence.sensitiveBoundaryCounts, [
+                        'auth',
+                        'crypto',
+                        'secrets',
+                        'payments',
+                        'migrations',
+                        'security',
+                        'custom',
+                    ], 'payload.repo.runtimeState.evidence.sensitiveBoundaryCounts');
+                }
+            }
         }
     }
     assertRuntimeSessionShape(envelope.session);

@@ -4,13 +4,14 @@
  * One session per .neurcode/sessions/<id>.json.
  * No daemon required; CLI commands and hooks read/write directly.
  */
-import { type OwnershipBoundary, type PlanCoherenceMode, type RepoSymbolDuplicateMode, type RepoGovernanceProfile, type RuntimeBlockType, type RuntimeLocalMode } from './profile';
+import { type OwnershipBoundary, type PlanCoherenceMode, type PlanControlMode, type RepoSymbolDuplicateMode, type RepoGovernanceProfile, type RuntimeBlockType, type RuntimeLocalMode } from './profile';
+import { type PlanControlModeDescription, type RuntimeSafetyPhase } from './runtime-safety-kernel';
 import { type AgentPlan, type AgentPlanSource, type PlanCoherenceResult } from './agent-plan';
 import { type ArchitectureObligation, type ArchitectureObligationPolicy, type ArchitectureObligationWaiver, type ArchitectureObligationWaiverSource } from './architecture-obligations';
 import type { RepoArchitectureGraph } from './architecture-graph';
 import { type RepositoryTopologyArtifact } from './repository-topology';
 import { INTENT_PRIVACY_POLICY_VERSION, type IntentRedactionReasonCode } from './intent-privacy';
-export type EventType = 'session_start' | 'check_ok' | 'check_warn' | 'check_block' | 'approval_decision' | 'user_decision' | 'plan_captured' | 'plan_amended' | 'plan_amendment_proposed' | 'plan_amendment_decision' | 'obligation_state_changed' | 'obligation_waiver_decision' | 'agent_session_launched' | 'agent_handshake' | 'agent_runtime_call' | 'agent_guard_started' | 'agent_guard_status' | 'agent_guard_finished' | 'agent_guard_supervisor_started' | 'agent_guard_supervisor_stopped' | 'structural_understanding' | 'consequence_nudge' | 'session_finish';
+export type EventType = 'session_start' | 'check_ok' | 'check_warn' | 'check_block' | 'approval_decision' | 'user_decision' | 'plan_captured' | 'plan_amended' | 'plan_frozen' | 'plan_unfrozen' | 'plan_amendment_proposed' | 'plan_amendment_decision' | 'obligation_state_changed' | 'obligation_waiver_decision' | 'agent_session_launched' | 'agent_handshake' | 'agent_runtime_call' | 'agent_guard_started' | 'agent_guard_status' | 'agent_guard_finished' | 'agent_guard_supervisor_started' | 'agent_guard_supervisor_stopped' | 'structural_understanding' | 'consequence_nudge' | 'session_finish';
 export interface SessionEvent {
     type: EventType;
     ts: string;
@@ -30,6 +31,16 @@ export interface SessionEvent {
  */
 export type ScopeMode = 'explicit' | 'inferred' | 'ambiguous';
 export type ApprovalSource = 'local_cli' | 'dashboard' | 'mcp' | 'vscode' | 'unknown';
+/**
+ * Assurance level for an approval grant — describes how the approver identity
+ * was established.
+ *
+ *  hosted_verified   — authenticated request through the Neurcode API
+ *  local_asserted    — operator explicitly passed --approved-by on the CLI
+ *  local_derived     — derived from git user.name/email or OS username
+ *  unknown           — source provided no identity signal at all
+ */
+export type ApprovalAssurance = 'hosted_verified' | 'local_asserted' | 'local_derived' | 'unknown';
 export declare const DEFAULT_APPROVAL_TTL_MS: number;
 export declare const DEFAULT_OBLIGATION_WAIVER_TTL_MS: number;
 export type IntentConfidence = 'high' | 'medium' | 'low';
@@ -55,6 +66,13 @@ export interface IntentScopeAuthority {
     expectedGlobs: string[];
     expectedSymbols: string[];
     likelyTests: string[];
+    provenRequiredFiles: string[];
+    advisoryCandidates: string[];
+    notEvaluatedRecommendations: Array<{
+        target: string;
+        reasonCode: string;
+        manualDiscoveryRecommendation: string | null;
+    }>;
     affectedPackages: string[];
     affectedModules: string[];
     prohibitedBoundaries: string[];
@@ -64,6 +82,8 @@ export interface IntentScopeAuthority {
         evaluated: boolean;
         freshness: string | null;
         reason: string;
+        coverageComplete?: boolean;
+        impactAuthority?: string | null;
     };
 }
 export interface IntentContract {
@@ -100,6 +120,8 @@ export interface ApprovalGrant {
     source: ApprovalSource;
     eventId: string;
     approvedBy?: string | null;
+    /** How the approver identity was established. Never null on a newly created grant. */
+    assurance?: ApprovalAssurance;
     requestId?: string | null;
     revokedAt?: string | null;
     revokedBy?: string | null;
@@ -126,6 +148,23 @@ export interface SessionContract {
     intentContract?: IntentContract;
     /** Repo policy for edits that the captured agent plan did not justify. */
     planCoherenceMode?: PlanCoherenceMode;
+    /** Planning-phase runtime safety posture (observe / advise / enforce_after_freeze). */
+    planMode?: PlanControlMode;
+    /**
+     * Explicit plan-freeze state. `undefined` preserves the pre-V1 implicit
+     * behavior (the plan is treated as frozen once it has expected files). `true`
+     * forces the implementation phase (enforce_after_freeze starts blocking drift);
+     * `false` reopens the planning phase so the plan can be amended freely.
+     */
+    planFrozen?: boolean;
+    /** ISO-8601 timestamp the plan was last frozen (null when never frozen). */
+    planFrozenAt?: string | null;
+    /** Active agent-plan revision in force at the moment of the last freeze. */
+    planFrozenRevision?: number | null;
+    /** Identity that froze the plan (source-free, local-private sanitized). */
+    planFrozenBy?: string | null;
+    /** Resolved enterprise runtime safety policy profile for this session. */
+    runtimeSafetyPolicyId?: string;
     /** Local in-flow enforcement posture for harmless out-of-scope task expansion. */
     runtimeMode?: RuntimeLocalMode;
     /** Deterministic duplicate symbol-name policy captured from repo governance config. */
@@ -315,7 +354,23 @@ export interface FinishSessionOptions {
 }
 export declare function sessionsDir(projectRoot: string): string;
 export declare function sessionPath(projectRoot: string, sessionId: string): string;
-export declare function createSession(projectRoot: string, profile: RepoGovernanceProfile, goal: string): GovernanceSession;
+/**
+ * Publish the active-session pointer. Call ONLY after the session record is durably
+ * persisted (P0-D: never publish the pointer before durable persistence). Verifies the
+ * referenced session record exists and loads before committing the pointer.
+ */
+export declare function activateSession(projectRoot: string, sessionId: string): void;
+/** Clear the active-session pointer (idempotent). */
+export declare function clearActiveSession(projectRoot: string, expectedSessionId?: string): void;
+/**
+ * Roll back a session: remove its durable record and clear the active pointer if it
+ * points at this session. Used to undo a session whose start failed validation so no
+ * partial session and no dangling active pointer survive (P0-D).
+ */
+export declare function removeSession(projectRoot: string, sessionId: string): void;
+export declare function createSession(projectRoot: string, profile: RepoGovernanceProfile, goal: string, options?: {
+    activate?: boolean;
+}): GovernanceSession;
 export declare function loadActiveSession(projectRoot: string): GovernanceSession | null;
 export declare function loadSession(projectRoot: string, sessionId: string): GovernanceSession | null;
 export declare function appendEvent(projectRoot: string, sessionId: string, event: SessionEvent): GovernanceSession | null;
@@ -335,6 +390,8 @@ export interface ApprovalOptions {
     ttlMs?: number | null;
     source?: ApprovalSource;
     approvedBy?: string | null;
+    /** How the approver identity was established. */
+    assurance?: ApprovalAssurance;
     requestId?: string | null;
     approvedAt?: string;
 }
@@ -480,4 +537,91 @@ export declare function activeAgentPlanRevision(contract: SessionContract): numb
  * when it occurred.
  */
 export declare function buildPlanTimeline(session: GovernanceSession): PlanTimeline;
+/**
+ * Resolve the runtime-safety phase for a session from its explicit freeze state.
+ *
+ * Backward-compatible: when `planFrozen` is undefined (every pre-V1 session),
+ * this reproduces the original implicit rule used at the hook call site — a plan
+ * with expected files is treated as the implementation phase. An explicit
+ * freeze (`true`) forces implementation; an explicit unfreeze (`false`) reopens
+ * planning so the agent/human can amend the plan without plan-drift blocking.
+ */
+export declare function derivePlanPhase(contract: SessionContract): RuntimeSafetyPhase;
+export interface PlanFreezeOptions {
+    sessionId?: string;
+    /** Identity that froze/unfroze the plan (sanitized, source-free). */
+    by?: string | null;
+    reason?: string;
+    /** Override timestamp (mainly for deterministic tests). */
+    at?: string;
+}
+export interface PlanFreezeResult {
+    sessionId: string;
+    /** Whether the plan is now in the frozen (implementation) phase. */
+    frozen: boolean;
+    /** True when this call changed the freeze state (idempotent otherwise). */
+    changed: boolean;
+    planMode: PlanControlMode;
+    phase: RuntimeSafetyPhase;
+    activePlanRevision: number;
+    frozenRevision: number | null;
+    planFileCount: number;
+    frozenAt: string | null;
+    frozenBy: string | null;
+    eventId: string | null;
+}
+/**
+ * Freeze the active (or named) plan. After a freeze, a session running under
+ * `enforce_after_freeze` blocks writes outside the frozen plan; under `advise`
+ * sensitive surfaces escalate from warn to exact-path approval. Idempotent.
+ */
+export declare function freezePlan(projectRoot: string, options?: PlanFreezeOptions): PlanFreezeResult;
+/**
+ * Reopen the plan for planning. Plan-drift blocking is suspended so the plan can
+ * be amended freely; credential/secret guards remain in force regardless of
+ * phase. Idempotent.
+ */
+export declare function unfreezePlan(projectRoot: string, options?: PlanFreezeOptions): PlanFreezeResult;
+export interface PlanNegotiationPendingAmendment {
+    proposalId: string;
+    risk: AgentPlanAmendmentRiskLevel;
+    reason: string;
+}
+export interface PlanNegotiationView {
+    sessionId: string;
+    status: GovernanceSession['status'];
+    planMode: PlanControlMode;
+    planModeDescription: PlanControlModeDescription;
+    /** Currently in the frozen (implementation) phase — enforcement-relevant. */
+    frozen: boolean;
+    /** True when an explicit freeze/unfreeze was recorded (vs implicit phase). */
+    frozenExplicit: boolean;
+    frozenAt: string | null;
+    frozenBy: string | null;
+    frozenRevision: number | null;
+    phase: RuntimeSafetyPhase;
+    activePlanRevision: number;
+    planVersions: number;
+    hasPlan: boolean;
+    summary: string | null;
+    steps: string[];
+    expectedFiles: string[];
+    expectedGlobs: string[];
+    constraints: string[];
+    risks: string[];
+    pendingAmendments: PlanNegotiationPendingAmendment[];
+    driftWarningCount: number;
+    blockedBoundaryCount: number;
+    approvedPaths: string[];
+    planCoherenceMode: PlanCoherenceMode;
+    enforceAfterFreeze: boolean;
+}
+/**
+ * Source-free "view active plan" model: the active plan summary/steps/scope,
+ * its revision and freeze state, the plan mode (with plain-language copy), and
+ * negotiation counters (pending amendments, drift, blocks). Derived entirely
+ * from data already persisted on the session — no source, diffs, or prose
+ * beyond the already-source-free plan summary.
+ */
+export declare function buildPlanNegotiationView(session: GovernanceSession): PlanNegotiationView;
 //# sourceMappingURL=session.d.ts.map

@@ -17,6 +17,7 @@ const runtime_live_1 = require("../utils/runtime-live");
 const runtime_evidence_1 = require("../utils/runtime-evidence");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_adapter_1 = require("./runtime-adapter");
+const activation_telemetry_1 = require("../utils/activation-telemetry");
 const session_1 = require("./session");
 const cursor_gate_1 = require("../utils/cursor-gate");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
@@ -1279,6 +1280,15 @@ function renderSupervisorInspection(inspection) {
         console.log(`Error:   ${chalk.red(inspection.error)}`);
     console.log('');
 }
+function toActivationAgentTarget(agent) {
+    const normalized = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agent);
+    if (normalized === 'claude' || normalized === 'cursor' || normalized === 'codex' || normalized === 'vscode') {
+        return normalized;
+    }
+    if (normalized === 'generic-mcp' || normalized === 'copilot')
+        return 'manual';
+    return 'unknown';
+}
 function agentCommand(program) {
     const cmd = program
         .command('agent')
@@ -1306,6 +1316,13 @@ function agentCommand(program) {
         .option('--global', 'For Cursor, write/check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
         .option('--json', 'Output machine-readable JSON')
         .action((agent, options) => {
+        const agentTarget = toActivationAgentTarget(agent);
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'agent_setup_started',
+            commandFamily: 'agent:bootstrap',
+            agentTarget,
+            reasonCode: 'agent_setup.started',
+        });
         try {
             const payload = buildSetupPayload(agent, {
                 ...options,
@@ -1317,8 +1334,21 @@ function agentCommand(program) {
                 emitJson(payload);
             else
                 renderSetup(payload);
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'agent_setup_completed',
+                commandFamily: 'agent:bootstrap',
+                agentTarget,
+                reasonCode: 'agent_setup.completed',
+            });
         }
         catch (error) {
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'agent_setup_completed',
+                commandFamily: 'agent:bootstrap',
+                agentTarget,
+                reasonCode: 'agent_setup.failed',
+                success: false,
+            });
             emitError(error, options.json);
         }
     });
@@ -1353,14 +1383,34 @@ function agentCommand(program) {
         .option('--force-profile', 'Force refresh the repo governance profile')
         .option('--json', 'Output machine-readable JSON')
         .action((agent, options) => {
+        const agentTarget = toActivationAgentTarget(agent);
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'agent_setup_started',
+            commandFamily: 'agent:setup',
+            agentTarget,
+            reasonCode: 'agent_setup.started',
+        });
         try {
             const payload = buildSetupPayload(agent, options);
             if (options.json)
                 emitJson(payload);
             else
                 renderSetup(payload);
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'agent_setup_completed',
+                commandFamily: 'agent:setup',
+                agentTarget,
+                reasonCode: 'agent_setup.completed',
+            });
         }
         catch (error) {
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'agent_setup_completed',
+                commandFamily: 'agent:setup',
+                agentTarget,
+                reasonCode: 'agent_setup.failed',
+                success: false,
+            });
             emitError(error, options.json);
         }
     });

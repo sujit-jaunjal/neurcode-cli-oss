@@ -13,16 +13,19 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE = exports.DEFAULT_RUNTIME_LOCAL_MODE = exports.DEFAULT_PLAN_COHERENCE_MODE = void 0;
+exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE = exports.DEFAULT_RUNTIME_LOCAL_MODE = exports.DEFAULT_PLAN_CONTROL_MODE = exports.DEFAULT_PLAN_COHERENCE_MODE = void 0;
 exports.ownersForPath = ownersForPath;
 exports.buildRepoGovernanceProfile = buildRepoGovernanceProfile;
 exports.checkFileBoundary = checkFileBoundary;
 const node_crypto_1 = require("node:crypto");
 const micromatch_1 = __importDefault(require("micromatch"));
 const architecture_obligations_1 = require("./architecture-obligations");
+const runtime_safety_kernel_1 = require("./runtime-safety-kernel");
 const architecture_graph_1 = require("./architecture-graph");
 const repository_topology_1 = require("./repository-topology");
 exports.DEFAULT_PLAN_COHERENCE_MODE = 'warn';
+var runtime_safety_kernel_2 = require("./runtime-safety-kernel");
+Object.defineProperty(exports, "DEFAULT_PLAN_CONTROL_MODE", { enumerable: true, get: function () { return runtime_safety_kernel_2.DEFAULT_PLAN_CONTROL_MODE; } });
 exports.DEFAULT_RUNTIME_LOCAL_MODE = 'advisory';
 exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE = 'warn';
 // ── Security token map ────────────────────────────────────────────────────────
@@ -373,12 +376,17 @@ function normalizeRepoSymbolDuplicateMode(value) {
         : exports.DEFAULT_REPO_SYMBOL_DUPLICATE_MODE;
 }
 function normalizeRuntimeConfig(input) {
+    const runtimeSafetyPolicy = input?.runtimeSafetyPolicy
+        ? (0, runtime_safety_kernel_1.parseRuntimeSafetyPolicyProfile)(input.runtimeSafetyPolicy)
+        : undefined;
     return {
         approvalRequiredGlobs: normalizeGlobList(input?.approvalRequiredGlobs),
         sensitiveGlobs: normalizeGlobList(input?.sensitiveGlobs),
         safeSupportGlobs: normalizeGlobList(input?.safeSupportGlobs),
         ignoredGlobs: normalizeGlobList(input?.ignoredGlobs),
         planCoherence: normalizePlanCoherenceMode(input?.planCoherence),
+        planMode: (0, runtime_safety_kernel_1.normalizePlanControlMode)(input?.planMode ?? runtimeSafetyPolicy?.planMode),
+        ...(runtimeSafetyPolicy ? { runtimeSafetyPolicy } : {}),
         localMode: normalizeRuntimeLocalMode(input?.localMode),
         repoSymbolDuplicateMode: normalizeRepoSymbolDuplicateMode(input?.repoSymbolDuplicateMode),
         architectureObligations: (0, architecture_obligations_1.normalizeArchitectureObligationPolicy)(input?.architectureObligations),
@@ -393,6 +401,12 @@ function canonicalRuntimeConfig(config) {
         ignoredGlobs: normalized.ignoredGlobs,
         ...(normalized.planCoherence && normalized.planCoherence !== exports.DEFAULT_PLAN_COHERENCE_MODE
             ? { planCoherence: normalized.planCoherence }
+            : {}),
+        ...(normalized.planMode && normalized.planMode !== runtime_safety_kernel_1.DEFAULT_PLAN_CONTROL_MODE
+            ? { planMode: normalized.planMode }
+            : {}),
+        ...(normalized.runtimeSafetyPolicy
+            ? { runtimeSafetyPolicy: normalized.runtimeSafetyPolicy }
             : {}),
         ...(normalized.localMode && normalized.localMode !== exports.DEFAULT_RUNTIME_LOCAL_MODE
             ? { localMode: normalized.localMode }
@@ -567,11 +581,13 @@ function checkFileBoundary(input) {
             filePath.startsWith(grant.path.replace('/**', '').replace('/*', '') + '/') ||
             filePath === grant.path.replace('/**', '').replace('/*', ''));
     });
-    const isApproved = isApprovalRequired &&
-        candidateApprovedPaths.length > 0 &&
+    // hasExplicitApproval is computed independently of isApprovalRequired so that
+    // session approve can also unblock sensitive-but-not-approval-required paths.
+    const hasExplicitApproval = candidateApprovedPaths.length > 0 &&
         candidateApprovedPaths.some((ap) => matchesGlob(filePath, ap) ||
             filePath.startsWith(ap.replace('/**', '').replace('/*', '') + '/') ||
             filePath === ap.replace('/**', '').replace('/*', ''));
+    const isApproved = isApprovalRequired && hasExplicitApproval;
     if (isApprovalRequired && !isApproved) {
         const ownerNote = owners.length ? ` (owned by ${owners.join(', ')})` : '';
         const expiredNote = expiredGrant?.expiresAt ? ` Previous approval expired at ${expiredGrant.expiresAt}.` : '';
@@ -613,7 +629,7 @@ function checkFileBoundary(input) {
             blockType: 'scope_violation_or_task_expansion',
         };
     }
-    if (!effectivelyInScope && isSensitive) {
+    if (!effectivelyInScope && isSensitive && !hasExplicitApproval) {
         const matchedGlob = sensitiveGlobs.find((g) => matchesGlob(filePath, g));
         return {
             verdict: 'block',

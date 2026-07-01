@@ -182,6 +182,47 @@ function reuseCheckNext(confidence) {
     }
     return 'Treat as a light review prompt only; same names can represent unrelated behavior.';
 }
+function buildTestsEvaluation(input) {
+    if (!input.artifact) {
+        return {
+            status: 'not_evaluated',
+            reasonCode: 'brain_artifact_missing',
+            parserId: null,
+            parserDepth: null,
+            coverageStatus: 'not_indexed',
+            manualDiscoveryRecommendation: 'Run `neurcode brain repo-index` and review test directories and CI targets manually.',
+        };
+    }
+    const hasPython = input.changedPaths.some((path) => path.endsWith('.py'));
+    if (hasPython && input.likelyTests.length === 0) {
+        return {
+            status: 'not_evaluated',
+            reasonCode: 'python_call_graph_unavailable',
+            parserId: 'python-structural-regex',
+            parserDepth: 'regex_degraded',
+            coverageStatus: 'partial',
+            manualDiscoveryRecommendation: 'Use repository test layout and CI targets; Python regex analysis cannot prove test impact.',
+        };
+    }
+    if (input.likelyTests.length > 0) {
+        return {
+            status: 'measured',
+            reasonCode: 'local_repo_brain_proximity',
+            parserId: 'local-repo-brain',
+            parserDepth: 'metadata_only',
+            coverageStatus: 'indexed',
+            manualDiscoveryRecommendation: null,
+        };
+    }
+    return {
+        status: 'not_evaluated',
+        reasonCode: 'no_proven_test_edges',
+        parserId: 'local-repo-brain',
+        parserDepth: 'metadata_only',
+        coverageStatus: 'indexed_without_test_resolution',
+        manualDiscoveryRecommendation: 'Review test directories and CI configuration manually; no proven test relationships were indexed.',
+    };
+}
 function buildImpactRadius(input) {
     const affectedRoles = Array.from(new Set([...input.changedFiles.map((f) => f.role), ...input.allConsumers.map((c) => c.role)])).sort();
     const configImpact = {
@@ -235,6 +276,7 @@ function buildImpactRadius(input) {
         advisory: {
             likelyTests: input.likelyTests.slice(0, 12),
             whyThisMatters,
+            testsEvaluation: input.testsEvaluation,
         },
     };
 }
@@ -440,6 +482,7 @@ function computeRepoBrainImpact(artifact, requestedPaths, options = {}) {
         isHighFanOut,
         hotspots,
         likelyTests,
+        testsEvaluation: buildTestsEvaluation({ artifact, changedPaths, likelyTests }),
     });
     const reviewQuestions = buildReviewQuestions({
         changedFiles,
@@ -604,8 +647,31 @@ function buildReviewQuestions(input) {
     return questions;
 }
 // ── Compact summary projection (P1/P2/P3) ─────────────────────────────────────
-function summarizeImpact(report) {
+function summarizeImpact(report, graphProjection) {
     const changedSymbols = report.changedFiles.reduce((sum, f) => sum + (f.symbolCount ?? 0), 0);
+    const graphConsumers = graphProjection?.directConsumers ?? [];
+    const graphTests = [
+        ...(graphProjection?.likelyTests ?? []).map((t) => t.path),
+        ...(graphProjection?.advisoryTests ?? []).map((t) => t.path),
+    ];
+    const mergedConsumerTotal = Math.max(report.consumers.total, graphConsumers.length);
+    const mergedLikelyTests = Array.from(new Set([
+        ...report.impactRadius.advisory.likelyTests,
+        ...graphTests,
+    ])).sort();
+    const impactRadius = graphProjection?.graphPresent
+        ? {
+            ...report.impactRadius,
+            advisory: {
+                ...report.impactRadius.advisory,
+                likelyTests: mergedLikelyTests,
+            },
+            deterministic: {
+                ...report.impactRadius.deterministic,
+                consumerCount: mergedConsumerTotal,
+            },
+        }
+        : report.impactRadius;
     return {
         schemaVersion: exports.IMPACT_SUMMARY_SCHEMA_VERSION,
         generatedAt: report.generatedAt,
@@ -614,7 +680,7 @@ function summarizeImpact(report) {
         counts: {
             changedFiles: report.changedFiles.length,
             indexedChangedFiles: report.changedFiles.filter((f) => f.indexed).length,
-            directConsumers: report.consumers.total,
+            directConsumers: mergedConsumerTotal,
             changedSymbols,
             sensitiveSurfaces: report.sensitiveSurfaces.surfaces.length,
             internalDependencies: report.dependencies.internal.length,
@@ -630,7 +696,10 @@ function summarizeImpact(report) {
         owners: report.owners.routeTo,
         sensitiveSurfaces: report.sensitiveSurfaces.surfaces,
         deterministic: {
-            directConsumers: report.consumers.direct.slice(0, 8).map((c) => ({ path: c.path, role: c.role, edgeCount: c.edgeCount })),
+            directConsumers: [
+                ...report.consumers.direct.slice(0, 8).map((c) => ({ path: c.path, role: c.role, edgeCount: c.edgeCount })),
+                ...graphConsumers.slice(0, 8).map((c) => ({ path: c.path, role: c.role, edgeCount: c.edgeCount })),
+            ].slice(0, 8),
             highFanOut: report.highFanOut.hotspots.filter((h) => h.isHub).map((h) => ({ path: h.path, fanIn: h.fanIn })),
             isHighFanOut: report.highFanOut.isHighFanOut,
         },
@@ -643,9 +712,10 @@ function summarizeImpact(report) {
                 checkNext: r.checkNext,
                 semanticEquivalenceClaimed: r.semanticEquivalenceClaimed,
             })),
-            nearbyTests: report.nearby.tests.slice(0, 6),
+            nearbyTests: mergedLikelyTests.slice(0, 6),
+            testsEvaluation: report.impactRadius.advisory.testsEvaluation,
         },
-        impactRadius: report.impactRadius,
+        impactRadius,
         reviewRouting: report.reviewRouting,
         reviewQuestions: report.reviewQuestions.map((q) => q.question),
         proves: report.proves,

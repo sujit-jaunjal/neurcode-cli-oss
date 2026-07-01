@@ -20,6 +20,7 @@ const runtime_outbox_1 = require("../utils/runtime-outbox");
 const runtime_live_1 = require("../utils/runtime-live");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_identity_1 = require("./runtime-identity");
+const runtime_risk_1 = require("./runtime-risk");
 let chalk;
 try {
     chalk = require('chalk');
@@ -648,6 +649,7 @@ function runtimeCommand(program) {
         .command('runtime')
         .description('Read-only runtime cloud verification for governed agent sessions');
     (0, runtime_identity_1.registerRuntimeIdentityCommand)(runtime);
+    (0, runtime_risk_1.registerRuntimeRiskCommand)(runtime);
     runtime
         .command('privacy-audit')
         .description('Audit local runtime privacy boundaries without printing prompt or payload content')

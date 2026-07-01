@@ -43,12 +43,17 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.deriveLocalOperatorIdentity = void 0;
 exports.resolveUnderstandingDiffFiles = resolveUnderstandingDiffFiles;
 exports.buildLocalGovernanceStatus = buildLocalGovernanceStatus;
 exports.localGovernanceStatusCommand = localGovernanceStatusCommand;
 exports.resetStaleGovernanceSessionCommand = resetStaleGovernanceSessionCommand;
 exports.replanGovernanceSessionCommand = replanGovernanceSessionCommand;
 exports.decideGovernanceReplanCommand = decideGovernanceReplanCommand;
+exports.viewPlanCommand = viewPlanCommand;
+exports.showPlanModeCommand = showPlanModeCommand;
+exports.freezePlanCommand = freezePlanCommand;
+exports.unfreezePlanCommand = unfreezePlanCommand;
 exports.approveGovernanceSessionCommand = approveGovernanceSessionCommand;
 exports.showGovernanceObligationsCommand = showGovernanceObligationsCommand;
 exports.waiveGovernanceObligationCommand = waiveGovernanceObligationCommand;
@@ -92,6 +97,8 @@ const node_child_process_1 = require("node:child_process");
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const readline = __importStar(require("readline"));
+const runtime_state_1 = require("../utils/runtime-state");
+const operator_identity_1 = require("../utils/operator-identity");
 // Import chalk with fallback
 let chalk;
 try {
@@ -109,6 +116,9 @@ catch {
         blue: (str) => str,
     };
 }
+// Re-export for callers that import from this module
+var operator_identity_2 = require("../utils/operator-identity");
+Object.defineProperty(exports, "deriveLocalOperatorIdentity", { enumerable: true, get: function () { return operator_identity_2.deriveLocalOperatorIdentity; } });
 /**
  * Prompt user for input
  */
@@ -447,6 +457,7 @@ function clearInvalidActivePointer(repoRoot, pointer) {
 }
 function buildLocalGovernanceStatus(options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const runtimeState = (0, runtime_state_1.classifyRuntimeState)(repoRoot);
     const session = loadLocalGovernanceSession(repoRoot, options.sessionId);
     const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
     if (!session) {
@@ -458,6 +469,7 @@ function buildLocalGovernanceStatus(options = {}) {
                 ? `Local governance session ${options.sessionId} was not found.`
                 : 'No active in-flow governance session found.',
             connection,
+            runtimeState,
         };
     }
     const recentEvents = session.events.slice(-10);
@@ -490,6 +502,9 @@ function buildLocalGovernanceStatus(options = {}) {
         profileFreshness,
         scopeMode: session.contract.scopeMode,
         planCoherenceMode: session.contract.planCoherenceMode ?? 'warn',
+        planMode: session.contract.planMode ?? governance_runtime_1.DEFAULT_PLAN_CONTROL_MODE,
+        planFrozen: (0, governance_runtime_1.derivePlanPhase)(session.contract) === 'implementation',
+        planPhase: (0, governance_runtime_1.derivePlanPhase)(session.contract),
         agentPlan: session.contract.agentPlan ?? null,
         agentPlanRevision: typeof session.contract.agentPlanRevision === 'number'
             ? session.contract.agentPlanRevision
@@ -520,6 +535,7 @@ function buildLocalGovernanceStatus(options = {}) {
             : null,
         recordPath: `.neurcode/sessions/${session.sessionId}.json`,
         connection,
+        runtimeState,
     };
 }
 function localGovernanceStatusCommand(options = {}) {
@@ -534,6 +550,7 @@ function localGovernanceStatusCommand(options = {}) {
     console.log(chalk.bold('Neurcode in-flow session'));
     console.log(chalk.dim('-'.repeat(72)));
     console.log(`Repo: ${chalk.white(status.repoRoot)}`);
+    console.log(`Runtime: ${chalk.white(status.runtimeState.state)} · recover \`${status.runtimeState.recoveryCommand}\``);
     if (!status.ok) {
         console.log(chalk.yellow(status.message));
         if (status.connection) {
@@ -557,7 +574,12 @@ function localGovernanceStatusCommand(options = {}) {
         console.log(chalk.yellow(`Recover: ${profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND} ` +
             `(--force abandons unresolved operator state${activeStatus.profileFreshness.unresolvedHumanDecisions ? '; unresolved decisions are present' : ''})`));
     }
-    console.log(`Plan:    ${chalk.white(activeStatus.planCoherenceMode)}${activeStatus.agentPlanRevision ? chalk.dim(` · rev ${activeStatus.agentPlanRevision}`) : ''}`);
+    console.log(`Plan:    ${chalk.white(activeStatus.planMode)} mode · ` +
+        `${activeStatus.planFrozen ? chalk.cyan('frozen') : chalk.dim('open')}` +
+        `${activeStatus.agentPlanRevision ? chalk.dim(` · rev ${activeStatus.agentPlanRevision}`) : chalk.dim(' · no plan')}` +
+        chalk.dim(` · coherence ${activeStatus.planCoherenceMode}`));
+    console.log(chalk.dim(`         ${(0, governance_runtime_1.describePlanControlMode)(activeStatus.planMode).headline}`));
+    console.log(chalk.dim(`         View: neurcode session plan · Freeze: neurcode session plan freeze`));
     console.log(`Agent:   ${chalk.white(activeStatus.agentInvocation.status.replace(/_/g, ' '))}` +
         chalk.dim(` · score ${activeStatus.agentInvocation.score}`) +
         chalk.dim(` · checks ${activeStatus.agentInvocation.preWriteCheckCount}`));
@@ -573,7 +595,7 @@ function localGovernanceStatusCommand(options = {}) {
             chalk.dim(` · checks ${activeStatus.agentSupervisor.state?.evaluationCount ?? 0}`));
     }
     if (activeStatus.agentPlan?.summary) {
-        console.log(`Plan:    ${chalk.white(truncate(activeStatus.agentPlan.summary))}`);
+        console.log(`Summary: ${chalk.white(truncate(activeStatus.agentPlan.summary))}`);
     }
     if (activeStatus.agentInvocation.gaps[0]) {
         console.log(`Next:    ${chalk.yellow(activeStatus.agentInvocation.nextAction)}`);
@@ -583,7 +605,7 @@ function localGovernanceStatusCommand(options = {}) {
         console.log(`Re-plan: ${chalk.yellow(`${proposal.proposalId} pending human decision · ${proposal.risk.level} risk`)}`);
     }
     const obligationSummary = (0, governance_runtime_1.summarizeArchitectureObligations)(activeStatus.architectureObligations);
-    console.log(`Obligations: ${chalk.white(`${obligationSummary.satisfied}/${obligationSummary.total} satisfied`)}${obligationSummary.criticalPending ? chalk.yellow(` · ${obligationSummary.criticalPending} critical pending`) : ''}`);
+    console.log(`Obligations: ${chalk.white(`${obligationSummary.satisfied}/${obligationSummary.total} satisfied`)}${obligationSummary.blockingPending ? chalk.red(` · ${obligationSummary.blockingPending} blocking pending`) : ''}${obligationSummary.criticalAdvisoryPending ? chalk.yellow(` · ${obligationSummary.criticalAdvisoryPending} critical advisory pending`) : ''}${obligationSummary.otherAdvisoryPending ? chalk.dim(` · ${obligationSummary.otherAdvisoryPending} advisory pending`) : ''}`);
     for (const obligation of activeStatus.architectureObligations.filter((item) => item.status === 'pending').slice(0, 3)) {
         console.log(chalk.dim(`  pending ${obligation.severity.padEnd(8)} ${obligation.title}`));
     }
@@ -956,6 +978,178 @@ async function decideGovernanceReplanCommand(options = {}) {
         process.exitCode = 1;
     }
 }
+// ── Plan negotiation UX (view / mode / freeze / unfreeze) ─────────────────────
+function loadPlanSession(repoRoot, options) {
+    return options.sessionId
+        ? (0, governance_runtime_1.loadSession)(repoRoot, options.sessionId)
+        : (0, governance_runtime_1.loadActiveSession)(repoRoot);
+}
+function printNoActivePlanSession(options, repoRoot) {
+    if (options.json) {
+        console.log(JSON.stringify({ ok: false, repoRoot, error: 'no active governance session' }, null, 2));
+    }
+    else {
+        (0, messages_1.printError)('No Active Session', 'No active in-flow governance session found.', [
+            'Start a governed task first (e.g. `neurcode run claude --goal "<task>"`), then re-run this command.',
+        ]);
+    }
+    process.exitCode = 1;
+}
+/** `neurcode session plan` — view the active plan, its mode, and freeze state. */
+function viewPlanCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const session = loadPlanSession(repoRoot, options);
+    if (!session) {
+        printNoActivePlanSession(options, repoRoot);
+        return;
+    }
+    const view = (0, governance_runtime_1.buildPlanNegotiationView)(session);
+    if (options.json) {
+        console.log(JSON.stringify({ ok: true, repoRoot, ...view }, null, 2));
+        return;
+    }
+    console.log('');
+    console.log(chalk.bold('Active plan'));
+    console.log(chalk.dim('-'.repeat(72)));
+    console.log(`Session: ${chalk.white(view.sessionId)} ${session.status === 'active' ? chalk.green('active') : chalk.dim(session.status)}`);
+    console.log(`Mode:    ${chalk.white(view.planMode)} · ${view.frozen ? chalk.cyan('frozen') : chalk.dim('open (planning)')}${view.frozenExplicit ? '' : chalk.dim(' · implicit')}`);
+    console.log(chalk.dim(`         ${view.planModeDescription.headline}`));
+    if (view.frozen) {
+        console.log(chalk.dim(`         ${view.planModeDescription.afterFreeze}`));
+    }
+    else {
+        console.log(chalk.dim(`         ${view.planModeDescription.planningPhase}`));
+    }
+    if (view.frozenExplicit && view.frozenAt) {
+        console.log(chalk.dim(`Frozen:  rev ${view.frozenRevision ?? '?'} at ${view.frozenAt}${view.frozenBy ? ` by ${view.frozenBy}` : ''}`));
+    }
+    if (view.hasPlan) {
+        console.log(`Plan:    ${chalk.white(`rev ${view.activePlanRevision}`)}${view.planVersions > 1 ? chalk.dim(` · ${view.planVersions} versions`) : ''}`);
+        if (view.summary)
+            console.log(`Summary: ${chalk.white(truncate(view.summary))}`);
+        if (view.steps.length) {
+            console.log(chalk.bold('Steps'));
+            for (const step of view.steps.slice(0, 8))
+                console.log(chalk.dim(`  • ${truncate(step)}`));
+        }
+        if (view.expectedFiles.length)
+            console.log(`Files:   ${chalk.dim(compactList(view.expectedFiles, 12))}`);
+        if (view.expectedGlobs.length)
+            console.log(`Globs:   ${chalk.dim(compactList(view.expectedGlobs, 12))}`);
+    }
+    else {
+        console.log(chalk.yellow('Plan:    none captured yet — the agent has not exposed a plan.'));
+        console.log(chalk.dim('         Capture/extend via `neurcode session replan --plan "<plan>"` or MCP `neurcode_session_replan`.'));
+    }
+    console.log(`Signals: ${chalk.dim(`${view.pendingAmendments.length} pending amendment(s) · ${view.driftWarningCount} drift warn · ${view.blockedBoundaryCount} block(s) · ${view.approvedPaths.length} approved path(s)`)}`);
+    if (view.pendingAmendments.length > 0) {
+        const pending = view.pendingAmendments[0];
+        console.log(chalk.yellow(`Re-plan: ${pending.proposalId} (${pending.risk} risk) — accept with \`neurcode session replan-decide --proposal-id ${pending.proposalId} --decision accept\``));
+    }
+    console.log('');
+    console.log(chalk.dim(`Freeze:  neurcode session plan freeze   ·   Unfreeze: neurcode session plan unfreeze`));
+    console.log(chalk.dim(`Amend:   neurcode session replan --add-file <path>   ·   Approve: neurcode session approve --path <file>`));
+    console.log('');
+}
+/** `neurcode session plan mode` — show + explain the active plan control mode. */
+function showPlanModeCommand(options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    const session = loadPlanSession(repoRoot, options);
+    // Mode is a repo policy; explain all three either way so help is useful even
+    // without an active session.
+    const activeMode = session ? (session.contract.planMode ?? governance_runtime_1.DEFAULT_PLAN_CONTROL_MODE) : null;
+    const frozen = session ? (0, governance_runtime_1.derivePlanPhase)(session.contract) === 'implementation' : null;
+    const modes = ['observe', 'advise', 'enforce_after_freeze'];
+    if (options.json) {
+        console.log(JSON.stringify({
+            ok: true,
+            repoRoot,
+            activeMode,
+            frozen,
+            defaultMode: governance_runtime_1.DEFAULT_PLAN_CONTROL_MODE,
+            modes: modes.map((mode) => (0, governance_runtime_1.describePlanControlMode)(mode)),
+        }, null, 2));
+        return;
+    }
+    console.log('');
+    console.log(chalk.bold('Plan control mode'));
+    console.log(chalk.dim('-'.repeat(72)));
+    if (activeMode) {
+        console.log(`Active:  ${chalk.white(activeMode)} · ${frozen ? chalk.cyan('frozen') : chalk.dim('open (planning)')}`);
+    }
+    else {
+        console.log(chalk.yellow('No active session — showing how each mode behaves.'));
+    }
+    console.log('');
+    for (const mode of modes) {
+        const description = (0, governance_runtime_1.describePlanControlMode)(mode);
+        const marker = mode === activeMode ? chalk.green('●') : chalk.dim('○');
+        console.log(`${marker} ${chalk.white(mode)}${mode === governance_runtime_1.DEFAULT_PLAN_CONTROL_MODE ? chalk.dim(' (default)') : ''}`);
+        console.log(chalk.dim(`    ${description.headline}`));
+        console.log(chalk.dim(`    Planning: ${description.planningPhase}`));
+        console.log(chalk.dim(`    After freeze: ${description.afterFreeze}`));
+    }
+    console.log('');
+    console.log(chalk.dim('Set the mode in .neurcode/governance.json ("planMode") — see `neurcode bootstrap-policy`.'));
+    console.log(chalk.dim('Freeze the plan with `neurcode session plan freeze` to start enforcement.'));
+    console.log('');
+}
+async function runPlanFreezeCommand(freeze, options = {}) {
+    const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
+    try {
+        const result = freeze
+            ? (0, governance_runtime_1.freezePlan)(repoRoot, { sessionId: options.sessionId, by: options.by, reason: options.reason })
+            : (0, governance_runtime_1.unfreezePlan)(repoRoot, { sessionId: options.sessionId, by: options.by, reason: options.reason });
+        const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
+        if (session)
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: true, repoRoot, ...result }, null, 2));
+            return;
+        }
+        console.log('');
+        const description = (0, governance_runtime_1.describePlanControlMode)(result.planMode);
+        if (freeze) {
+            console.log(result.changed
+                ? chalk.green(`Plan frozen at revision ${result.activePlanRevision}.`)
+                : chalk.dim('Plan was already frozen.'));
+            console.log(chalk.dim(`Mode:    ${result.planMode} — ${description.afterFreeze}`));
+            if (result.planMode === 'enforce_after_freeze') {
+                console.log(chalk.dim(`Now:     writes outside the ${result.planFileCount} planned file(s) block until you amend the plan or approve the exact path.`));
+            }
+            console.log(chalk.dim('Unfreeze with `neurcode session plan unfreeze` to reopen planning.'));
+        }
+        else {
+            console.log(result.changed
+                ? chalk.green('Plan unfrozen — reopened for planning.')
+                : chalk.dim('Plan was already open for planning.'));
+            console.log(chalk.dim(`Mode:    ${result.planMode} — ${description.planningPhase}`));
+            console.log(chalk.dim('Plan-drift blocking is suspended; credential/secret guards remain in force.'));
+            console.log(chalk.dim('Re-freeze with `neurcode session plan freeze` to resume enforcement.'));
+        }
+        console.log('');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (options.json) {
+            console.log(JSON.stringify({ ok: false, repoRoot, error: message }, null, 2));
+        }
+        else {
+            (0, messages_1.printError)(freeze ? 'Freeze Plan Failed' : 'Unfreeze Plan Failed', message, [
+                'Start a governed task first, then retry. Use --session-id to target a specific session.',
+            ]);
+        }
+        process.exitCode = 1;
+    }
+}
+/** `neurcode session plan freeze` — freeze the active plan. */
+async function freezePlanCommand(options = {}) {
+    await runPlanFreezeCommand(true, options);
+}
+/** `neurcode session plan unfreeze` — reopen the active plan for planning. */
+async function unfreezePlanCommand(options = {}) {
+    await runPlanFreezeCommand(false, options);
+}
 async function approveGovernanceSessionCommand(options = {}) {
     const path = options.path;
     if (!path) {
@@ -982,11 +1176,19 @@ async function approveGovernanceSessionCommand(options = {}) {
             }
             : null;
         const matchingCloudApproval = discoveredCloudApproval || explicitCloudApproval;
+        // Derive actor identity using the shared helper so all local approval
+        // ingresses produce consistent, non-null approvedBy and assurance values.
+        const localIdentity = (0, operator_identity_1.deriveLocalOperatorIdentity)(repoRoot);
+        // Only an API-fetched cloud approval (discoveredCloudApproval) with a non-empty
+        // requestedBy is trusted as hosted_verified.  Synthetic --request-id approvals
+        // (explicitCloudApproval) use local identity — they are NOT authenticated hosted proofs.
+        const hostedActor = discoveredCloudApproval?.requestedBy?.trim() || null;
         const result = (0, governance_runtime_1.approveSession)(repoRoot, path, {
             reason: options.reason,
             sessionId: options.sessionId,
             source: matchingCloudApproval ? 'dashboard' : 'local_cli',
-            approvedBy: matchingCloudApproval?.requestedBy || null,
+            approvedBy: hostedActor ?? localIdentity.approvedBy,
+            assurance: hostedActor ? 'hosted_verified' : localIdentity.assurance,
             requestId: matchingCloudApproval?.id || null,
             expiresAt: matchingCloudApproval?.expiresAt || undefined,
         });
@@ -1069,7 +1271,7 @@ function showGovernanceObligationsCommand(options = {}) {
     console.log(chalk.dim('-'.repeat(72)));
     const policy = session.contract.architectureObligationPolicy ?? { mode: 'warn', ruleModes: {} };
     console.log(`Policy:  ${chalk.white(policy.mode)}${Object.keys(policy.ruleModes).length ? chalk.dim(` · ${Object.keys(policy.ruleModes).length} rule override(s)`) : ''}`);
-    console.log(`Summary: ${chalk.white(`${summary.satisfied}/${summary.total} satisfied`)}${summary.waived ? chalk.yellow(` · ${summary.waived} waived`) : ''}${summary.blockingPending ? chalk.red(` · ${summary.blockingPending} blocking pending`) : summary.criticalPending ? chalk.yellow(` · ${summary.criticalPending} critical pending`) : ''}`);
+    console.log(`Summary: ${chalk.white(`${summary.satisfied}/${summary.total} satisfied`)}${summary.waived ? chalk.yellow(` · ${summary.waived} waived`) : ''}${summary.blockingPending ? chalk.red(` · ${summary.blockingPending} blocking pending`) : ''}${summary.criticalAdvisoryPending ? chalk.yellow(` · ${summary.criticalAdvisoryPending} critical advisory pending`) : ''}${summary.otherAdvisoryPending ? chalk.dim(` · ${summary.otherAdvisoryPending} advisory pending`) : ''}`);
     console.log('');
     if (obligations.length === 0) {
         console.log(chalk.dim('No deterministic architecture obligations derived for this session.'));
@@ -1241,7 +1443,7 @@ function showRuntimeSessionCommand(sessionId, options = {}) {
         console.log(`Agent:    ${chalk.white(truncate(session.contract.agentPlan.summary))}`);
     }
     const obligationSummary = (0, governance_runtime_1.summarizeArchitectureObligations)(session.contract.architectureObligations ?? []);
-    console.log(`Obligations: ${chalk.white(`${obligationSummary.satisfied}/${obligationSummary.total} satisfied`)}${obligationSummary.criticalPending ? chalk.yellow(` · ${obligationSummary.criticalPending} critical pending`) : ''}`);
+    console.log(`Obligations: ${chalk.white(`${obligationSummary.satisfied}/${obligationSummary.total} satisfied`)}${obligationSummary.blockingPending ? chalk.red(` · ${obligationSummary.blockingPending} blocking pending`) : ''}${obligationSummary.criticalAdvisoryPending ? chalk.yellow(` · ${obligationSummary.criticalAdvisoryPending} critical advisory pending`) : ''}${obligationSummary.otherAdvisoryPending ? chalk.dim(` · ${obligationSummary.otherAdvisoryPending} advisory pending`) : ''}`);
     console.log(`Allowed:  ${chalk.dim(compactList(session.contract.allowedGlobs))}`);
     console.log(`Gates:    ${chalk.dim(compactList(session.contract.approvalRequiredGlobs))}`);
     console.log(`Approved: ${chalk.dim(compactList(session.contract.approvedPaths))}`);

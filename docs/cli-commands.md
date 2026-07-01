@@ -107,6 +107,20 @@ neurcode status
 neurcode status --json
 ```
 
+### `neurcode session plan`
+
+View and negotiate the active runtime plan. See [Plan negotiation](./plan-negotiation.md) for the full flow.
+
+```bash
+neurcode session plan              # view the active plan: summary, scope, revision, mode, freeze state
+neurcode session plan mode         # explain observe / advise / enforce_after_freeze
+neurcode session plan freeze       # freeze the plan — enforce_after_freeze starts blocking drift
+neurcode session plan unfreeze     # reopen the plan for planning (suspends plan-drift blocking)
+neurcode session plan view --json  # machine-readable plan view
+```
+
+Plan mode is a repo policy (`planMode` in `.neurcode/governance.json`); freeze/unfreeze are per-session actions. Credential/secret writes are blocked locally in every mode, regardless of freeze state. Amend the plan with `neurcode session replan`; approve a one-off exact path with `neurcode session approve --path <file>`.
+
 ### `neurcode session end`
 
 End a local governance session or a true cloud session without mixing their identities.
@@ -184,6 +198,20 @@ neurcode admission export <session-id> --receipt receipt.json
 
 `--receipt` attaches a bounded backend receipt summary when you have already exported or downloaded a Neurcode runtime receipt. The admission artifact still stays source-free and includes receipt ID, key ID, replay hash, signature status, verification status, signed timestamp, and verifier hint only. Tampered receipt metadata is rejected instead of upgrading trust.
 
+### `neurcode pilot export`
+
+Generate a **source-free executive pilot evidence pack** after a pilot: a single packet you can share with an engineering manager, principal engineer, security reviewer, or procurement/IT without a live walkthrough. It aggregates facts the runtime control plane already persisted locally (`.neurcode/sessions/*.change-record.json`, `.neurcode/admission/*.json`, `.neurcode/pilot-metrics.json`).
+
+```bash
+neurcode pilot export                    # → .neurcode/pilot-evidence/{json,md,html}
+neurcode pilot export --json             # print the pack JSON to stdout (no files)
+neurcode pilot export --format markdown  # markdown | html | both (default both)
+neurcode pilot export --out ./out-dir    # custom output directory
+neurcode pilot export --days 30          # local metrics window (default 7)
+```
+
+The pack contains: pilot summary, per-session table (counts/ids/verdicts), blocked risk families, approvals (exact-path + neighbor-deny), plan drift, dependency changes (governed counts + git object hashes), evidence hashes, what-stayed-local, and limitations / completeness. It is source-free by construction — paths, owners, counts, verdicts, and hashes only, never source, diffs, prompts, intent prose, or secrets. Incomplete pilots are exported with an explicit `completeness: partial|empty` and a `missingArtifacts[]` list instead of failing. The `contentHash` is stable for the same input (the generation timestamp is excluded). See `docs/enterprise/implementation-notes/pilot-evidence-pack-v1.md`.
+
 ### `neurcode demo rehearse`
 
 Print the canonical production demo rehearsal protocol: exact goal, safe edit path, approval-required probe path, neighboring-file isolation check, dashboard approval rules, and the operator reply to continue after approval.
@@ -234,6 +262,23 @@ Inspect or set deterministic duplicate-symbol enforcement. The command reports t
 neurcode policy duplicate-mode
 neurcode policy duplicate-mode block --json
 ```
+
+### `neurcode governance validate | export | import | preview`
+
+Author and review the repo-local runtime policy in `.neurcode/governance.json` (boundary globs, plan mode, and the runtime-safety policy enums) without hand-editing raw JSON. These are the CLI side of the **Enterprise Policy Builder**: the dashboard *Runtime policy* page produces a source-free `neurcode.policy.runtime.v1` manifest that you apply here. These commands govern repo-local runtime safety and boundaries only — they do **not** touch cloud custom policies, CODEOWNERS, or structural `architectureObligations`.
+
+Non-negotiable invariant: `runtimeSafetyPolicy.credentialWrites` is always `block` in every plan mode. The validator and importer hard-reject any other value (and never silently weaken it); credential/secret writes are blocked locally regardless of policy.
+
+```bash
+neurcode governance validate                     # validate .neurcode/governance.json; exit 1 on any error
+neurcode governance validate --json              # machine-readable errors + credentialViolations
+neurcode governance export --out policy.json     # emit a source-free neurcode.policy.runtime.v1 manifest
+neurcode governance export                       # print the manifest JSON to stdout (pipe-friendly)
+neurcode governance import policy.json           # validate a manifest, atomically merge it, refresh the profile
+neurcode governance preview --json               # classify + resolve actions over fixed fixture paths
+```
+
+`validate` reads and fail-closed-validates the config (including `runtimeSafetyPolicy`), printing credential violations explicitly and exiting `1` on any error. `export` emits the portable, source-free manifest derived from the current config. `import` validates the manifest, atomically writes (`temp`+`rename`, mode `0600`) the merged config, re-validates, and refreshes the derived profile — a manifest with a weakened, unknown-enum, or malformed value is rejected and nothing is written. `preview` shows the resolved enforcement action per representative surface (`.env`, `src/auth/login.ts`, `migrations/001.sql`, `package.json`, `dist/x.js`, `src/feature/x.ts`) under the effective policy, so `.env` always resolves to `block`.
 
 ### `neurcode fix`
 

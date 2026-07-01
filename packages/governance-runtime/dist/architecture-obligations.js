@@ -472,13 +472,16 @@ function deriveArchitectureObligations(input) {
     return finalize(drafts, input.previous ?? [], now, policy, input.waivers ?? []);
 }
 function summarizeArchitectureObligations(obligations = []) {
+    const pending = obligations.filter((item) => item.status === 'pending');
     return {
         total: obligations.length,
-        pending: obligations.filter((item) => item.status === 'pending').length,
+        pending: pending.length,
         satisfied: obligations.filter((item) => item.status === 'satisfied').length,
         waived: obligations.filter((item) => item.status === 'waived').length,
-        criticalPending: obligations.filter((item) => item.status === 'pending' && item.severity === 'critical').length,
-        blockingPending: obligations.filter((item) => item.status === 'pending' && (item.effectiveMode ?? 'warn') === 'block').length,
+        criticalPending: pending.filter((item) => item.severity === 'critical').length,
+        blockingPending: pending.filter((item) => (item.effectiveMode ?? 'warn') === 'block').length,
+        criticalAdvisoryPending: pending.filter((item) => item.severity === 'critical' && (item.effectiveMode ?? 'warn') === 'warn').length,
+        otherAdvisoryPending: pending.filter((item) => item.severity !== 'critical' && (item.effectiveMode ?? 'warn') === 'warn').length,
     };
 }
 /**

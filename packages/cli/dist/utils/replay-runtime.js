@@ -973,7 +973,6 @@ function replayGovernanceState(request, cwd = process.cwd()) {
         executionRecordCount: index.executions.length,
     });
     const determinismPayload = {
-        asOf,
         controlPlaneSnapshotId: controlPlane?.snapshotId || null,
         workspaceSnapshotId: workspace?.snapshotId || null,
         executions,

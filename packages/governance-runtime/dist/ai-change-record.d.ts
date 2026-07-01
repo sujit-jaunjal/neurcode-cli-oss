@@ -2,6 +2,7 @@ import { type RepoIntelligenceEvidence } from '@neurcode-ai/contracts';
 import { type ArchitectureObligationSummary } from './architecture-obligations';
 import type { AgentPlanAmendmentProposal, ApprovalGrant, GovernanceSession, IntentContract } from './session';
 import { type IntentSummaryV1 } from './intent-privacy';
+import { RUNTIME_SAFETY_KERNEL_SCHEMA_VERSION, type RuntimeSafetyFamily } from './runtime-safety-kernel';
 export declare const AI_CHANGE_RECORD_SCHEMA_VERSION: "neurcode.governed-session-record.v1";
 export declare const AI_CHANGE_RECORD_TYPE: "ai-change-accountability-record";
 export declare const AI_CHANGE_RECORD_RECEIPT_SCHEMA_VERSION: "neurcode.ai-change-record-receipt.v1";
@@ -35,6 +36,7 @@ export interface AIChangeRecordApprovalEntry {
     expiresAt: string | null;
     revokedAt: string | null;
     approvedBy: string | null;
+    assurance: string | null;
     reason: string;
     requestId: string | null;
 }
@@ -170,6 +172,25 @@ export interface AIChangeRecordAccountabilitySummary {
     };
     assumptions: string[];
     limitations: string[];
+}
+export interface AIChangeRecordRuntimeSafety {
+    schemaVersion: typeof RUNTIME_SAFETY_KERNEL_SCHEMA_VERSION;
+    policyId: string | null;
+    planMode: string | null;
+    sourceUploaded: false;
+    sensitiveSurfacesAttempted: string[];
+    pathsBlocked: string[];
+    pathsApproved: string[];
+    dependencyChangesGoverned: number;
+    credentialBlocksLocal: number;
+    planDriftDetected: boolean;
+    verificationGapNoted: boolean;
+    classifications: Array<{
+        filePath: string;
+        families: RuntimeSafetyFamily[];
+        reasonCodes: string[];
+        verdict: string;
+    }>;
 }
 export interface AIChangeRecordRepoBrain {
     status: 'found' | 'missing';
@@ -364,6 +385,7 @@ export interface AIChangeRecord {
         latest: RepoIntelligenceEvidence | null;
     };
     accountability: AIChangeRecordAccountabilitySummary;
+    runtimeSafety: AIChangeRecordRuntimeSafety;
     reviewBrief: AIChangeRecordReviewBrief;
     integrity: {
         recordHash: string;

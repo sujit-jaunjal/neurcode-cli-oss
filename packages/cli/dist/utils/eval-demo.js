@@ -298,7 +298,10 @@ function runEvalDemo(options) {
     let aiChangeRecordSessionId = null;
     let aiChangeRecordRelativePath = null;
     let admissionBlockedCount = null;
+    let demoApprovedBy = null;
+    let demoAssurance = null;
     let admissionApprovedCount = null;
+    let runtimeSafety = { ...enterprise_eval_report_1.EMPTY_RUNTIME_SAFETY };
     let repoBrain = {
         status: 'not_evaluated',
         recoveryCommand: 'neurcode brain index',
@@ -316,8 +319,11 @@ function runEvalDemo(options) {
         trustLevel: null,
         provenance: preflight.backendSigningConfigured ? 'configured signing key' : 'self-attested local record (no backend signing key configured)',
     };
-    // 1) Fixture scaffold.
+    // 1) Fixture scaffold — clear stale runtime state first so consecutive runs
+    //    start deterministically (profile cache, finished sessions, active pointer).
     ensureEvalGitignore(repoRoot);
+    const fixtureRootForClean = (0, node_path_1.join)(repoRoot, '.neurcode', 'eval', 'fixture');
+    (0, guided_eval_1.cleanFixtureRuntimeState)(fixtureRootForClean);
     const fixture = (0, guided_eval_1.scaffoldEvalFixture)(repoRoot);
     add({
         id: 'fixture_scaffolded',
@@ -398,8 +404,10 @@ function runEvalDemo(options) {
             id: 'boundary_block',
             title: 'Protected boundary blocked',
             truthTier: 'deterministic',
-            status: r.decision === 'deny' ? 'pass' : 'fail',
-            expected: `${BOUNDARY_PATH} is denied before the write lands.`,
+            // Require approval_required_boundary specifically — rejects profile_or_runtime_health_block
+            // false positives that fire when the fixture lacks governance.json or an active session.
+            status: (r.decision === 'deny' && r.blockType === 'approval_required_boundary' && r.owners.length > 0) ? 'pass' : 'fail',
+            expected: `${BOUNDARY_PATH} is denied with blockType=approval_required_boundary and owners populated.`,
             observed: r.decision === 'deny' ? `Blocked ${boundaryBlockPath} (owner ${boundaryOwners.join(', ') || 'n/a'}, ${boundaryBlockType ?? 'boundary'}).` : `Decision: ${r.decision} (expected deny).`,
             critical: true,
         });
@@ -416,6 +424,10 @@ function runEvalDemo(options) {
         const approvedPaths = payload?.approvedPaths ?? payload?.payload?.approvedPaths ?? (approvedPath ? [approvedPath] : []);
         exactApprovalPath = approvedPath;
         exactApprovalOnly = approvedPaths.length === 1 && approvedPath === BOUNDARY_PATH;
+        // Capture identity from the grant for P2 gate assertions.
+        const grant = payload?.approvalGrant ?? payload?.payload?.approvalGrant ?? null;
+        demoApprovedBy = grant?.approvedBy ?? null;
+        demoAssurance = grant?.assurance ?? null;
         add({
             id: 'exact_approval',
             title: 'Exact-path approval',
@@ -489,6 +501,61 @@ function runEvalDemo(options) {
             critical: true,
         });
     }
+    // 10b) Surface Runtime Safety Kernel evidence from the AI Change Record.
+    //      Surface-only (RSK V1): export the full self-attested record and read its
+    //      `runtimeSafety` block (plan posture, sensitive surfaces, blocked/approved
+    //      paths, plan-drift) so the evidence output carries the post-RSK fields
+    //      without adding a new plan-drift checkpoint. Source-free: paths/counts only.
+    if (canCheck) {
+        commandsRun.push(`neurcode session export-record ${sessionId} --dir .neurcode/eval/fixture --json`);
+        const expRs = runCli(cliEntry, ['session', 'export-record', sessionId, '--dir', fixtureDir, '--json'], fixtureDir);
+        const expRsPayload = parseCliJson(expRs.stdout);
+        const recordRel = expRsPayload?.publicRelativePath ?? null;
+        if (recordRel) {
+            const recordPath = (0, node_path_1.join)(fixtureDir, recordRel);
+            try {
+                const envelope = JSON.parse((0, node_fs_1.readFileSync)(recordPath, 'utf8'));
+                const rs = envelope?.record?.runtimeSafety;
+                if (rs && typeof rs === 'object') {
+                    const strArr = (v) => Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+                    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+                    runtimeSafety = {
+                        present: true,
+                        schemaVersion: typeof rs.schemaVersion === 'string' ? rs.schemaVersion : null,
+                        policyId: typeof rs.policyId === 'string' ? rs.policyId : null,
+                        planMode: typeof rs.planMode === 'string' ? rs.planMode : null,
+                        sourceUploaded: false,
+                        sensitiveSurfacesAttempted: strArr(rs.sensitiveSurfacesAttempted),
+                        pathsBlocked: strArr(rs.pathsBlocked),
+                        pathsApproved: strArr(rs.pathsApproved),
+                        planDriftDetected: rs.planDriftDetected === true,
+                        credentialBlocksLocal: num(rs.credentialBlocksLocal),
+                        dependencyChangesGoverned: num(rs.dependencyChangesGoverned),
+                        verificationGapNoted: rs.verificationGapNoted === true,
+                    };
+                }
+            }
+            catch {
+                // keep EMPTY_RUNTIME_SAFETY default — surfacing is best-effort, never fatal.
+            }
+            finally {
+                // This full self-attested record is transient scaffolding read only to
+                // surface the `runtimeSafety` block — the durable "AI Change Record
+                // exported" artifact is the admission record from step 10. Remove it so it
+                // never persists inside the fixture's scanned tree (the full record echoes
+                // product caveat text the source-free leak scan treats as fixture source).
+                try {
+                    (0, node_fs_1.rmSync)(recordPath, { force: true });
+                }
+                catch {
+                    // best-effort cleanup — a leftover transient record is non-fatal.
+                }
+            }
+        }
+    }
+    // Surface-only (RSK V1): no new checkpoint is added. The runtimeSafety fields are
+    // threaded into facts → summary → report (and the dashboard mirror), so the
+    // checkpoint count stays stable while the post-RSK evidence is visible.
     // 11) Backend receipt (optional — only when a signing key is configured).
     if (canCheck && backendReceipt.configured) {
         backendReceipt.attempted = true;
@@ -580,8 +647,11 @@ function runEvalDemo(options) {
         admissionBlockedCount,
         admissionApprovedCount,
         backendReceipt,
+        runtimeSafety,
         repoBrain,
         impactIntelligence,
+        approvedBy: demoApprovedBy,
+        assurance: demoAssurance,
         boundaryTimeline: timeline,
         commandsRun,
     };

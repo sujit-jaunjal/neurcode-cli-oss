@@ -45,6 +45,8 @@ const logout_1 = require("./commands/logout");
 const init_1 = require("./commands/init");
 const whoami_1 = require("./commands/whoami");
 const doctor_1 = require("./commands/doctor");
+const runtime_authority_1 = require("./utils/runtime-authority");
+const v0_governance_1 = require("./utils/v0-governance");
 const session_1 = require("./commands/session");
 const brain_1 = require("./commands/brain");
 const policy_1 = require("./commands/policy");
@@ -56,6 +58,7 @@ const bootstrap_1 = require("./commands/bootstrap");
 const quickstart_1 = require("./commands/quickstart");
 const home_1 = require("./commands/home");
 const onboard_1 = require("./commands/onboard");
+const telemetry_1 = require("./commands/telemetry");
 const bootstrap_policy_1 = require("./commands/bootstrap-policy");
 const messages_1 = require("./utils/messages");
 const config_2 = require("./config");
@@ -73,6 +76,7 @@ const runtime_adapter_1 = require("./commands/runtime-adapter");
 const agent_1 = require("./commands/agent");
 const activate_1 = require("./commands/activate");
 const cursor_1 = require("./commands/cursor");
+const integrations_1 = require("./commands/integrations");
 const run_1 = require("./commands/run");
 const runtime_doctor_1 = require("./commands/runtime-doctor");
 const runtime_report_1 = require("./commands/runtime-report");
@@ -82,9 +86,12 @@ const ops_1 = require("./commands/ops");
 const admission_1 = require("./commands/admission");
 const demo_1 = require("./commands/demo");
 const eval_1 = require("./commands/eval");
+const pilot_1 = require("./commands/pilot");
 const execution_bus_1 = require("./utils/execution-bus");
 const execution_actions_1 = require("./utils/execution-actions");
 const cli_startup_1 = require("./utils/cli-startup");
+const command_budget_1 = require("./utils/command-budget");
+const activation_telemetry_1 = require("./utils/activation-telemetry");
 // Read version from package.json
 let version = '0.1.2'; // fallback
 try {
@@ -334,6 +341,33 @@ function renderHelpFooter(root) {
         'Run `neurcode <command> --help` for command-specific details.',
     ].join('\n');
 }
+const SAFE_SUBCOMMAND_FAMILIES = {
+    agent: new Set(['setup', 'bootstrap', 'check', 'start']),
+    brain: new Set(['status', 'index', 'repo-status', 'repo-index', 'readiness']),
+    onboard: new Set(['status', 'next']),
+    repo: new Set(['connect', 'init']),
+    'session-hook': new Set(['start', 'check', 'approve', 'finish']),
+    telemetry: new Set(['status', 'off', 'on', 'flush']),
+};
+function isCommandFamilyToken(value) {
+    return typeof value === 'string' && /^[a-z][a-z0-9-]{0,39}$/i.test(value);
+}
+function inferCommandFamily(args) {
+    if (args.length === 0)
+        return 'help';
+    if (args.includes('--version') || args.includes('-V'))
+        return 'version';
+    const commandTokens = args.filter((arg) => !arg.startsWith('-') && isCommandFamilyToken(arg));
+    const firstCommand = commandTokens[0];
+    if (!firstCommand)
+        return 'root';
+    const secondCommand = commandTokens[1];
+    const allowedSecond = SAFE_SUBCOMMAND_FAMILIES[firstCommand];
+    if (allowedSecond && secondCommand && allowedSecond.has(secondCommand)) {
+        return `${firstCommand}:${secondCommand}`;
+    }
+    return firstCommand;
+}
 program
     .name('neurcode')
     .description('Intent-aware deterministic governance infrastructure for AI-assisted engineering')
@@ -414,6 +448,7 @@ program
 (0, agent_1.agentCommand)(program);
 (0, activate_1.activateCommand)(program);
 (0, cursor_1.cursorCommand)(program);
+(0, integrations_1.integrationsCommand)(program);
 (0, run_1.runCommand)(program);
 (0, runtime_report_1.reportCommand)(program);
 (0, runtime_sync_1.syncCommand)(program);
@@ -422,6 +457,7 @@ program
 (0, admission_1.admissionCommand)(program);
 (0, demo_1.demoCommand)(program);
 (0, eval_1.evalCommand)(program);
+(0, pilot_1.registerPilotCommands)(program);
 program
     .command('status')
     .description('Show the active in-flow governance session for this repository')
@@ -451,6 +487,7 @@ program
 (0, replay_1.replayCommand)(program);
 (0, home_1.homeCommand)(program);
 (0, onboard_1.onboardCommand)(program);
+(0, telemetry_1.telemetryCommand)(program);
 // Top-level discoverability alias for `neurcode replay timeline`. Reviewers
 // asking "what changed and when?" should not need to know the subcommand
 // hierarchy. Same canonical artifact source, same deterministic output.
@@ -559,21 +596,60 @@ program
     .option('--dir <path>', 'Repository root for --runtime diagnostics')
     .option('--json', 'Output machine-readable diagnostics JSON')
     .action((options) => {
+    // Explicit --runtime flag always wins.
     if (options.runtime === true) {
-        (0, runtime_doctor_1.runtimeDoctorCommand)({
-            json: options.json === true,
-            dir: options.dir,
-        });
+        (0, runtime_doctor_1.runtimeDoctorCommand)({ json: options.json === true, dir: options.dir });
         return;
     }
-    (0, doctor_1.doctorCommand)({
-        json: options.json,
-        cliVersion: version,
-    });
+    const cwd = options.dir || process.cwd();
+    let repoRoot = cwd;
+    try {
+        repoRoot = (0, v0_governance_1.resolveRepoRoot)(cwd);
+    }
+    catch { /* not in a git repo */ }
+    const hasGovernance = (0, fs_1.existsSync)((0, path_1.join)(repoRoot, '.neurcode', 'governance.json'));
+    const hasManifest = (0, runtime_authority_1.runtimeManifestExists)(repoRoot);
+    if (hasManifest && hasGovernance) {
+        // Runtime-governed repo → invoke runtime diagnostics only (no enterprise preamble).
+        (0, runtime_doctor_1.runtimeDoctorCommand)({ json: options.json === true, dir: options.dir });
+        return;
+    }
+    if (!hasGovernance && !hasManifest) {
+        // Ambiguous repo: print concise mode-selection and return — do NOT auto-run diagnostics.
+        if (options.json) {
+            console.log(JSON.stringify({
+                ok: null,
+                mode: 'ambiguous',
+                message: 'No governance profile or runtime activation found.',
+                actions: {
+                    setupRuntime: 'neurcode activate',
+                    runtimeDiagnostics: 'neurcode doctor --runtime',
+                },
+            }, null, 2));
+        }
+        else {
+            console.log('');
+            console.log('  No governance profile or runtime activation found.');
+            console.log('');
+            console.log('  Set up runtime governance:        neurcode activate');
+            console.log('  Runtime governance diagnostics:   neurcode doctor --runtime');
+            console.log('');
+        }
+        return;
+    }
+    // hasGovernance && !hasManifest → policy/compiler project without runtime activation.
+    if (!options.json) {
+        console.log('');
+        console.log('  Governance profile found — runtime not yet activated.');
+        console.log('  For runtime diagnostics run:  neurcode doctor --runtime');
+        console.log('  To activate runtime:          neurcode activate');
+        console.log('');
+    }
+    (0, doctor_1.doctorCommand)({ json: options.json, cliVersion: version });
 });
 program
     .command('quickstart')
-    .description('Local-only governance sandbox for first deterministic finding')
+    .description('Local-only governance sandbox for a first deterministic finding (for the canonical one-command evaluation, prefer `neurcode pilot start`)')
     .option('--force', 'Overwrite existing starter files')
     .option('--json', 'Output machine-readable JSON')
     .action(async (options) => {
@@ -1245,6 +1321,73 @@ sessionCmd
 function collectOption(value, previous = []) {
     return [...previous, value];
 }
+// ── Plan negotiation UX: view the active plan, show the mode, freeze/unfreeze ──
+// `neurcode session plan` (and its subcommands) is the runtime plan surface.
+// The top-level `neurcode plan` command is the retired legacy plan/apply/ship
+// flow; the live runtime plan lives inside a governed session, so it sits here.
+const planCmd = sessionCmd
+    .command('plan')
+    .description('View and negotiate the active runtime plan (mode / freeze / unfreeze)');
+planCmd
+    .command('view', { isDefault: true })
+    .description('Show the active plan: summary, scope, revision, mode, and freeze state')
+    .option('--session-id <id>', 'Session ID (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.viewPlanCommand)({
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+planCmd
+    .command('mode')
+    .description('Explain the plan control mode: observe / advise / enforce_after_freeze')
+    .option('--session-id <id>', 'Session ID (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action((options) => {
+    (0, session_1.showPlanModeCommand)({
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+planCmd
+    .command('freeze')
+    .description('Freeze the active plan; enforce_after_freeze starts blocking drift outside it')
+    .option('--by <identity>', 'Who is freezing the plan (recorded source-free)')
+    .option('--reason <text>', 'Why the plan is being frozen')
+    .option('--session-id <id>', 'Session ID (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.freezePlanCommand)({
+        by: options.by,
+        reason: options.reason,
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
+planCmd
+    .command('unfreeze')
+    .description('Reopen the active plan for planning; suspends plan-drift blocking (credential guards stay on)')
+    .option('--by <identity>', 'Who is unfreezing the plan (recorded source-free)')
+    .option('--reason <text>', 'Why the plan is being reopened')
+    .option('--session-id <id>', 'Session ID (default: active session)')
+    .option('--dir <path>', 'Repository root (default: current directory)')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (options) => {
+    await (0, session_1.unfreezePlanCommand)({
+        by: options.by,
+        reason: options.reason,
+        sessionId: options.sessionId,
+        dir: options.dir,
+        json: options.json === true,
+    });
+});
 sessionCmd
     .command('replan')
     .description('Amend or replace the active in-flow agent plan')
@@ -2005,5 +2148,21 @@ program
 });
 configurePrimaryHelpView(program);
 program.addHelpText('after', renderHelpFooter(program));
-program.parse();
+async function main() {
+    const args = process.argv.slice(2);
+    (0, activation_telemetry_1.maybeShowActivationTelemetryNotice)();
+    (0, activation_telemetry_1.trackActivationEvent)({
+        eventType: 'cli_invoked',
+        commandFamily: inferCommandFamily(args),
+        reasonCode: 'cli.invoked',
+    });
+    const handled = await (0, command_budget_1.maybeRunBoundedCliCommand)(args);
+    if (!handled)
+        program.parse();
+}
+void main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[neurcode] fatal startup error: ${message}\n`);
+    process.exitCode = 1;
+});
 //# sourceMappingURL=index.js.map

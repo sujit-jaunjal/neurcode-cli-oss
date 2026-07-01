@@ -191,6 +191,11 @@ async function evaluateLocalRepoIntelligenceV2(input) {
                 ownershipZoneCount: graph.nodes.filter((node) => node.kind === 'ownership_zone').length,
                 sensitiveSurfaceCount: graph.nodes.filter((node) => node.kind === 'sensitive_surface').length,
             } : undefined,
+            coverageAuthority: graph?.coverageAuthority ?? null,
+            relationshipAuthority: graph?.coverageAuthority ? {
+                impactAuthority: graph.coverageAuthority.impactAuthority,
+                reasonCodes: [...graph.coverageAuthority.reasonCodes].sort(),
+            } : undefined,
         },
         policy: {
             evaluatedRuleIds: evaluation.evaluatedRuleIds,

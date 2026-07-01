@@ -51,6 +51,12 @@ export interface RepositoryTopologyRelationship {
     evidenceType: TopologyEvidenceType;
     confidence: TopologyConfidence;
     sourceHash: string;
+    sourceLanguage?: string;
+    parserId?: string;
+    parserDepth?: string;
+    inferredFromNaming?: boolean;
+    directEvidence?: boolean;
+    relationshipProvenance?: string;
 }
 export interface RepositoryTopologyArtifact {
     schemaVersion: typeof REPOSITORY_TOPOLOGY_SCHEMA_VERSION;

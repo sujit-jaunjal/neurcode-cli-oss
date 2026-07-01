@@ -21,8 +21,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolveSessionForHook = resolveSessionForHook;
 exports.normalizeHookFilePathForRepo = normalizeHookFilePathForRepo;
+exports.assertHookPathAuthority = assertHookPathAuthority;
 exports.hookFilePathCandidates = hookFilePathCandidates;
 exports.proposedSourceFromHookInput = proposedSourceFromHookInput;
+exports.governanceWasExpected = governanceWasExpected;
 exports.evaluateNoActiveSessionWrite = evaluateNoActiveSessionWrite;
 exports.shouldKeepSessionActiveForPendingApproval = shouldKeepSessionActiveForPendingApproval;
 exports.reconcileTrustedAdapterPosture = reconcileTrustedAdapterPosture;
@@ -36,6 +38,7 @@ const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const admission_artifact_1 = require("../utils/admission-artifact");
 const hook_heartbeat_1 = require("../utils/hook-heartbeat");
+const operator_identity_1 = require("../utils/operator-identity");
 const runtime_live_1 = require("../utils/runtime-live");
 const agent_session_launcher_1 = require("../utils/agent-session-launcher");
 const governed_intent_1 = require("../utils/governed-intent");
@@ -52,6 +55,11 @@ const proposed_change_analysis_1 = require("../utils/proposed-change-analysis");
 const repo_intelligence_v2_1 = require("../utils/repo-intelligence-v2");
 const runtime_companion_1 = require("../utils/runtime-companion");
 const profile_drift_recovery_1 = require("../utils/profile-drift-recovery");
+const session_start_transaction_1 = require("../utils/session-start-transaction");
+const runtime_state_1 = require("../utils/runtime-state");
+const runtime_safety_check_1 = require("../utils/runtime-safety-check");
+const v0_governance_2 = require("../utils/v0-governance");
+const activation_telemetry_1 = require("../utils/activation-telemetry");
 // ── Helpers ───────────────────────────────────────────────────────────────────
 /** Read the full hook JSON from stdin, or return {} on any error. */
 function readHookInput() {
@@ -134,6 +142,15 @@ function normalizeHookFilePathForRepo(rawPath, repoRoot) {
         }
     }
     return filePath.replace(/^\//, '');
+}
+function assertHookPathAuthority(repoRoot, rawPath) {
+    const normalized = normalizeHookFilePathForRepo(rawPath, repoRoot);
+    const authority = (0, governance_runtime_1.validateRepoFilePath)(repoRoot, normalized, { allowPlannedMissing: true });
+    if (!authority.ok || !authority.path) {
+        const reason = authority.reasonCodes[0] || 'outside_repository';
+        throw new Error(`Path rejected (${reason}).`);
+    }
+    return authority.path;
 }
 function isPlanDeclaredTarget(session, filePath) {
     const normalized = filePath.replace(/^\.\//, '').replace(/^\//, '');
@@ -375,6 +392,11 @@ async function maybeRecordConsequenceNudge(repoRoot, session) {
     }
 }
 function denyPreToolUse(reason, extra) {
+    (0, activation_telemetry_1.trackActivationEvent)({
+        eventType: 'first_block_observed',
+        commandFamily: 'session-hook:check',
+        reasonCode: 'runtime.block_observed',
+    });
     process.stdout.write(JSON.stringify({
         hookSpecificOutput: {
             hookEventName: 'PreToolUse',
@@ -586,10 +608,76 @@ function blockContext(input) {
     };
 }
 const NO_ACTIVE_SESSION_SCOPE_SENTINEL = '__neurcode_no_active_session_scope__';
-function evaluateNoActiveSessionWrite(repoRoot, filePath) {
-    const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot).profile;
-    const result = (0, governance_runtime_1.checkFileBoundary)({
+/**
+ * Whether governance was previously established for this repository — a built profile, an
+ * active-session pointer, or any persisted session record. Used to distinguish ordinary
+ * first-run use (advisory) from a runtime that was expected to govern but is currently
+ * unavailable (fail closed). Dynamic — derived from on-disk governance artifacts only, no
+ * hardcoded repository directory names.
+ */
+function governanceWasExpected(repoRoot) {
+    try {
+        if ((0, fs_1.existsSync)((0, v0_governance_1.profilePath)(repoRoot)))
+            return true;
+        if ((0, fs_1.existsSync)((0, path_1.join)(repoRoot, '.neurcode', 'active-session.json')))
+            return true;
+        const sessions = (0, path_1.join)(repoRoot, '.neurcode', 'sessions');
+        return (0, fs_1.existsSync)(sessions) && (0, fs_1.readdirSync)(sessions).length > 0;
+    }
+    catch {
+        return false;
+    }
+}
+function emptyNoSessionBoundary(filePath) {
+    return (0, governance_runtime_1.checkFileBoundary)({
         filePath,
+        allowedGlobs: [NO_ACTIVE_SESSION_SCOPE_SENTINEL],
+        ownershipRules: [],
+        sensitiveGlobs: [],
+        approvalRequiredGlobs: [],
+        approvedPaths: [],
+        approvalGrants: [],
+        scopeMode: 'explicit',
+        localMode: 'strict',
+    });
+}
+function evaluateNoActiveSessionWrite(repoRoot, filePath) {
+    const pathAuthority = (0, governance_runtime_1.validateRepoFilePath)(repoRoot, filePath, { allowPlannedMissing: true });
+    if (!pathAuthority.ok) {
+        const reason = pathAuthority.reasonCodes[0] || 'outside_repository';
+        return {
+            block: true,
+            filePath,
+            result: emptyNoSessionBoundary(filePath),
+            runtimeState: 'runtime_unavailable',
+            message: `⏸ Neurcode: edit path ${filePath} is outside the repository or failed path authority (${reason}). Failing closed.`,
+        };
+    }
+    const canonicalPath = pathAuthority.path || filePath;
+    let profile;
+    try {
+        profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot).profile;
+    }
+    catch {
+        // P0-E: the governance runtime is expected (this hook is installed) but the profile
+        // cannot be evaluated. If governance was previously established, FAIL CLOSED — a
+        // protected path must never pass merely because session creation / the runtime failed.
+        // First-run repos (no prior governance) stay advisory to avoid blocking ordinary use.
+        const assessment = (0, runtime_state_1.classifyRuntimeState)(repoRoot);
+        const expected = assessment.governanceExpected;
+        return {
+            block: expected,
+            filePath,
+            result: emptyNoSessionBoundary(filePath),
+            runtimeState: expected ? assessment.state : 'installed_not_activated',
+            message: expected
+                ? `⏸ Neurcode: the governance runtime is unavailable and cannot verify whether ${filePath} is a protected path, but governance is expected for this repository. Failing closed. Run exactly: ${assessment.recoveryCommand}.`
+                : `No governance profile yet at ${repoRoot}; ${filePath} is allowed advisory-only until a governed session establishes one.`,
+        };
+    }
+    const assessment = (0, runtime_state_1.classifyRuntimeState)(repoRoot);
+    const result = (0, governance_runtime_1.checkFileBoundary)({
+        filePath: canonicalPath,
         allowedGlobs: [NO_ACTIVE_SESSION_SCOPE_SENTINEL],
         ownershipRules: profile.ownershipBoundaries,
         sensitiveGlobs: profile.sensitiveBoundaries.map((boundary) => boundary.glob),
@@ -600,14 +688,19 @@ function evaluateNoActiveSessionWrite(repoRoot, filePath) {
         localMode: 'strict',
     });
     const protectedPath = result.isApprovalRequired || result.isSensitive || result.owners.length > 0;
+    const enforcementPaused = assessment.state === 'enforcement_paused';
     const ownerNote = result.owners.length ? ` Owners: ${result.owners.join(', ')}.` : '';
-    const message = protectedPath
-        ? `⏸ Neurcode: no active governed session is running, so protected path ${filePath} cannot be checked or approved safely.${ownerNote} Start a governed session with \`neurcode session-hook start\`/agent activation, or run \`neurcode doctor --runtime\` for recovery before retrying.`
-        : `No active governed session at ${repoRoot}; ${filePath} is not a detected protected path and is allowed advisory-only.`;
+    const message = enforcementPaused
+        ? `Neurcode enforcement is intentionally paused; ${filePath} is advisory-only. Resume with exactly: ${assessment.recoveryCommand}.`
+        : protectedPath
+            ? `⏸ Neurcode: no active governed session is running, so protected path ${filePath} cannot be checked or approved safely.${ownerNote} Start a governed session with \`neurcode session-hook start\`/agent activation, or run \`neurcode doctor --runtime\` for recovery before retrying.`
+            : `No active governed session at ${repoRoot}; ${filePath} is not a detected protected path and is allowed advisory-only.`;
     return {
-        block: protectedPath,
+        block: protectedPath && !enforcementPaused,
         filePath,
         result,
+        // Profile is readable but no session is active: governance was expected to run here.
+        runtimeState: assessment.state,
         message,
     };
 }
@@ -955,7 +1048,12 @@ async function handleStart(cmdCwd) {
         // No text in the prompt — skip session creation (tool-use-only turn)
         return;
     }
+    (0, session_start_transaction_1.beginSessionStartTransaction)(repoRoot, process.env.NEURCODE_BOUNDED_COMMAND_KEY || 'session_hook_start');
+    // Hoisted so the catch can roll back a session that was created but never activated.
+    let session = null;
+    let sessionActivated = false;
     try {
+        (0, session_start_transaction_1.updateSessionStartTransaction)(repoRoot, { phase: 'fingerprinting_profile' });
         const profileResult = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot);
         let profileFreshness = (0, v0_governance_1.buildProfileFreshnessSignal)(profileResult, profileResult.refreshed ? 'auto_refreshed' : 'none');
         if (profileResult.refreshed && profileResult.status !== 'missing') {
@@ -1087,7 +1185,16 @@ async function handleStart(cmdCwd) {
             return;
         }
         const profile = profileResult.profile;
-        let session = (0, governance_runtime_1.createSession)(repoRoot, profile, goal.trim());
+        // Transactional start (P0-D): create the durable session record WITHOUT publishing
+        // the active pointer. The pointer is published (activated) only after every
+        // session-shaping step below succeeds, so a start that fails partway leaves no active
+        // pointer and no partial session — it is rolled back in the catch.
+        (0, session_start_transaction_1.updateSessionStartTransaction)(repoRoot, { phase: 'persisting_deferred_session' });
+        session = (0, governance_runtime_1.createSession)(repoRoot, profile, goal.trim(), { activate: false });
+        (0, session_start_transaction_1.updateSessionStartTransaction)(repoRoot, {
+            phase: 'shaping_session',
+            sessionId: session.sessionId,
+        });
         const plannedAtStart = maybeCaptureAgentPlan(repoRoot, session, hookInput);
         if (plannedAtStart)
             session = plannedAtStart;
@@ -1129,12 +1236,35 @@ async function handleStart(cmdCwd) {
                     : '');
         const banner = `🔒 Neurcode session ${session.sessionId} · ${scopeNote} · ` +
             `${session.contract.approvalRequiredGlobs.length} approval-required boundaries`;
+        // Commit: all session-shaping steps succeeded, so publish the active pointer now.
+        (0, session_start_transaction_1.updateSessionStartTransaction)(repoRoot, {
+            phase: 'activating_session',
+            sessionId: session.sessionId,
+        });
+        (0, governance_runtime_1.activateSession)(repoRoot, session.sessionId);
+        sessionActivated = true;
         process.stdout.write(JSON.stringify({ message: banner }) + '\n');
+        // Cloud projection is non-authoritative and must not affect the committed session.
+        (0, session_start_transaction_1.updateSessionStartTransaction)(repoRoot, {
+            phase: 'reconciling_cloud',
+            sessionId: session.sessionId,
+        });
         await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session, { profileFreshness });
     }
     catch (err) {
+        // A start that failed before activation is rolled back so no partial session and no
+        // dangling active pointer survive (P0-D: failed start leaves nothing behind).
+        if (session && !sessionActivated) {
+            try {
+                (0, governance_runtime_1.removeSession)(repoRoot, session.sessionId);
+            }
+            catch { /* best effort rollback */ }
+        }
         diagnostic(`start failed: ${err instanceof Error ? err.message : String(err)}`);
         // Fail open — don't break the agent turn
+    }
+    finally {
+        (0, session_start_transaction_1.clearSessionStartTransaction)(repoRoot);
     }
 }
 const HARD_PREWRITE_ADAPTERS = new Set(['claude-code-hooks', 'copilot-hooks']);
@@ -1215,6 +1345,19 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                 }
             }
             catch (error) {
+                // P0-E defense in depth: if the protected-path check itself errors and governance
+                // was expected for this repo, fail closed for this path rather than allow it.
+                if (governanceWasExpected(repoRoot)) {
+                    denyPreToolUse(`⏸ Neurcode could not verify whether ${filePath} is a protected path because the governance runtime errored, and governance is expected for this repository. Failing closed. Run \`neurcode runtime repair\`, then start a governed session and retry.`, {
+                        blockContext: blockContext({
+                            blockType: 'profile_or_runtime_health_block',
+                            filePath,
+                            message: error instanceof Error ? error.message : String(error),
+                            runtimeMode: 'strict',
+                            nextAction: 'Run `neurcode runtime repair`, then start a governed session and retry this path.',
+                        }),
+                    });
+                }
                 diagnostic(`no-active-session protected-path check skipped: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
@@ -1345,7 +1488,24 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
     // Normalise to a path relative to the repo root. Use realpath-aware
     // comparison so macOS /tmp -> /private/tmp and other repo symlinks do not
     // turn an in-repo edit into a bogus "tmp/repo/..." path.
-    const filePath = normalizeHookFilePathForRepo(rawPath, repoRoot);
+    let filePath;
+    try {
+        filePath = assertHookPathAuthority(repoRoot, rawPath);
+    }
+    catch (error) {
+        const message = `⏸ Neurcode: edit path failed repository path authority. ` +
+            `${error instanceof Error ? error.message : String(error)}`;
+        denyPreToolUse(message, {
+            blockContext: blockContext({
+                blockType: 'scope_violation_or_task_expansion',
+                filePath: rawPath,
+                message,
+                runtimeMode: runtimeMode(session),
+            }),
+            reason: 'path_authority_rejected',
+        });
+        return;
+    }
     // ── Profile freshness guard ─────────────────────────────────────────────
     // Safe refreshes are automatic. If repo metadata changed enough that the
     // active session was derived from a different profile, the current edit is
@@ -1480,6 +1640,154 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                 message,
                 runtimeMode: runtimeMode(session),
             }),
+        });
+    }
+    // ── Runtime Safety Kernel pre-write guard ────────────────────────────────
+    try {
+        const proposed = proposedSourceFromHookInput(hookInput);
+        const profileRead = (0, v0_governance_2.readGovernanceProfile)(repoRoot);
+        const profile = profileRead.profile;
+        const planFiles = session.contract.agentPlan?.expectedFiles ?? [];
+        // Phase is derived from the explicit freeze state when present, falling back
+        // to the original implicit rule (a plan with expected files == implementation).
+        // Freezing the plan is what flips planning -> implementation for the kernel,
+        // so `enforce_after_freeze` only blocks drift once the user freezes.
+        const runtimeSafety = (0, runtime_safety_check_1.evaluateRuntimeSafetyCheck)({
+            filePath,
+            proposedContent: proposed.source,
+            profile,
+            allowedGlobs: session.contract.allowedGlobs,
+            approvedPaths: session.contract.approvedPaths,
+            planFiles,
+            phase: (0, governance_runtime_1.derivePlanPhase)(session.contract),
+            planMode: session.contract.planMode,
+        });
+        if (runtimeSafety.enforcement.action === 'block' || runtimeSafety.enforcement.action === 'approval_required') {
+            const remediation = runtimeSafety.enforcement.remediationCommand
+                ? ` Run: \`${runtimeSafety.enforcement.remediationCommand}\`.`
+                : '';
+            const message = `⏸ Neurcode: ${runtimeSafety.enforcement.message}${remediation}`;
+            const blockType = runtimeSafety.enforcement.action === 'approval_required'
+                ? 'approval_required_boundary'
+                : 'structural_policy_violation';
+            try {
+                (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+                    type: 'check_block',
+                    ts: new Date().toISOString(),
+                    filePath,
+                    verdict: 'block',
+                    message,
+                    detail: {
+                        runtimeSafety: {
+                            schemaVersion: runtimeSafety.policy.schemaVersion,
+                            policyId: runtimeSafety.policy.id,
+                            planMode: runtimeSafety.policy.planMode,
+                            families: runtimeSafety.enforcement.families,
+                            reasonCodes: runtimeSafety.enforcement.reasonCodes,
+                            credentialDetected: runtimeSafety.credential?.evidence.detected ?? false,
+                            dependencyChangeKinds: runtimeSafety.dependency?.evidence.changeKinds ?? [],
+                            sourceUploaded: false,
+                        },
+                        blockContext: blockContext({
+                            blockType,
+                            filePath,
+                            message,
+                            runtimeMode: runtimeMode(session),
+                        }),
+                    },
+                });
+                const refreshedSession = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
+                if (refreshedSession)
+                    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession);
+            }
+            catch {
+                // Recording failure must not weaken the deny.
+            }
+            denyPreToolUse(message, {
+                blockContext: blockContext({
+                    blockType,
+                    filePath,
+                    message,
+                    runtimeMode: runtimeMode(session),
+                }),
+                runtimeSafety: {
+                    families: runtimeSafety.enforcement.families,
+                    reasonCodes: runtimeSafety.enforcement.reasonCodes,
+                },
+            });
+        }
+        else if (runtimeSafety.enforcement.action === 'warn') {
+            try {
+                (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+                    type: 'check_warn',
+                    ts: new Date().toISOString(),
+                    filePath,
+                    verdict: 'warn',
+                    message: runtimeSafety.enforcement.message,
+                    detail: {
+                        runtimeSafety: {
+                            schemaVersion: runtimeSafety.policy.schemaVersion,
+                            policyId: runtimeSafety.policy.id,
+                            planMode: runtimeSafety.policy.planMode,
+                            families: runtimeSafety.enforcement.families,
+                            reasonCodes: runtimeSafety.enforcement.reasonCodes,
+                            sourceUploaded: false,
+                        },
+                    },
+                });
+            }
+            catch {
+                // Advisory evidence is best-effort.
+            }
+        }
+    }
+    catch (runtimeSafetyError) {
+        diagnostic(`runtime safety check failed closed: ${runtimeSafetyError instanceof Error ? runtimeSafetyError.name : 'unknown_error'}`);
+        const message = '⏸ Neurcode: runtime safety could not evaluate this write, so the edit is blocked fail-closed. ' +
+            'Run `neurcode doctor` or `neurcode runtime repair`, then retry.';
+        const blockType = 'structural_policy_violation';
+        try {
+            (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
+                type: 'check_block',
+                ts: new Date().toISOString(),
+                filePath,
+                verdict: 'block',
+                message,
+                detail: {
+                    runtimeSafety: {
+                        schemaVersion: 'neurcode.runtime-safety-kernel.v1',
+                        policyId: 'enterprise_runtime_safety_v1',
+                        planMode: session.contract.planMode ?? 'advise',
+                        families: ['runtime_scope'],
+                        reasonCodes: ['runtime_safety.evaluation_failed'],
+                        sourceUploaded: false,
+                    },
+                    blockContext: blockContext({
+                        blockType,
+                        filePath,
+                        message,
+                        runtimeMode: runtimeMode(session),
+                    }),
+                },
+            });
+            const refreshedSession = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
+            if (refreshedSession)
+                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession);
+        }
+        catch {
+            // Recording failure must not weaken the deny.
+        }
+        denyPreToolUse(message, {
+            blockContext: blockContext({
+                blockType,
+                filePath,
+                message,
+                runtimeMode: runtimeMode(session),
+            }),
+            runtimeSafety: {
+                families: ['runtime_scope'],
+                reasonCodes: ['runtime_safety.evaluation_failed'],
+            },
         });
     }
     // ── Run the boundary + intent-coherence checks ───────────────────────────
@@ -2048,6 +2356,11 @@ function sessionHookCommand(program) {
         .description('Create a governance session (UserPromptSubmit hook)')
         .action(async () => {
         const opts = cmd.opts();
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'onboarding_step_completed',
+            commandFamily: 'session-hook:start',
+            reasonCode: 'session_hook.start',
+        });
         await handleStart(opts.dir || process.cwd());
     });
     const check = cmd
@@ -2072,6 +2385,11 @@ function sessionHookCommand(program) {
             throw new Error(`Unsupported trusted hook timing: ${subOpts.trustedTiming}`);
         }
         await handleCheck(opts.dir || process.cwd(), trustedAdapter, subOpts.trustedTiming);
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'first_governed_check_completed',
+            commandFamily: 'session-hook:check',
+            reasonCode: 'governed_check.completed',
+        });
     });
     cmd
         .command('finish')
@@ -2079,6 +2397,12 @@ function sessionHookCommand(program) {
         .action(async () => {
         const opts = cmd.opts();
         await handleFinish(opts.dir || process.cwd());
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'onboarding_step_completed',
+            commandFamily: 'session-hook:finish',
+            stage: 'first_evidence_synced',
+            reasonCode: 'evidence.synced',
+        });
     });
     cmd
         .command('approve')
@@ -2095,15 +2419,38 @@ function sessionHookCommand(program) {
         const cwd = opts.dir || process.cwd();
         const repoRoot = (0, v0_governance_1.resolveRepoRoot)(cwd);
         try {
+            // 1) Authoritative, durable local approval. If this throws, NOTHING is approved
+            //    and the outer catch reports a real failure (exit 1, no "Approved" output).
+            const localIdentity = (0, operator_identity_1.deriveLocalOperatorIdentity)(repoRoot);
             const result = (0, governance_runtime_1.approveSession)(repoRoot, subOpts.path, {
                 reason: subOpts.reason,
                 sessionId: subOpts.sessionId,
                 expiresAt: subOpts.expiry === false ? null : subOpts.expiresAt,
                 ttlMs: subOpts.expiry === false || subOpts.expiresAt ? undefined : parseDurationMs(subOpts.expiresIn),
                 source: 'local_cli',
+                approvedBy: localIdentity.approvedBy,
+                assurance: localIdentity.assurance,
             });
+            // 2) Cloud reconcile is NON-AUTHORITATIVE. A reconcile failure must never be
+            //    reported as a failed approval (Apache Airflow dogfood P0-C: the misleading
+            //    "✅ Approved … approval failed" sequence). Surface it as a distinct,
+            //    non-fatal status and keep exit 0 — the local approval is already durable.
+            let reconcile = { ok: true };
+            try {
+                const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
+                if (session) {
+                    const published = await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+                    reconcile = { ok: published.ok, error: published.error, pending: published.pending };
+                }
+            }
+            catch (reconcileErr) {
+                reconcile = {
+                    ok: false,
+                    error: reconcileErr instanceof Error ? reconcileErr.message : String(reconcileErr),
+                };
+            }
             if (subOpts.json) {
-                process.stdout.write(JSON.stringify({ ok: true, ...result }, null, 2) + '\n');
+                process.stdout.write(JSON.stringify({ ok: true, ...result, cloudReconcile: reconcile }, null, 2) + '\n');
             }
             else {
                 process.stdout.write([
@@ -2112,10 +2459,15 @@ function sessionHookCommand(program) {
                     `   Expires:  ${result.expiresAt || 'session end'}`,
                     `   All approved paths: ${result.approvedPaths.join(', ')}`,
                 ].join('\n') + '\n');
+                if (!reconcile.ok) {
+                    process.stderr.write(`[neurcode] note: approval is durable locally; cloud reconcile deferred${reconcile.error ? ` (${reconcile.error})` : ''}\n`);
+                }
             }
-            const session = (0, governance_runtime_1.loadSession)(repoRoot, result.sessionId);
-            if (session)
-                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'first_approval_observed',
+                commandFamily: 'session-hook:approve',
+                reasonCode: 'approval.observed',
+            });
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);

@@ -22,6 +22,30 @@ function isAuthorityBootstrapCommand(argv) {
         || argv.includes('--version')
         || argv.includes('--help');
 }
+/** The primary subcommand token (argv[2]-ish), tolerant of node/script prefixes. */
+function primarySubcommand(argv) {
+    for (const tok of argv.slice(2)) {
+        if (!tok || tok.startsWith('-'))
+            continue;
+        return tok;
+    }
+    return null;
+}
+/**
+ * The guided-evaluation front door. `eval demo` / `pilot start` run a complete
+ * governance loop against a self-scaffolded sandbox fixture, and `eval start/
+ * status/next/export` + `pilot funnel-status` are strictly read-only against the
+ * real repo. None of them exercise the enforcement path, so a missing runtime
+ * manifest in the *invocation* directory is expected — surfacing a scary
+ * "degraded runtime authority … run neurcode runtime repair" warning on a passing
+ * demo only confuses a cold evaluator. The fixture and real enforcement paths
+ * still run their own authority checks; this only quiets the startup warning for
+ * the evaluation surfaces.
+ */
+function isEvaluationFrontDoorCommand(argv) {
+    const sub = primarySubcommand(argv);
+    return sub === 'eval' || sub === 'pilot';
+}
 function runStartupConsistencyChecks(input) {
     if (isIdentityCommand(input.argv)) {
         return null;
@@ -60,7 +84,7 @@ function runStartupConsistencyChecks(input) {
             process.exit(1);
         }
     }
-    if (!isAuthorityBootstrapCommand(input.argv)) {
+    if (!isAuthorityBootstrapCommand(input.argv) && !isEvaluationFrontDoorCommand(input.argv)) {
         const authority = (0, cli_runtime_1.assessRuntimeAuthority)({
             repoRoot: process.cwd(),
             current: report.identity,

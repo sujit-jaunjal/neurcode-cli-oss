@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.evaluateReleaseConsistency = evaluateReleaseConsistency;
 exports.compareOpsCliVersions = compareOpsCliVersions;
 exports.buildOpsStatus = buildOpsStatus;
 exports.renderOpsStatus = renderOpsStatus;
@@ -21,6 +22,75 @@ catch {
         red: (s) => s,
         dim: (s) => s,
         bold: (s) => s,
+    };
+}
+function commitPrefix(value) {
+    if (typeof value !== 'string')
+        return null;
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed)
+        return null;
+    return trimmed.slice(0, 7);
+}
+/**
+ * Pure, source-free cross-service release commit consistency check.
+ *
+ * Mirror of services/api/src/utils/ops-status.ts:evaluateReleaseConsistency.
+ * The gate (production-reliability-operator-console-v1) asserts the two
+ * implementations agree on shared test vectors so they cannot drift apart.
+ */
+function evaluateReleaseConsistency(input) {
+    const surfaces = [
+        { name: 'api', prefix: commitPrefix(input.api) },
+        { name: 'dashboard', prefix: commitPrefix(input.dashboard) },
+        { name: 'worker', prefix: commitPrefix(input.worker) },
+    ];
+    const expectedPrefix = commitPrefix(input.expected);
+    const present = surfaces.filter((s) => s.prefix !== null);
+    const comparedSurfaces = present.map((s) => s.name);
+    if (present.length === 0) {
+        return {
+            status: 'unknown',
+            comparedSurfaces,
+            mismatchedSurfaces: [],
+            referenceCommit: expectedPrefix,
+            expectedCommit: expectedPrefix,
+            note: 'No release commit markers are available to compare.',
+        };
+    }
+    const reference = expectedPrefix
+        ?? present.find((s) => s.name === 'api')?.prefix
+        ?? present[0].prefix;
+    const mismatchedSurfaces = present.filter((s) => s.prefix !== reference).map((s) => s.name);
+    if (!expectedPrefix && present.length < 2) {
+        return {
+            status: 'unknown',
+            comparedSurfaces,
+            mismatchedSurfaces: [],
+            referenceCommit: reference,
+            expectedCommit: null,
+            note: 'Only one release commit marker is available; cross-service consistency cannot be assessed.',
+        };
+    }
+    if (mismatchedSurfaces.length > 0) {
+        return {
+            status: 'drift',
+            comparedSurfaces,
+            mismatchedSurfaces,
+            referenceCommit: reference,
+            expectedCommit: expectedPrefix,
+            note: `Release commit drift: ${mismatchedSurfaces.join(', ')} disagree with ${expectedPrefix ? 'the expected commit' : 'the api commit'}.`,
+        };
+    }
+    return {
+        status: 'consistent',
+        comparedSurfaces,
+        mismatchedSurfaces: [],
+        referenceCommit: reference,
+        expectedCommit: expectedPrefix,
+        note: expectedPrefix
+            ? 'All available release commit markers match the expected commit.'
+            : 'All available release commit markers agree.',
     };
 }
 function compareOpsCliVersions(localVersion, registryVersion) {
@@ -198,17 +268,37 @@ async function buildOpsStatus(options = {}) {
     const versionStatus = compareOpsCliVersions(cliVersion, registryVersion);
     const runtimeBackend = runtimeOperations?.runtimeBackend || apiHealth.body?.runtimeBackend || null;
     const receiptSigningConfigured = Boolean(release?.runtime?.receiptSigningConfigured);
+    // Operator-declared expected commit: --expect-commit flag wins over env.
+    const expectedCommit = (options.expectCommit && options.expectCommit.trim())
+        || (process.env.NEURCODE_EXPECTED_GIT_COMMIT && process.env.NEURCODE_EXPECTED_GIT_COMMIT.trim())
+        || null;
+    // Worker posture is only on the authenticated route; null when unauthenticated.
+    const worker = runtimeOperations?.worker || null;
+    const databaseTls = release?.databaseTls || null;
+    const fatal = release?.fatal || null;
+    // Compute consistency client-side so --expect-commit reflects the operator's
+    // local intent (git-on-disk HEAD), not just the server's declared markers.
+    const releaseConsistency = evaluateReleaseConsistency({
+        api: release?.api?.commit ?? null,
+        dashboard: release?.dashboard?.commit ?? null,
+        worker: worker?.commit ?? null,
+        expected: expectedCommit,
+    });
     const posture = {
         api: statusFromBool(apiHealth.ok),
         dashboard: statusFromBool(dashboard.ok),
         runtimeBackend: runtimeBackend?.status || (runtimeOperationsError ? 'unknown' : 'not_reported'),
         npm: npm.status,
         receiptSigning: receiptSigningConfigured ? 'configured' : 'not_configured_or_unknown',
+        releaseConsistency: releaseConsistency.status,
     };
     const ok = apiHealth.ok
         && dashboard.ok
         && (runtimeBackend ? runtimeBackend.status !== 'degraded' : true)
-        && (!runtimeOperations || runtimeOperations.ingestion.status !== 'degraded');
+        && (!runtimeOperations || runtimeOperations.ingestion.status !== 'degraded')
+        // Stale-container / partial-deploy guard: any confirmed commit drift fails
+        // --strict. 'unknown' never fails (no false alarms).
+        && releaseConsistency.status !== 'drift';
     return {
         schemaVersion: 'neurcode.ops-cli-status.v1',
         ok,
@@ -253,6 +343,11 @@ async function buildOpsStatus(options = {}) {
         release,
         migrationLedger: release?.runtime?.migrationLedger || { status: 'unknown', lastAppliedAt: null },
         action: release?.action || { bundleVersion: null, bundleCommit: null, posture: 'unknown' },
+        releaseConsistency,
+        expectedCommit,
+        worker,
+        databaseTls,
+        fatal,
         posture,
         privacy: {
             sourceUploaded: false,
@@ -276,8 +371,28 @@ function renderOpsStatus(status) {
     lines.push(`Dashboard: ${status.dashboard.health.ok ? chalk.green('reachable') : chalk.red('unreachable')} ${chalk.dim(status.dashboard.url)}`);
     lines.push(`Runtime:   ${status.runtimeBackend?.status ? status.runtimeBackend.status : 'not reported'}${status.runtimeBackend?.coordinationMode ? ` · ${status.runtimeBackend.coordinationMode}` : ''}`);
     lines.push(`Receipts:  ${status.posture.receiptSigning}`);
-    lines.push(`Migrations:${status.migrationLedger.status}${status.migrationLedger.lastAppliedAt ? ` · ${status.migrationLedger.lastAppliedAt}` : ''}`);
+    const marker = status.migrationLedger.marker;
+    lines.push(`Migrations:${status.migrationLedger.status}${marker ? ` (${marker})` : ''}${status.migrationLedger.lastAppliedAt ? ` · ${status.migrationLedger.lastAppliedAt}` : ''}`);
     lines.push(`Action:    ${status.action.bundleVersion || 'unknown'} · ${status.action.posture || 'unknown'}`);
+    const rc = status.releaseConsistency;
+    const rcText = rc.status === 'drift'
+        ? chalk.red(`drift · ${rc.mismatchedSurfaces.join(', ')} ≠ ${rc.expectedCommit ? `expected ${rc.expectedCommit}` : `api ${rc.referenceCommit || 'unknown'}`}`)
+        : rc.status === 'consistent'
+            ? chalk.green(`consistent${rc.expectedCommit ? ` · matches expected ${rc.expectedCommit}` : ''}`)
+            : chalk.dim('unknown');
+    lines.push(`Release:   ${rcText}${rc.comparedSurfaces.length ? chalk.dim(` (compared: ${rc.comparedSurfaces.join('+')})`) : ''}`);
+    if (status.worker) {
+        const w = status.worker;
+        lines.push(`Worker:    ${w.present ? `${w.processRole || 'worker'} · ${w.commit ? `commit ${commitPrefix(w.commit)}` : 'commit unknown'}${w.stale ? chalk.yellow(' · stale') : ''}` : chalk.yellow('no heartbeat')}`);
+    }
+    if (status.databaseTls) {
+        const tls = status.databaseTls;
+        lines.push(`DB TLS:    ${tls.status === 'enforced' ? chalk.green('enforced') : tls.status === 'insecure_allowed' ? chalk.red('insecure_allowed') : chalk.yellow('not_required')}${tls.caCertConfigured ? chalk.dim(' · CA configured') : ''}`);
+    }
+    if (status.fatal) {
+        const f = status.fatal;
+        lines.push(`Fatal:     ${f.count === 0 ? chalk.green('0') : chalk.red(String(f.count))}${f.lastAt ? chalk.dim(` · last ${f.lastAt}`) : ''}${typeof f.windowSeconds === 'number' ? chalk.dim(` · ${f.windowSeconds}s window`) : ''}`);
+    }
     if (status.runtimeOperationsError)
         lines.push(chalk.dim(`Runtime operations: ${status.runtimeOperationsError}`));
     if (status.api.health.error)
@@ -298,7 +413,8 @@ function opsCommand(program) {
         .option('--dashboard-url <url>', 'Dashboard URL to probe (default: production or local dev pairing)')
         .option('--timeout-ms <ms>', 'Probe timeout in milliseconds (default: 8000)')
         .option('--no-npm', 'Skip npm latest-version lookup')
-        .option('--strict', 'Exit non-zero when required probes fail')
+        .option('--expect-commit <sha>', 'Expected deployed commit (e.g. git-on-disk HEAD); --strict fails on drift. Env: NEURCODE_EXPECTED_GIT_COMMIT')
+        .option('--strict', 'Exit non-zero when required probes fail or release commits drift')
         .option('--json', 'Output machine-readable JSON')
         .action(async (options) => {
         const status = await buildOpsStatus({
@@ -306,6 +422,7 @@ function opsCommand(program) {
             dashboardUrl: options.dashboardUrl,
             timeoutMs: options.timeoutMs,
             npm: options.npm,
+            expectCommit: options.expectCommit,
             strict: options.strict === true,
             json: options.json === true,
         });

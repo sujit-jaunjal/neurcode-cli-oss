@@ -42,13 +42,15 @@ before continuing.
 ## Step 1 — Run the whole evaluation in one command
 
 ```bash
-npx -y @neurcode-ai/cli@latest eval demo --fixture --agent codex
+npx -y @neurcode-ai/cli@latest pilot start --fixture --agent codex
 #   --agent  claude | codex | cursor | vscode | copilot
+#   equivalent: npx -y @neurcode-ai/cli@latest eval demo --fixture --agent codex
 ```
 
-This scaffolds a throwaway fixture (with a `CODEOWNERS` boundary), starts a
-governed session, and drives the full loop. It **never touches your source** and
-uploads nothing. Expected output ends like this:
+`pilot start --fixture` is the safe rehearsal path; `eval demo --fixture` is the
+identical loop under the older name. It scaffolds a throwaway fixture (with a
+`CODEOWNERS` boundary), starts a governed session, and drives the full loop. It
+**never touches your source** and uploads nothing. Expected output ends like this:
 
 ```
 Enterprise Self-Serve Evaluation — demo complete
@@ -97,7 +99,7 @@ honestly per agent — Neurcode never overclaims:
 | `vscode` / `copilot` | Companion / Copilot-hook path; sessions become reviewable evidence | Supervised / evidence |
 
 ```bash
-npx -y @neurcode-ai/cli@latest eval demo --fixture --agent claude
+npx -y @neurcode-ai/cli@latest pilot start --fixture --agent claude
 ```
 
 ---

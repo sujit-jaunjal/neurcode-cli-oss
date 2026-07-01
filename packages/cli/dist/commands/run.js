@@ -62,7 +62,7 @@ function runCommand(program) {
         .requiredOption('--goal <goal>', 'Task goal for the governed AI session')
         .option('--dir <path>', 'Repository root (default: current directory)')
         .option('--plan <text>', 'Optional initial source-free agent plan to capture immediately')
-        .option('--no-activate', 'Do not install/refresh Claude Code hooks when launching Claude')
+        .option('--no-activate', 'Skip installing external agent hooks and MCP config; repository-local runtime manifest is still created/refreshed')
         .option('--force-profile', 'Force refresh the repo governance profile before launch')
         .option('--json', 'Output machine-readable JSON')
         .action(async (agent, options) => {

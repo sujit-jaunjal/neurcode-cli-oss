@@ -55,6 +55,31 @@ export interface BoundaryTimelineEntry {
     blockType: string | null;
     owners: string[];
 }
+/**
+ * Source-free Runtime Safety Kernel evidence surfaced from the AI Change Record
+ * (`record.runtimeSafety`). Surface-only: the demo reads these fields and renders
+ * them; it does not add a new plan-drift checkpoint. `planMode` is honestly the
+ * session contract's plan posture — `null`/observe for the default fixture, which
+ * the report renders truthfully rather than implying enforcement that did not run.
+ * Every field is a path, count, verdict, or boolean — never source.
+ */
+export interface EvalDemoRuntimeSafety {
+    /** True when runtimeSafety was successfully read from the exported record. */
+    present: boolean;
+    schemaVersion: string | null;
+    policyId: string | null;
+    planMode: string | null;
+    sourceUploaded: false;
+    sensitiveSurfacesAttempted: string[];
+    pathsBlocked: string[];
+    pathsApproved: string[];
+    planDriftDetected: boolean;
+    credentialBlocksLocal: number;
+    dependencyChangesGoverned: number;
+    verificationGapNoted: boolean;
+}
+/** The honest default when no AI Change Record runtimeSafety block was read. */
+export declare const EMPTY_RUNTIME_SAFETY: EvalDemoRuntimeSafety;
 export interface EvalDemoBackendReceipt {
     /** A backend/HMAC signing secret was present in the environment. */
     configured: boolean;
@@ -99,9 +124,13 @@ export interface EvalDemoFacts {
     admissionBlockedCount: number | null;
     admissionApprovedCount: number | null;
     backendReceipt: EvalDemoBackendReceipt;
+    /** Runtime Safety Kernel evidence surfaced from the AI Change Record (surface-only). */
+    runtimeSafety: EvalDemoRuntimeSafety;
     repoBrain: GuidedEvalRepoBrainFindings;
     /** Source-free change-impact map for the fixture's changed set (advisory). */
     impactIntelligence: ImpactSummary | null;
+    approvedBy: string | null;
+    assurance: string | null;
     boundaryTimeline: BoundaryTimelineEntry[];
     commandsRun: string[];
 }
@@ -152,6 +181,8 @@ export interface EnterpriseEvalReport {
         neighborPath: string | null;
         stayedBlocked: boolean;
     };
+    /** Runtime Safety Kernel evidence surfaced from the AI Change Record (surface-only). */
+    runtimeSafety: EvalDemoRuntimeSafety;
     repoBrain: GuidedEvalRepoBrainFindings;
     impactIntelligence: ImpactSummary | null;
     evidenceTrustPosture: {
@@ -216,6 +247,8 @@ export interface EvalDemoSummary {
             relativePath: string | null;
         };
     };
+    /** Runtime Safety Kernel evidence surfaced from the AI Change Record (surface-only). */
+    runtimeSafety: EvalDemoRuntimeSafety;
     sourceFree: true;
     trustPosture: {
         backendReceiptConfigured: boolean;

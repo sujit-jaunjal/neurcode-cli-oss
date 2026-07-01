@@ -50,12 +50,15 @@ const cli_runtime_1 = require("@neurcode-ai/cli-runtime");
 const brain_cache_1 = require("../utils/brain-cache");
 const local_repo_brain_1 = require("../utils/local-repo-brain");
 const repo_brain_impact_1 = require("../utils/repo-brain-impact");
+const repo_graph_impact_1 = require("../utils/repo-graph-impact");
+const brain_scale_status_1 = require("../utils/brain-scale-status");
 const config_1 = require("../config");
 const project_root_1 = require("../utils/project-root");
 const state_1 = require("../utils/state");
 const neurcode_context_1 = require("../utils/neurcode-context");
 const plan_cache_1 = require("../utils/plan-cache");
 const messages_1 = require("../utils/messages");
+const activation_telemetry_1 = require("../utils/activation-telemetry");
 const brain_context_1 = require("../utils/brain-context");
 const semantic_1 = require("../semantic");
 const ask_cache_1 = require("../utils/ask-cache");
@@ -92,8 +95,13 @@ function safeFileSize(path) {
 function refreshActivatedProfileAfterBrain(repoRoot) {
     if (!(0, cli_runtime_1.readActivatedRuntimeManifest)(repoRoot))
         return;
-    const profile = (0, v0_governance_1.buildCurrentGovernanceProfile)(repoRoot, { bypassCache: true });
-    (0, cli_runtime_1.updateActivatedRuntimeManifestProfileHash)(repoRoot, profile.profileHash);
+    // Repository graph construction must not trigger a second whole-repository
+    // profile scan after the graph is already durable. Brain facts are consumed
+    // independently by runtime intelligence; preserve the activated profile until
+    // an explicit/profile-staleness refresh recomposes it.
+    const profile = (0, v0_governance_1.readGovernanceProfile)(repoRoot).profile;
+    if (profile)
+        (0, cli_runtime_1.updateActivatedRuntimeManifestProfileHash)(repoRoot, profile.profileHash);
 }
 function countOccurrences(haystack, needle) {
     if (!haystack || !needle)
@@ -321,9 +329,12 @@ function repositoryGraphError(error, json) {
     process.exitCode = payload.exitCode;
 }
 function printRepositoryGraphIndexResult(repoRoot, result, json) {
+    const graphPath = result.graph.storage.format === 'atomic_json'
+        ? (0, brain_1.legacyRepositoryGraphPath)(repoRoot)
+        : (0, brain_1.repositoryGraphPath)(repoRoot);
     const payload = {
         ok: true,
-        graphPath: (0, brain_1.repositoryGraphPath)(repoRoot),
+        graphPath,
         schemaVersion: result.graph.schemaVersion,
         graphId: result.graph.graphId,
         generation: result.graph.generation,
@@ -624,6 +635,130 @@ function brainCommand(program) {
             console.log(chalk.dim('Architecture memory not found yet (it will be created automatically on plan runs).'));
         }
     });
+    brain
+        .command('readiness')
+        .description('Repository Brain readiness: languages, parser depth, storage, caps, enforcement posture, and next command')
+        .option('--json', 'Output as JSON')
+        .action(async (options) => {
+        const scope = getBrainScope();
+        const graph = (0, brain_1.readRepositoryGraph)(scope.cwd);
+        const metadata = (0, brain_1.readRepositoryGraphMetadata)(scope.cwd);
+        const graphMeta = (0, repo_graph_impact_1.readGraphMetadataOnly)(scope.cwd);
+        const freshness = graph ? await (0, brain_1.repositoryGraphStatus)(scope.cwd) : null;
+        const scaleStatus = (0, brain_scale_status_1.buildBrainScaleStatus)(scope.cwd, { liveFreshness: freshness });
+        const storeMode = process.env.NEURCODE_GRAPH_STORE?.trim() || 'portable (default)';
+        const portableBackend = graphMeta.backend === 'portable';
+        const languages = graph?.coverage.languages ?? [];
+        const caps = metadata?.limits ?? graph?.limits ?? null;
+        const omitted = metadata?.coverageAuthority?.omittedPathPrefixes?.slice(0, 12)
+            ?? graph?.coverageAuthority?.omittedPathPrefixes?.slice(0, 12)
+            ?? [];
+        const nextCommands = graph
+            ? ['neurcode brain impact --path <file>', 'neurcode brain repo-query --help']
+            : ['neurcode brain repo-index', 'neurcode brain readiness --json'];
+        const enforcementPosture = {
+            claude: 'hard_pre_write_deny_when_hook_installed',
+            copilot: 'hard_pre_write_deny_when_hook_installed',
+            cursor: 'cooperative_advisory_mcp_checks',
+            codex: 'cooperative_advisory_mcp_checks',
+        };
+        const payload = {
+            repoRoot: scope.cwd,
+            // Unified honest scale status (Scale V4 / D3a): the single source of
+            // truth for store backend, coverage authority, caps, and timings.
+            scaleStatus,
+            brainState: graph ? (freshness?.state ?? 'unknown') : 'not_indexed',
+            storage: {
+                mode: storeMode,
+                backend: graphMeta.backend,
+                bytes: graphMeta.bytes,
+                impactAuthority: graphMeta.impactAuthority,
+                enterpriseScale: !portableBackend,
+                incrementalPosture: portableBackend
+                    ? 'portable_json_rewrites_full_graph_on_each_index_not_enterprise_scale'
+                    : 'sqlite_row_incremental_when_native_probe_succeeds',
+                recommendation: portableBackend
+                    ? (graphMeta.bytes && graphMeta.bytes > 32 * 1024 * 1024
+                        ? 'Set NEURCODE_GRAPH_STORE=auto or sqlite after authority proves native probe on this machine'
+                        : 'Portable JSON is fine for small repos; use sqlite/auto before large-repo pilots')
+                    : null,
+            },
+            languages: languages.map((item) => ({
+                language: item.language,
+                parserDepth: item.depth,
+                filesAnalyzed: item.filesAnalyzed,
+                parserId: item.parserId,
+            })),
+            // Iteration 7: honest, builder-derived per-language coverage matrix
+            // (supported/partial/advisory/not_evaluated) replaces the prior
+            // hardcoded capabilityMatrix stub. Single source: scaleStatus.languageMatrix.
+            languageMatrix: scaleStatus.languageMatrix,
+            caps: caps ? {
+                maxFiles: caps.maxFiles,
+                maxNodes: caps.maxNodes,
+                maxEdges: caps.maxEdges,
+                omittedPathPrefixes: omitted,
+                coverageComplete: metadata?.coverageAuthority?.coverageComplete ?? graph?.coverageAuthority?.coverageComplete ?? null,
+            } : null,
+            enforcementPosture,
+            privacy: { metadataOnly: true, sourceUploaded: false, sourceIncluded: false },
+            nextRecommendedCommands: nextCommands,
+            recoveryCommand: graph ? 'neurcode brain repo-refresh' : 'neurcode brain repo-index',
+        };
+        if (options.json) {
+            console.log(JSON.stringify(payload, null, 2));
+            return;
+        }
+        await (0, messages_1.printSuccessBanner)('Repository Brain Readiness');
+        console.log(chalk.dim(`Repo: ${scope.cwd}`));
+        console.log(chalk.white(`State: ${payload.brainState}`));
+        console.log(chalk.white(`Storage: ${payload.storage.backend} (${graphMeta.bytes != null ? formatBytes(graphMeta.bytes) : 'n/a'})`));
+        if (payload.storage.recommendation) {
+            (0, messages_1.printInfo)('Scale recommendation', payload.storage.recommendation);
+        }
+        (0, messages_1.printSection)('Storage posture', '🗄️');
+        if (portableBackend) {
+            console.log(chalk.yellow('Portable JSON backend — not enterprise-scale incremental; full graph rewrite on index'));
+        }
+        else {
+            console.log(chalk.dim(`SQLite backend — queryable segmented store`));
+        }
+        if (scaleStatus.storage.acceleratedFallbackToPortable) {
+            console.log(chalk.red(`⚠ Accelerated store requested but native probe failed `
+                + `(${scaleStatus.storage.backendReasonCode ?? 'native_unavailable'}) — running on portable JSON. `
+                + `Re-index after enabling native SQLite.`));
+        }
+        if (scaleStatus.coverage.impactAuthority && scaleStatus.coverage.impactAuthority !== 'authoritative') {
+            console.log(chalk.yellow(`Coverage authority: ${scaleStatus.coverage.impactAuthority} `
+                + `(coverageComplete=${scaleStatus.coverage.coverageComplete}, `
+                + `omittedFiles=${scaleStatus.coverage.omittedFiles ?? 0})`));
+        }
+        if (scaleStatus.caps.fileCapReached || scaleStatus.caps.nodeCapReached || scaleStatus.caps.edgeCapReached) {
+            console.log(chalk.yellow(`Caps hit — files=${scaleStatus.caps.fileCapReached} `
+                + `nodes=${scaleStatus.caps.nodeCapReached} edges=${scaleStatus.caps.edgeCapReached}`));
+        }
+        (0, messages_1.printSection)('Language coverage', '🌐');
+        if (!graph) {
+            console.log(chalk.dim('Not indexed — tiers are capability defaults; run neurcode brain repo-index for observed coverage.'));
+        }
+        for (const row of scaleStatus.languageMatrix.languages) {
+            const d = row.dimensions;
+            const where = row.observed ? `${row.filesAnalyzed} files` : 'not present';
+            console.log(chalk.dim(`- ${row.language} [${row.parserDepth}, ${where}]: `
+                + `parse=${d.parsing.tier} imports=${d.imports.tier} symbols=${d.symbols.tier} `
+                + `test=${d.testImpact.tier} owner=${d.ownership.tier}`));
+            if (row.observed && row.limitations.length > 0) {
+                console.log(chalk.dim(`    ↳ ${row.limitations[0]}`));
+            }
+        }
+        console.log(chalk.dim('Tiers: supported=deterministic · partial=bounded · advisory=heuristic · not_evaluated=no parser'));
+        (0, messages_1.printSection)('Enforcement posture', '🛡️');
+        console.log(chalk.dim('Cursor/Codex: cooperative MCP checks (not hard pre-write deny)'));
+        console.log(chalk.dim('Claude/Copilot: hard deny when host hooks are installed'));
+        (0, messages_1.printSection)('Next', '▶️');
+        for (const cmd of nextCommands)
+            console.log(chalk.cyan(`  ${cmd}`));
+    });
     // -- brain index ------------------------------------------------------------
     brain
         .command('index')
@@ -633,6 +768,11 @@ function brainCommand(program) {
         .option('--experimental-fingerprint-reuse', 'Include experimental signature-fingerprint reuse detection (noisy on large repos)')
         .option('--json', 'Output as JSON')
         .action(async (options) => {
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'brain_index_started',
+            commandFamily: 'brain:index',
+            reasonCode: 'brain_index.started',
+        });
         const scope = getBrainScope();
         const canonical = await (0, brain_1.indexRepositoryGraph)({
             repoRoot: scope.cwd,
@@ -676,6 +816,11 @@ function brainCommand(program) {
             reuseFindings: artifact.reuseFindings.slice(0, 8),
         };
         if (options.json) {
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'brain_index_completed',
+                commandFamily: 'brain:index',
+                reasonCode: 'brain_index.completed',
+            });
             console.log(JSON.stringify(payload, null, 2));
             return;
         }
@@ -720,6 +865,11 @@ function brainCommand(program) {
             console.log(chalk.dim('No duplicate exported symbol names found across non-test files.'));
         }
         (0, messages_1.printInfo)('Next', 'Run: neurcode brain inspect "<area or symbol>"');
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'brain_index_completed',
+            commandFamily: 'brain:index',
+            reasonCode: 'brain_index.completed',
+        });
     });
     // -- Repository Graph V2 ---------------------------------------------------
     brain
@@ -733,27 +883,54 @@ function brainCommand(program) {
         .option('--max-bytes-per-file <n>', 'Maximum bytes per file', (value) => parseInt(value, 10))
         .option('--json', 'Output stable machine-readable JSON')
         .action(async (options) => {
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'brain_index_started',
+            commandFamily: 'brain:repo-index',
+            reasonCode: 'brain_index.started',
+        });
         const scope = getBrainScope();
+        let jobId;
         try {
-            (0, brain_lifecycle_1.markBrainBuilding)(scope.cwd);
             const limits = {
                 ...(Number.isFinite(options.maxFiles) ? { maxFiles: options.maxFiles } : {}),
                 ...(Number.isFinite(options.maxTotalBytes) ? { maxTotalBytes: options.maxTotalBytes } : {}),
                 ...(Number.isFinite(options.maxBytesPerFile) ? { maxBytesPerFile: options.maxBytesPerFile } : {}),
             };
+            const lifecycle = await (0, brain_lifecycle_1.beginBrainIndex)(scope.cwd, {
+                source: process.env.NEURCODE_BRAIN_INDEX_SOURCE === 'auto' ? 'auto' : 'manual',
+                requestedLimits: limits,
+                jobId: process.env.NEURCODE_BRAIN_JOB_ID,
+            });
+            jobId = lifecycle.jobId ?? undefined;
             const result = await (0, brain_1.indexRepositoryGraph)({
                 repoRoot: scope.cwd,
                 changedPaths: splitChangedPathList(options.changed),
                 deletedPaths: splitChangedPathList(options.deleted),
                 renamedPaths: parseRenameList(options.rename),
                 limits,
+                onProgress: jobId
+                    ? (progress) => { (0, brain_lifecycle_1.recordBrainProgress)(scope.cwd, jobId, progress); }
+                    : undefined,
             });
-            (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result);
+            (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result, jobId);
             refreshActivatedProfileAfterBrain(scope.cwd);
             printRepositoryGraphIndexResult(scope.cwd, result, options.json);
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'brain_index_completed',
+                commandFamily: 'brain:repo-index',
+                reasonCode: 'brain_index.completed',
+            });
         }
         catch (error) {
-            (0, brain_lifecycle_1.markBrainFailed)(scope.cwd, error instanceof brain_1.RepositoryGraphLockedError ? 'index_locked' : 'index_failed');
+            if (jobId) {
+                (0, brain_lifecycle_1.markBrainFailed)(scope.cwd, error instanceof brain_1.RepositoryGraphLockedError ? 'index_locked' : 'index_failed', jobId);
+            }
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'brain_index_completed',
+                commandFamily: 'brain:repo-index',
+                reasonCode: error instanceof brain_1.RepositoryGraphLockedError ? 'brain_index.locked' : 'brain_index.failed',
+                success: false,
+            });
             repositoryGraphError(error, options.json);
         }
     });
@@ -766,18 +943,30 @@ function brainCommand(program) {
         .option('--json', 'Output stable machine-readable JSON')
         .action(async (options) => {
         const scope = getBrainScope();
+        let jobId;
         try {
+            const lifecycle = await (0, brain_lifecycle_1.beginBrainIndex)(scope.cwd, {
+                source: 'manual',
+                requestedLimits: {},
+            });
+            jobId = lifecycle.jobId ?? undefined;
             const result = await (0, brain_1.indexRepositoryGraph)({
                 repoRoot: scope.cwd,
                 changedPaths: splitChangedPathList(options.changed),
                 deletedPaths: splitChangedPathList(options.deleted),
                 renamedPaths: parseRenameList(options.rename),
+                onProgress: jobId
+                    ? (progress) => { (0, brain_lifecycle_1.recordBrainProgress)(scope.cwd, jobId, progress); }
+                    : undefined,
             });
-            (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result);
+            (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result, jobId);
             refreshActivatedProfileAfterBrain(scope.cwd);
             printRepositoryGraphIndexResult(scope.cwd, result, options.json);
         }
         catch (error) {
+            if (jobId) {
+                (0, brain_lifecycle_1.markBrainFailed)(scope.cwd, error instanceof brain_1.RepositoryGraphLockedError ? 'index_locked' : 'index_failed', jobId);
+            }
             repositoryGraphError(error, options.json);
         }
     });
@@ -789,21 +978,29 @@ function brainCommand(program) {
         const scope = getBrainScope();
         try {
             const freshness = await (0, brain_1.repositoryGraphStatus)(scope.cwd);
-            const graph = (0, brain_1.readRepositoryGraph)(scope.cwd);
+            const metadata = (0, brain_1.readRepositoryGraphMetadata)(scope.cwd);
+            const scaleStatus = (0, brain_scale_status_1.buildBrainScaleStatus)(scope.cwd, { liveFreshness: freshness });
             const payload = {
                 ok: freshness.state !== 'corrupt',
                 repoRoot: scope.cwd,
-                graphPath: (0, brain_1.repositoryGraphPath)(scope.cwd),
+                // Unified honest scale status (Scale V4 / D3a) — same builder as readiness.
+                scaleStatus,
+                graphPath: metadata?.storageFormat === 'atomic_json'
+                    ? (0, brain_1.legacyRepositoryGraphPath)(scope.cwd)
+                    : (0, brain_1.repositoryGraphPath)(scope.cwd),
                 freshness,
-                graph: graph ? {
-                    schemaVersion: graph.schemaVersion,
-                    graphId: graph.graphId,
-                    generation: graph.generation,
-                    updatedAt: graph.updatedAt,
-                    coverage: graph.coverage,
-                    nodeCount: graph.nodes.length,
-                    edgeCount: graph.edges.length,
-                    privacy: graph.privacy,
+                graph: metadata ? {
+                    schemaVersion: metadata.schemaVersion,
+                    graphId: metadata.graphId,
+                    generation: metadata.generation,
+                    updatedAt: metadata.updatedAt,
+                    coverage: metadata.coverage,
+                    nodeCount: metadata.nodeCount,
+                    edgeCount: metadata.edgeCount,
+                    graphBytes: metadata.graphBytes,
+                    storageFormat: metadata.storageFormat,
+                    coverageAuthority: metadata.coverageAuthority ?? null,
+                    limits: metadata.limits,
                 } : null,
             };
             if (options.json) {
@@ -816,11 +1013,12 @@ function brainCommand(program) {
             console.log(chalk.dim(`Stale files:       ${freshness.staleFileCount}`));
             console.log(chalk.dim(`Unsupported files: ${freshness.unsupportedFileCount}`));
             console.log(chalk.dim(`Reason codes:      ${freshness.reasonCodes.join(', ') || 'none'}`));
-            if (graph) {
-                console.log(chalk.dim(`Generation:        ${graph.generation}`));
-                console.log(chalk.dim(`Nodes / edges:     ${graph.nodes.length} / ${graph.edges.length}`));
-                console.log(chalk.dim(`Unsupported:       ${graph.coverage.unsupportedPercent}%`));
-                for (const language of graph.coverage.languages) {
+            if (metadata) {
+                console.log(chalk.dim(`Generation:        ${metadata.generation}`));
+                console.log(chalk.dim(`Nodes / edges:     ${metadata.nodeCount} / ${metadata.edgeCount}`));
+                console.log(chalk.dim(`Graph bytes:       ${metadata.graphBytes}`));
+                console.log(chalk.dim(`Unsupported:       ${metadata.coverage.unsupportedPercent}%`));
+                for (const language of metadata.coverage.languages) {
                     console.log(chalk.dim(`  ${language.language}: ${language.depth}; ${language.filesAnalyzed}/${language.filesSeen} analyzed`));
                 }
             }
@@ -845,7 +1043,9 @@ function brainCommand(program) {
         }
         console.log(chalk.bold('\n🧠 Repo Brain Lifecycle\n'));
         console.log(chalk.dim(`State:       ${lifecycle.state}`));
-        console.log(chalk.dim(`Progress:    ${lifecycle.progress.filesIndexed}/${lifecycle.progress.totalFiles ?? '?'} files${lifecycle.progress.percent === null ? '' : ` (${lifecycle.progress.percent}%)`}`));
+        console.log(chalk.dim(`Job:         ${lifecycle.jobId ?? 'none'} · ${lifecycle.source ?? 'not running'} · pid ${lifecycle.pid ?? 'none'}`));
+        console.log(chalk.dim(`Progress:    ${lifecycle.progress.filesIndexed}/${lifecycle.progress.totalFiles ?? '?'} files${lifecycle.progress.percent === null ? '' : ` (${lifecycle.progress.percent}%)`} · ${lifecycle.progress.bytesScanned} bytes · ${lifecycle.progress.nodes}/${lifecycle.progress.edges} nodes/edges`));
+        console.log(chalk.dim(`Elapsed/RSS: ${lifecycle.elapsedMs ?? 'n/a'} ms · ${lifecycle.peakRssMb ?? 'unavailable'} MB (${lifecycle.peakRssMeasurement})`));
         console.log(chalk.dim(`Freshness:   ${lifecycle.freshness?.state ?? 'not evaluated'}`));
         console.log(chalk.dim(`Unsupported: ${lifecycle.unsupportedFacts.join(', ') || 'none disclosed'}`));
         console.log(chalk.dim(`Retry:       ${lifecycle.recoveryCommands.retry}`));
@@ -857,9 +1057,9 @@ function brainCommand(program) {
         .command('cancel')
         .description('Cancel a scheduled or building Repo Brain index without deleting the last usable graph')
         .option('--json', 'Output stable source-free JSON')
-        .action((options) => {
+        .action(async (options) => {
         const scope = getBrainScope();
-        const lifecycle = (0, brain_lifecycle_1.cancelBrainIndex)(scope.cwd);
+        const lifecycle = await (0, brain_lifecycle_1.cancelBrainIndex)(scope.cwd);
         if (options.json)
             console.log(JSON.stringify({ ok: true, lifecycle }, null, 2));
         else
@@ -893,7 +1093,7 @@ function brainCommand(program) {
         const matches = (0, brain_1.explainRepositoryGraph)(graph, query, options.limit);
         const matchIds = new Set(matches.map((node) => node.id));
         const edges = graph.edges.filter((edge) => matchIds.has(edge.fromId) || matchIds.has(edge.toId));
-        const payload = { ok: true, query, matches, edges, freshness: graph.freshness };
+        const payload = { ok: true, query, matches, edges, freshness: graph.freshness, coverageAuthority: graph.coverageAuthority ?? null };
         if (options.json) {
             console.log(JSON.stringify(payload, null, 2));
             return;
@@ -945,7 +1145,13 @@ function brainCommand(program) {
             direction,
             limit: options.limit,
         });
-        const payload = { ok: true, query: options, ...result, freshness: graph.freshness };
+        const payload = {
+            ok: true,
+            query: options,
+            coverageAuthority: graph.coverageAuthority ?? null,
+            ...result,
+            freshness: graph.freshness,
+        };
         if (options.json) {
             console.log(JSON.stringify(payload, null, 2));
             return;
@@ -1289,7 +1495,8 @@ function brainCommand(program) {
             await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd });
         }
         const report = (0, repo_brain_impact_1.buildRepoBrainImpactForRepo)(scope.cwd, paths, { autoBuild: options.index !== false });
-        const summary = (0, repo_brain_impact_1.summarizeImpact)(report);
+        const graphProjection = (0, repo_graph_impact_1.computeGraphImpactProjection)({ repoRoot: scope.cwd, changedPaths: paths });
+        const summary = (0, repo_brain_impact_1.summarizeImpact)(report, graphProjection);
         const canonicalGraph = (0, brain_1.readRepositoryGraph)(scope.cwd);
         const canonicalFreshness = canonicalGraph ? await (0, brain_1.repositoryGraphStatus)(scope.cwd) : null;
         if (options.json) {
@@ -1305,7 +1512,9 @@ function brainCommand(program) {
                     schemaVersion: canonicalGraph.schemaVersion,
                     freshness: canonicalFreshness,
                     coverage: canonicalGraph.coverage,
+                    coverageAuthority: canonicalGraph.coverageAuthority ?? null,
                 } : null,
+                graphProjection,
                 report,
                 summary,
             }, null, 2));

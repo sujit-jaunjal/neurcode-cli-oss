@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.LOCAL_REPO_BRAIN_SCHEMA_VERSION = void 0;
 exports.localRepoBrainLanguageFor = localRepoBrainLanguageFor;
 exports.sensitiveKindsFor = sensitiveKindsFor;
+exports.resolvePythonModulePath = resolvePythonModulePath;
 exports.analyzeLocalProposedSource = analyzeLocalProposedSource;
 exports.localRepoBrainPath = localRepoBrainPath;
 exports.localRepoBrainMarkdownPath = localRepoBrainMarkdownPath;
@@ -289,10 +290,37 @@ function dedupeSymbols(symbols) {
     }
     return out;
 }
-function resolveRelativeImport(fromFile, target, fileSet) {
-    if (!target.startsWith('.'))
+function resolvePythonModulePath(modulePath, fileSet) {
+    const normalizedModule = modulePath.replace(/\./g, '/');
+    const directCandidates = [
+        `${normalizedModule}.py`,
+        `${normalizedModule}/__init__.py`,
+    ].map(normalizePath);
+    const directHit = directCandidates.find((candidate) => fileSet.has(candidate));
+    if (directHit)
+        return directHit;
+    const suffixes = [`/${normalizedModule}.py`, `/${normalizedModule}/__init__.py`];
+    const matches = [...fileSet].filter((candidate) => suffixes.some((suffix) => candidate.endsWith(suffix)));
+    if (matches.length === 0)
         return null;
-    const base = normalizePath((0, node_path_1.join)((0, node_path_1.dirname)(fromFile), target));
+    if (matches.length === 1)
+        return matches[0];
+    return matches.sort((left, right) => left.length - right.length || left.localeCompare(right))[0];
+}
+function resolveRelativeImport(fromFile, target, fileSet, language) {
+    if (!target.startsWith('.')) {
+        if (language === 'python') {
+            return resolvePythonModulePath(target, fileSet);
+        }
+        return null;
+    }
+    const dotCount = target.match(/^\.+/)?.[0].length ?? 0;
+    const remainder = target.slice(dotCount).replace(/^\./, '');
+    let baseDir = (0, node_path_1.dirname)(fromFile);
+    for (let step = 1; step < dotCount; step += 1) {
+        baseDir = (0, node_path_1.dirname)(baseDir);
+    }
+    const base = normalizePath((0, node_path_1.join)(baseDir, remainder.replace(/\./g, '/')));
     const candidates = [
         base,
         `${base}.ts`,
@@ -303,6 +331,7 @@ function resolveRelativeImport(fromFile, target, fileSet) {
         `${base}/index.ts`,
         `${base}/index.tsx`,
         `${base}/index.js`,
+        `${base}/__init__.py`,
     ].map(normalizePath);
     return candidates.find((candidate) => fileSet.has(candidate)) || null;
 }
@@ -315,7 +344,7 @@ function extractImports(filePath, source, language, fileSet) {
             fromFile: filePath,
             target,
             targetKind,
-            resolvedFile: resolveRelativeImport(filePath, target, fileSet),
+            resolvedFile: resolveRelativeImport(filePath, target, fileSet, language),
             line: lineNumberAt(source, index),
             language,
         });

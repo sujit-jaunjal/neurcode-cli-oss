@@ -2,11 +2,13 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.RUNTIME_LIVE_SESSION_SCHEMA_VERSION = exports.RUNTIME_CLOUD_SESSION_SCHEMA_VERSION = void 0;
 exports.buildRuntimeIntentSummary = buildRuntimeIntentSummary;
+exports.projectRepoIntelligenceForCloud = projectRepoIntelligenceForCloud;
 exports.buildCloudSafeRuntimeSession = buildCloudSafeRuntimeSession;
 exports.projectRuntimePayloadForCloud = projectRuntimePayloadForCloud;
 exports.runtimePrivacySchemaVersions = runtimePrivacySchemaVersions;
 exports.privacyReasonCodesFromError = privacyReasonCodesFromError;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
+const contracts_1 = require("@neurcode-ai/contracts");
 exports.RUNTIME_CLOUD_SESSION_SCHEMA_VERSION = 'neurcode.runtime-cloud-session.v1';
 exports.RUNTIME_LIVE_SESSION_SCHEMA_VERSION = 'neurcode.runtime-live-session.v3';
 function asRecord(value) {
@@ -134,6 +136,162 @@ function eventReasonCodes(event) {
         reasons.add(blockType);
     return Array.from(reasons).sort((left, right) => left.localeCompare(right)).slice(0, 12);
 }
+// Bounds for one session-level cloud repo-intelligence projection. One evidence object per
+// session (the latest) is node-cheap, so these caps exist for tidy payloads rather than to
+// fit the aggregate node budget.
+const MAX_CLOUD_FINDINGS = 25;
+const MAX_CLOUD_ADVISORY = 25;
+const MAX_CLOUD_RULE_IDS = 64;
+const MAX_CLOUD_SUMMARY_ITEMS = 100;
+const MAX_EVIDENCE_TEXT = 280;
+function boundedStringList(value, maxItems, maxLength = 160) {
+    if (!Array.isArray(value))
+        return [];
+    const out = [];
+    for (const item of value) {
+        const cleaned = stringValue(item, maxLength);
+        if (cleaned)
+            out.push(cleaned);
+        if (out.length >= maxItems)
+            break;
+    }
+    return out;
+}
+const ABSOLUTE_PATH_VALUE = /(?:^|[^A-Za-z0-9_-])(?:\/(?:Users|home|private|tmp|var|etc|root|Volumes|opt|usr|workspace|app)\/[^\s"'`)]+|[A-Za-z]:[\\/][^\s"'`)]+|\\\\[A-Za-z0-9._-]+[\\/][^\s"'`)]+)/;
+function hasAbsolutePathValue(value) {
+    if (typeof value === 'string')
+        return ABSOLUTE_PATH_VALUE.test(value.normalize('NFKC'));
+    if (Array.isArray(value))
+        return value.some((item) => hasAbsolutePathValue(item));
+    if (!value || typeof value !== 'object')
+        return false;
+    return Object.values(value).some((child) => hasAbsolutePathValue(child));
+}
+/**
+ * Project a local `RepoIntelligenceEvidence` object into a source-free, depth-bounded form
+ * safe to attach at the SESSION level of a cloud runtime payload. Returns null when the input
+ * is not valid evidence or the bounded projection would still fail the cloud privacy gate —
+ * in that case the session uploads WITHOUT repo-intelligence rather than failing the whole
+ * upload (fail-safe: omit, never leak, never block other evidence).
+ *
+ * Source-freeness is structural (the producer already emits no source). This projection
+ * additionally drops the deep `matchedFacts`/`related` arrays (depth 9+ even at session
+ * level, and they carry path/symbol labels) and bounds every array/string. `graph.summary`
+ * (languages, package/service names, counts) IS retained — it is depth-safe at session level
+ * and powers the dashboard's language-coverage and graph-posture panels.
+ */
+function projectRepoIntelligenceForCloud(value) {
+    if (!(0, contracts_1.isRepoIntelligenceEvidence)(value))
+        return null;
+    const evidence = value;
+    const graph = evidence.graph;
+    const freshness = graph.freshness;
+    const projected = {
+        schemaVersion: evidence.schemaVersion,
+        evidenceId: stringValue(evidence.evidenceId, 200) ?? evidence.evidenceId,
+        generatedAt: evidence.generatedAt,
+        classification: evidence.classification,
+        verdict: evidence.verdict,
+        enforcement: {
+            adapterId: stringValue(evidence.enforcement.adapterId, 120) ?? evidence.enforcement.adapterId,
+            capability: evidence.enforcement.capability,
+            timing: evidence.enforcement.timing,
+            decisionBinding: evidence.enforcement.decisionBinding,
+        },
+        graph: {
+            graphId: graph.graphId,
+            schemaVersion: graph.schemaVersion,
+            ...(graph.canonicalModel ? { canonicalModel: graph.canonicalModel } : {}),
+            storageSchemaVersion: graph.storageSchemaVersion ?? null,
+            freshness: {
+                state: freshness.state,
+                ...(freshness.posture ? { posture: freshness.posture } : {}),
+                indexedAt: freshness.indexedAt,
+                gitHead: freshness.gitHead,
+                workingTreeHash: freshness.workingTreeHash,
+                staleFileCount: freshness.staleFileCount,
+                unsupportedFileCount: freshness.unsupportedFileCount,
+                reasonCodes: boundedStringList(freshness.reasonCodes, 32, 128),
+            },
+            lastSuccessfulIndexAt: graph.lastSuccessfulIndexAt ?? null,
+            lastAttemptedIndexAt: graph.lastAttemptedIndexAt ?? null,
+            unsupportedPercent: graph.unsupportedPercent,
+            coverage: graph.coverage ?? null,
+            ...(graph.deterministicEvidenceEligible !== undefined
+                ? { deterministicEvidenceEligible: graph.deterministicEvidenceEligible } : {}),
+            ...(graph.deterministicEnforcementEligible !== undefined
+                ? { deterministicEnforcementEligible: graph.deterministicEnforcementEligible } : {}),
+            enforcementIneligibilityReasons: boundedStringList(graph.enforcementIneligibilityReasons, 64, 128),
+            ...(graph.recoveryCommand ? { recoveryCommand: graph.recoveryCommand } : {}),
+            ...(graph.runtimeCompatibility ? { runtimeCompatibility: graph.runtimeCompatibility } : {}),
+            ...(graph.summary ? {
+                summary: {
+                    languages: graph.summary.languages.slice(0, 64).map((language) => ({
+                        language: language.language,
+                        depth: language.depth,
+                        filesSeen: language.filesSeen,
+                        filesAnalyzed: language.filesAnalyzed,
+                        filesUnsupported: language.filesUnsupported,
+                    })),
+                    packages: boundedStringList(graph.summary.packages, MAX_CLOUD_SUMMARY_ITEMS, 200),
+                    services: boundedStringList(graph.summary.services, MAX_CLOUD_SUMMARY_ITEMS, 200),
+                    ownershipZoneCount: graph.summary.ownershipZoneCount,
+                    sensitiveSurfaceCount: graph.summary.sensitiveSurfaceCount,
+                },
+            } : {}),
+            // DROP graph.coverageAuthority and graph.relationshipAuthority (unbounded nested depth,
+            // not read by the cloud API or dashboard).
+        },
+        policy: {
+            evaluatedRuleIds: boundedStringList(evidence.policy.evaluatedRuleIds, MAX_CLOUD_RULE_IDS, 200),
+            notEvaluatedRuleIds: boundedStringList(evidence.policy.notEvaluatedRuleIds, MAX_CLOUD_RULE_IDS, 200),
+            findings: evidence.policy.findings.slice(0, MAX_CLOUD_FINDINGS).map((finding) => ({
+                findingId: stringValue(finding.findingId, 160) ?? finding.findingId,
+                ruleId: stringValue(finding.ruleId, 200) ?? finding.ruleId,
+                family: finding.family,
+                verdict: finding.verdict,
+                truth: finding.truth,
+                // matchedFacts carry repo-relative path + symbol labels and nest to depth 9 even at
+                // session level. Drop the contents; the rule id + explanation/remediation remain.
+                matchedFacts: [],
+                explanation: stringValue(finding.explanation, MAX_EVIDENCE_TEXT) ?? '',
+                remediation: stringValue(finding.remediation, MAX_EVIDENCE_TEXT) ?? '',
+            })),
+        },
+        advisory: evidence.advisory.slice(0, MAX_CLOUD_ADVISORY).map((finding) => ({
+            schemaVersion: finding.schemaVersion,
+            findingId: stringValue(finding.findingId, 160) ?? finding.findingId,
+            providerId: stringValue(finding.providerId, 120) ?? finding.providerId,
+            category: finding.category,
+            truth: finding.truth,
+            confidence: finding.confidence,
+            rationaleCategories: boundedStringList(finding.rationaleCategories, 16, 80),
+            // related[] carries path/symbol labels + extra depth; drop for the cloud projection.
+            related: [],
+            limitations: boundedStringList(finding.limitations, 16, 160),
+            suppressed: finding.suppressed,
+            cacheKey: stringValue(finding.cacheKey, 120) ?? finding.cacheKey,
+        })),
+        signature: {
+            trust: evidence.signature.trust,
+            receiptId: evidence.signature.receiptId,
+            recordHash: evidence.signature.recordHash,
+        },
+        privacy: (0, contracts_1.sourceFreePrivacyContract)(),
+    };
+    // The projection must independently satisfy the shape contract and the cloud privacy gate
+    // at the DEEPEST real nesting (`body.sessions[i].repoIntelligence`, the bulk evidence
+    // upload). If either fails, omit it so a single oversized evaluation never fail-closes the
+    // whole session upload.
+    if (!(0, contracts_1.isRepoIntelligenceEvidence)(projected))
+        return null;
+    const gate = (0, governance_runtime_1.validatePrivacySafeCloudPayload)({ sessions: [{ repoIntelligence: projected }] });
+    if (!gate.ok)
+        return null;
+    if (hasAbsolutePathValue(projected))
+        return null;
+    return projected;
+}
 function cloudSafeEvent(event) {
     const detail = asRecord(event.detail);
     const approvalContext = asRecord(detail?.approvalContext);
@@ -168,6 +326,24 @@ function cloudSafeEvent(event) {
     if (Object.keys(compactDetail).length > 0)
         result.detail = compactDetail;
     return result;
+}
+/**
+ * The most recent source-free repo-intelligence evidence produced during the session, as a
+ * bounded cloud projection. Attached at the SESSION level (not per-event) because the cloud
+ * privacy gate's depth budget (MAX_CLOUD_DEPTH) cannot accommodate a structured evidence
+ * object nested under `sessions[i].events[j].detail`. The cloud ingestion re-associates this
+ * with the latest governed check event so the per-event evidence query still resolves it.
+ */
+function latestCloudRepoIntelligence(session) {
+    for (let index = session.events.length - 1; index >= 0; index -= 1) {
+        const candidate = asRecord(asRecord(session.events[index].detail)?.repoIntelligence);
+        if (!candidate)
+            continue;
+        const projected = projectRepoIntelligenceForCloud(candidate);
+        if (projected)
+            return projected;
+    }
+    return null;
 }
 function architectureSummary(session) {
     const obligations = session.contract.architectureObligations ?? [];
@@ -231,6 +407,7 @@ function scopeAuthoritySummary(session) {
 }
 function buildCloudSafeRuntimeSession(session) {
     const events = session.events.slice(-80).map(cloudSafeEvent);
+    const repoIntelligence = latestCloudRepoIntelligence(session);
     const safe = {
         schemaVersion: session.schemaVersion,
         cloudSchemaVersion: exports.RUNTIME_CLOUD_SESSION_SCHEMA_VERSION,
@@ -258,6 +435,10 @@ function buildCloudSafeRuntimeSession(session) {
             ruleIds: Array.from(new Set(session.contract.architectureObligations?.map((item) => item.id).filter(Boolean) ?? [])).sort().slice(0, 64),
         },
         events,
+        // Source-free latest repo-intelligence evidence for this session, if any. Session-level
+        // placement keeps it within the cloud privacy depth budget; the cloud ingestion attaches
+        // it to the latest governed check event so the per-event evidence query resolves it.
+        ...(repoIntelligence ? { repoIntelligence } : {}),
         livePayload: {
             schemaVersion: exports.RUNTIME_LIVE_SESSION_SCHEMA_VERSION,
             compacted: true,

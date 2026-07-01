@@ -186,6 +186,7 @@ export interface RepoSymbolPolicyEvaluation {
 }
 export declare function localRepoBrainLanguageFor(filePath: string): LocalRepoBrainLanguage;
 export declare function sensitiveKindsFor(filePath: string): LocalRepoBrainSensitiveKind[];
+export declare function resolvePythonModulePath(modulePath: string, fileSet: Set<string>): string | null;
 export declare function analyzeLocalProposedSource(filePath: string, source: string): {
     language: LocalRepoBrainLanguage;
     symbols: LocalRepoBrainSymbolFact[];

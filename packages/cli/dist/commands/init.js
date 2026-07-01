@@ -51,6 +51,7 @@ const path_1 = require("path");
 const config_1 = require("../config");
 const api_client_1 = require("../api-client");
 const state_1 = require("../utils/state");
+const activation_telemetry_1 = require("../utils/activation-telemetry");
 const readline = __importStar(require("readline"));
 const messages_1 = require("../utils/messages");
 // Import chalk with fallback
@@ -141,6 +142,11 @@ function workspaceLabel(org) {
 }
 async function initCommand(options) {
     try {
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'repo_connect_started',
+            commandFamily: 'init',
+            reasonCode: 'repo_connect.started',
+        });
         let config = (0, config_1.loadConfig)();
         const requestedOrgId = options?.orgId?.trim();
         const requestedCreateName = options?.create?.trim() || undefined;
@@ -200,6 +206,11 @@ async function initCommand(options) {
                         `Workspace ID: ${existingOrgId}`,
                         `Project ID:   ${existingProjectId}`,
                     ]);
+                    (0, activation_telemetry_1.trackActivationEvent)({
+                        eventType: 'repo_connect_completed',
+                        commandFamily: 'init',
+                        reasonCode: 'repo_connect.already_connected',
+                    });
                     return;
                 }
                 else if (action === 'exit') {
@@ -398,8 +409,19 @@ async function initCommand(options) {
             'Run governed verification: neurcode verify --evidence',
             'Inspect continuity: neurcode home',
         ].join('\n   '));
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'repo_connect_completed',
+            commandFamily: 'init',
+            reasonCode: 'repo_connect.completed',
+        });
     }
     catch (error) {
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'repo_connect_completed',
+            commandFamily: 'init',
+            reasonCode: 'repo_connect.failed',
+            success: false,
+        });
         if (error instanceof Error) {
             if (error.message.includes('Authentication') || error.message.includes('401') || error.message.includes('403')) {
                 await (0, messages_1.printAuthError)(error);

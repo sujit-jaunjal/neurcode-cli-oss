@@ -149,6 +149,15 @@ function compactForBulkEvidence(value, path = 'session', limits = DEFAULT_BULK_C
     for (const [key, child] of Object.entries(value)) {
         if (SOURCE_LIKE_KEYS.has(key))
             continue;
+        if (key === 'repoIntelligence') {
+            // The cloud-safe projection (runtime-privacy.projectRepoIntelligenceForCloud) already
+            // bounds and source-free-validates this object. Generic compaction would corrupt its
+            // contract shape: the `graph` sub-object would be replaced with `graphOmitted: true`
+            // (BULK_EVIDENCE_OMIT_KEYS), and array truncation would prepend marker objects to
+            // findings/reasonCodes. Pass it through intact.
+            out[key] = child;
+            continue;
+        }
         if (BULK_EVIDENCE_OMIT_KEYS.has(key)) {
             out[`${key}Omitted`] = true;
             continue;

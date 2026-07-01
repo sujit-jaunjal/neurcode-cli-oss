@@ -1,4 +1,5 @@
 import { type AgentRuntimeAdapterId, type AgentRuntimeEnforcementLevel, type GovernanceSession } from '@neurcode-ai/governance-runtime';
+import { type RuntimeManifestStatus } from './atomic-runtime-bootstrap';
 export declare const AGENT_SESSION_LAUNCH_SCHEMA_VERSION: "neurcode.agent-session-launch.v1";
 export declare const AGENT_SESSION_HANDSHAKE_SCHEMA_VERSION: "neurcode.agent-session-handshake.v1";
 export type AgentSessionLauncherAgent = 'claude' | 'copilot' | 'codex' | 'cursor' | 'gemini' | 'generic-mcp' | 'vscode';
@@ -55,6 +56,17 @@ export interface AgentSessionLaunchResult {
         attempted: boolean;
         hooksInstalled?: boolean;
         mcpConfigured?: boolean;
+    };
+    bootstrap: {
+        attempted: boolean;
+        repaired: string[];
+        preserved: string[];
+        runtimeState: string;
+        manifestStatus: RuntimeManifestStatus;
+        sessionCreated: boolean;
+        recoveryCommand: string | null;
+        reasonCodes: string[];
+        manifestHash: string | null;
     };
     handshake: {
         status: AgentHandshakeStatus;

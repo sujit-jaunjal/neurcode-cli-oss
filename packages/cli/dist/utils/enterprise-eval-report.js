@@ -28,7 +28,7 @@
  * the dashboard mirrors (web/dashboard/src/lib/guidedEval.ts + evalDemoImport.ts).
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CORE_CHECKPOINT_IDS = exports.ENTERPRISE_EVAL_REPORT_SCHEMA_VERSION = exports.EVAL_DEMO_SUMMARY_SCHEMA_VERSION = void 0;
+exports.CORE_CHECKPOINT_IDS = exports.EMPTY_RUNTIME_SAFETY = exports.ENTERPRISE_EVAL_REPORT_SCHEMA_VERSION = exports.EVAL_DEMO_SUMMARY_SCHEMA_VERSION = void 0;
 exports.deriveVerdict = deriveVerdict;
 exports.buildEnterpriseEvalReport = buildEnterpriseEvalReport;
 exports.renderEnterpriseEvalReportMarkdown = renderEnterpriseEvalReportMarkdown;
@@ -37,6 +37,21 @@ exports.assertEnterpriseEvalSourceFree = assertEnterpriseEvalSourceFree;
 const guided_eval_1 = require("./guided-eval");
 exports.EVAL_DEMO_SUMMARY_SCHEMA_VERSION = 'neurcode.eval-demo-summary.v1';
 exports.ENTERPRISE_EVAL_REPORT_SCHEMA_VERSION = 'neurcode.enterprise-eval-report.v1';
+/** The honest default when no AI Change Record runtimeSafety block was read. */
+exports.EMPTY_RUNTIME_SAFETY = {
+    present: false,
+    schemaVersion: null,
+    policyId: null,
+    planMode: null,
+    sourceUploaded: false,
+    sensitiveSurfacesAttempted: [],
+    pathsBlocked: [],
+    pathsApproved: [],
+    planDriftDetected: false,
+    credentialBlocksLocal: 0,
+    dependencyChangesGoverned: 0,
+    verificationGapNoted: false,
+};
 /** The deterministic core loop that must hold for the demo to be meaningful. */
 exports.CORE_CHECKPOINT_IDS = [
     'safe_edit_allowed',
@@ -114,6 +129,10 @@ function buildEnterpriseEvalReport(facts, checkpoints) {
     if (facts.admissionBlockedCount != null && facts.admissionApprovedCount != null) {
         deterministicFacts.push(`Admission record counts: ${facts.admissionBlockedCount} blocked path(s), ${facts.admissionApprovedCount} exact approval(s).`);
     }
+    if (facts.runtimeSafety.present) {
+        const rs = facts.runtimeSafety;
+        deterministicFacts.push(`Runtime Safety Kernel evidence (from the AI Change Record, source uploaded: no): plan mode ${rs.planMode ?? 'not set (observe)'}; ${rs.sensitiveSurfacesAttempted.length} sensitive surface(s) attempted; ${rs.pathsBlocked.length} blocked, ${rs.pathsApproved.length} exact-approved; plan drift ${rs.planDriftDetected ? 'detected' : 'not detected'}.`);
+    }
     const advisoryFacts = [];
     if (facts.repoBrain.status === 'measured') {
         advisoryFacts.push(`Repo brain indexed ${facts.repoBrain.filesIndexed ?? 'n/a'} files; owner boundaries: ${facts.repoBrain.ownerBoundaries.map((b) => `${b.pattern} → ${b.owners.join('/')}`).join('; ') || 'none'}.`);
@@ -185,6 +204,7 @@ function buildEnterpriseEvalReport(facts, checkpoints) {
             neighborPath: facts.neighborPath,
             stayedBlocked: facts.neighborContained,
         },
+        runtimeSafety: facts.runtimeSafety,
         repoBrain: facts.repoBrain,
         impactIntelligence: facts.impactIntelligence,
         evidenceTrustPosture: {
@@ -285,6 +305,25 @@ function renderEnterpriseEvalReportMarkdown(report) {
     lines.push('');
     lines.push(`- Neighbor path: ${report.neighborContainment.neighborPath ?? 'none'}`);
     lines.push(`- Stayed blocked after approval: ${report.neighborContainment.stayedBlocked ? 'yes — approval did not widen scope' : 'no'}`);
+    lines.push('');
+    lines.push('## Runtime Safety Kernel evidence');
+    lines.push('');
+    const rs = report.runtimeSafety;
+    if (!rs.present) {
+        lines.push('- Not surfaced in this run (no AI Change Record runtimeSafety block was read).');
+    }
+    else {
+        lines.push('_Surfaced from the AI Change Record (`record.runtimeSafety`). Source-free: plan posture, paths, counts, and verdicts only — no source was uploaded._');
+        lines.push('');
+        lines.push(`- Plan mode: ${rs.planMode ?? 'not set (observe)'}`);
+        lines.push(`- Source uploaded: ${rs.sourceUploaded ? 'yes' : 'no'}`);
+        lines.push(`- Sensitive surfaces attempted: ${rs.sensitiveSurfacesAttempted.join(', ') || 'none'}`);
+        lines.push(`- Paths blocked: ${rs.pathsBlocked.join(', ') || 'none'}`);
+        lines.push(`- Paths exact-approved: ${rs.pathsApproved.join(', ') || 'none'}`);
+        lines.push(`- Plan drift detected: ${rs.planDriftDetected ? 'yes' : 'no'}`);
+        lines.push(`- Local credential blocks: ${rs.credentialBlocksLocal}`);
+        lines.push(`- Dependency changes governed: ${rs.dependencyChangesGoverned}`);
+    }
     lines.push('');
     lines.push('## Repo brain / reuse intelligence summary');
     lines.push('');
@@ -401,6 +440,7 @@ function buildEvalDemoSummary(facts, checkpoints) {
                 relativePath: facts.aiChangeRecordRelativePath,
             },
         },
+        runtimeSafety: facts.runtimeSafety,
         sourceFree: true,
         trustPosture: {
             backendReceiptConfigured: facts.backendReceipt.configured,

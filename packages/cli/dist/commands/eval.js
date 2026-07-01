@@ -21,7 +21,7 @@ const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const v0_governance_1 = require("../utils/v0-governance");
 const guided_eval_1 = require("../utils/guided-eval");
-const eval_demo_1 = require("../utils/eval-demo");
+const eval_demo_command_1 = require("../utils/eval-demo-command");
 let chalk;
 try {
     chalk = require('chalk');
@@ -253,31 +253,9 @@ function evalCommand(program) {
         .option('--preflight', 'Only run the buyer-friendly preflight checks, then stop')
         .option('--json', 'Output machine-readable JSON')
         .action((options) => {
-        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
-        const agent = (0, guided_eval_1.normalizeGuidedEvalAgent)(options.agent);
-        if (options.preflight) {
-            const preflight = (0, eval_demo_1.buildEvalDemoPreflight)(repoRoot, { agent });
-            if (options.json) {
-                console.log(JSON.stringify(preflight, null, 2));
-            }
-            else {
-                printPreflight(preflight);
-            }
-            process.exitCode = preflight.ok ? 0 : 1;
-            return;
-        }
-        const result = (0, eval_demo_1.runEvalDemo)({
-            repoRoot,
-            agent,
-            onStep: options.json ? undefined : (line) => console.log(chalk.dim(`  ${line}`)),
-        });
-        if (options.json) {
-            console.log(JSON.stringify(result, null, 2));
-            process.exitCode = result.ok ? 0 : 1;
-            return;
-        }
-        printDemoResult(result);
-        process.exitCode = result.ok ? 0 : 1;
+        // Delegates to the shared front-door body so `eval demo` and `pilot start`
+        // can never drift — same engine, same renderer, same exit code.
+        (0, eval_demo_command_1.runEvalDemoCommandAction)(options);
     });
     // ── doctor ───────────────────────────────────────────────────────────────────
     evalCmd
@@ -287,80 +265,8 @@ function evalCommand(program) {
         .option('--agent <id>', 'Agent posture for the report', 'claude')
         .option('--json', 'Output machine-readable JSON')
         .action((options) => {
-        const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
-        const agent = (0, guided_eval_1.normalizeGuidedEvalAgent)(options.agent);
-        const preflight = (0, eval_demo_1.buildEvalDemoPreflight)(repoRoot, { agent });
-        if (options.json) {
-            console.log(JSON.stringify(preflight, null, 2));
-        }
-        else {
-            printPreflight(preflight);
-        }
-        process.exitCode = preflight.ok ? 0 : 1;
+        // `eval doctor` is the preflight-only view of the shared front-door body.
+        (0, eval_demo_command_1.runEvalDemoCommandAction)({ ...options, preflight: true });
     });
-}
-// ── demo / doctor rendering ─────────────────────────────────────────────────────
-const PREFLIGHT_GLYPH = {
-    ok: (s) => chalk.green(s),
-    warn: (s) => chalk.yellow(s),
-    info: (s) => chalk.dim(s),
-};
-const PREFLIGHT_MARK = { ok: '✓', warn: '!', info: '·' };
-function printPreflight(preflight) {
-    console.log('');
-    console.log(chalk.bold('Neurcode evaluation preflight'));
-    console.log(chalk.dim(`  agent ${preflight.agent} · ${preflight.ok ? 'ready' : 'needs attention'}`));
-    console.log('');
-    for (const check of preflight.checks) {
-        const mark = PREFLIGHT_GLYPH[check.status](PREFLIGHT_MARK[check.status]);
-        console.log(`  ${mark} ${chalk.bold(check.label)}: ${check.detail}`);
-        if (check.recovery)
-            console.log(chalk.dim(`      → ${check.recovery}`));
-    }
-    console.log('');
-    console.log(preflight.backendSigningConfigured
-        ? chalk.dim('  Evidence will be backend-signed where a receipt verifies.')
-        : chalk.dim('  Evidence will be a self-attested local record (honest default).'));
-    console.log(chalk.cyan('  Next: neurcode eval demo --fixture --agent ' + preflight.agent));
-    console.log('');
-}
-const DEMO_TONE = {
-    pass: (s) => chalk.green(s),
-    fail: (s) => chalk.red(s),
-    advisory: (s) => chalk.yellow(s),
-    skipped: (s) => chalk.dim(s),
-};
-const DEMO_MARK = { pass: '✓', fail: '✗', advisory: '~', skipped: '–' };
-function printDemoResult(result) {
-    const { report, summary } = result;
-    console.log('');
-    console.log(chalk.bold('Enterprise Self-Serve Evaluation — demo complete'));
-    console.log(chalk.dim(`  agent ${result.agent} · ${report.enforcementLabel}`));
-    console.log('');
-    for (const c of result.checkpoints) {
-        const mark = DEMO_TONE[c.status](DEMO_MARK[c.status]);
-        const title = c.status === 'pass' ? chalk.green(c.title) : c.status === 'fail' ? chalk.red(c.title) : c.title;
-        console.log(`  ${mark} ${title} ${chalk.dim('— ' + c.observed)}`);
-    }
-    console.log('');
-    console.log(result.ok
-        ? chalk.green(`  Core governance loop held (${report.result.passed}/${report.result.total} checkpoints).`)
-        : chalk.red(`  ${report.result.criticalFailures} critical checkpoint(s) failed — see the report.`));
-    console.log('');
-    console.log(chalk.bold('  Evidence trust posture:'));
-    console.log(chalk.dim(`    ${summary.trustPosture.label}`));
-    console.log('');
-    console.log(chalk.bold('  Readiness:'));
-    console.log(chalk.dim(`    Founder demo: ${summary.verdict.founderDemo}`));
-    console.log(chalk.dim(`    Design-partner pilot: ${summary.verdict.designPartnerPilot}`));
-    console.log(chalk.dim(`    Serious enterprise pilot: ${summary.verdict.seriousEnterprisePilot}`));
-    console.log('');
-    console.log(chalk.bold('  Artifacts (source-free, gitignored):'));
-    console.log(`    Report:  ${chalk.cyan(result.artifacts.reportMarkdownPath)}`);
-    console.log(`    Summary: ${chalk.cyan(result.artifacts.summaryJsonPath)}`);
-    console.log('');
-    console.log(chalk.dim('  Paste the summary JSON into the dashboard Enterprise Evaluation page to render it.'));
-    console.log(chalk.cyan(`  Next: ${summary.recommendedNextCommand}`));
-    console.log('');
 }
 //# sourceMappingURL=eval.js.map

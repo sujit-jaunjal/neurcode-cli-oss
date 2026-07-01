@@ -575,10 +575,18 @@ const PATH_FIELD_KINDS = new Map([
     ['expectedfiles', 'exact'],
     ['approvedpaths', 'exact'],
     ['addedfiles', 'exact'],
-    ['nearbytests', 'exact'],
+    // `likelyTests` / `nearbyTests` are AUTOMATICALLY INFERRED test surfaces and are
+    // legitimately glob-shaped (e.g. `tests/**`). The runtime producer
+    // (session deriveIntentContract → scopeAuthority.likelyTests = supportPathGlobs) and
+    // the cloud-safe projection (cli runtime-privacy safePaths, which allows globs) both
+    // emit globs here. Classifying these as `exact` made the validator reject the
+    // runtime's own inferred test globs as `unsafe_path`, fail-closing the entire session
+    // (Apache Airflow dogfood P0-B). They are path PATTERNS, strictly less specific than
+    // an exact path, so `mixed` is privacy-equivalent and internally consistent.
+    ['nearbytests', 'mixed'],
     ['targetpaths', 'exact'],
     ['reviewfirst', 'exact'],
-    ['likelytests', 'exact'],
+    ['likelytests', 'mixed'],
     ['matchedpaths', 'exact'],
     ['requestedpaths', 'exact'],
     ['paths', 'mixed'],

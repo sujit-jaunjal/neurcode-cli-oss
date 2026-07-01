@@ -92,8 +92,14 @@ export interface ArchitectureObligationSummary {
     pending: number;
     satisfied: number;
     waived: number;
+    /** All pending obligations with severity=critical, regardless of effectiveMode. */
     criticalPending: number;
+    /** Pending obligations with effectiveMode=block (will halt the task). */
     blockingPending: number;
+    /** Pending obligations with severity=critical AND effectiveMode=warn (advisory only). */
+    criticalAdvisoryPending: number;
+    /** Pending obligations with severity!=critical AND effectiveMode=warn (non-critical advisory). */
+    otherAdvisoryPending: number;
 }
 export interface ArchitectureObligationFeedback {
     action: 'none' | 'warn' | 'block';

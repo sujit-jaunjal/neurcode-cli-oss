@@ -234,7 +234,30 @@ function addRelationship(relationships, input) {
         evidenceType: input.evidenceType,
         confidence: input.confidence,
         sourceHash: stableHash(input.source),
+        ...(input.sourceLanguage ? { sourceLanguage: input.sourceLanguage } : {}),
+        ...(input.parserId ? { parserId: input.parserId } : {}),
+        ...(input.parserDepth ? { parserDepth: input.parserDepth } : {}),
+        ...(input.inferredFromNaming != null ? { inferredFromNaming: input.inferredFromNaming } : {}),
+        ...(input.directEvidence != null ? { directEvidence: input.directEvidence } : {}),
+        ...(input.relationshipProvenance ? { relationshipProvenance: input.relationshipProvenance } : {}),
     });
+}
+function repositoryLanguageKeyForPath(pathValue) {
+    const extension = (0, node_path_1.extname)(pathValue).toLowerCase();
+    if (['.py', '.pyi'].includes(extension))
+        return 'python';
+    if (['.ts', '.tsx', '.mts', '.cts'].includes(extension))
+        return 'typescript';
+    if (['.js', '.jsx', '.mjs', '.cjs'].includes(extension))
+        return 'javascript';
+    return 'unknown';
+}
+function repositoryLanguageForTopologyRoot(paths, root) {
+    const prefix = root === '.' ? '' : `${root}/`;
+    const sample = paths.find((pathValue) => ((root === '.' || pathValue.startsWith(prefix))
+        && (0, node_path_1.extname)(pathValue).length > 0
+        && !isDeterministicTestFile(pathValue)));
+    return sample ? repositoryLanguageKeyForPath(sample) : 'unknown';
 }
 function compileRepositoryTopology(input) {
     const compiledAt = input.compiledAt ?? new Date().toISOString();
@@ -408,12 +431,19 @@ function compileRepositoryTopology(input) {
             return (0, node_path_1.basename)(pathValue, (0, node_path_1.extname)(pathValue)).toLowerCase() === testStem.toLowerCase();
         });
         for (const sourcePath of candidates) {
+            const sourceLanguage = repositoryLanguageKeyForPath(sourcePath);
             addRelationship(relationships, {
                 kind: 'source-to-test',
                 from: sourcePath,
                 to: testPath,
                 evidenceType: 'test-adjacency',
                 confidence: 'high',
+                sourceLanguage,
+                parserId: 'repository-topology',
+                parserDepth: 'metadata_only',
+                inferredFromNaming: sourceLanguage === 'python',
+                directEvidence: sourceLanguage === 'typescript' || sourceLanguage === 'javascript',
+                relationshipProvenance: 'filename-stem-adjacency',
                 source: { sourcePath, testPath },
             });
         }
@@ -427,6 +457,12 @@ function compileRepositoryTopology(input) {
                 to: testFact.path,
                 evidenceType: 'test-adjacency',
                 confidence: testFact.evidence.authority === 'deterministic' ? 'medium' : 'low',
+                sourceLanguage: repositoryLanguageForTopologyRoot(paths, sourceFact.path),
+                parserId: 'repository-topology',
+                parserDepth: 'metadata_only',
+                inferredFromNaming: true,
+                directEvidence: false,
+                relationshipProvenance: 'package-test-root-adjacency',
                 source: { sourceRoot: sourceFact.path, testRoot: testFact.path },
             });
         }
@@ -594,6 +630,12 @@ function compileRepositoryTopology(input) {
             to: normalizePath(brainFact.relatedPath),
             evidenceType: 'brain-graph',
             confidence: input.brain?.freshness === 'fresh' ? 'high' : 'medium',
+            sourceLanguage: repositoryLanguageKeyForPath(brainFact.path),
+            parserId: 'brain-graph',
+            parserDepth: 'metadata_only',
+            inferredFromNaming: brainFact.kind !== 'test',
+            directEvidence: brainFact.kind === 'test' && input.brain?.freshness === 'fresh',
+            relationshipProvenance: 'brain-graph',
             source: brainFact,
         });
     }

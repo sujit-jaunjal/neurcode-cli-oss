@@ -6,6 +6,8 @@ interface OpsStatusOptions {
     timeoutMs?: string | number;
     strict?: boolean;
     json?: boolean;
+    /** Operator-declared expected commit (e.g. git-on-disk HEAD). 7-char prefix compare. */
+    expectCommit?: string;
 }
 interface ProbeResult {
     ok: boolean;
@@ -16,6 +18,28 @@ interface ProbeResult {
     error: string | null;
     body?: any;
 }
+export type ReleaseConsistencyStatus = 'consistent' | 'drift' | 'unknown';
+export interface ReleaseConsistencyResult {
+    status: ReleaseConsistencyStatus;
+    comparedSurfaces: string[];
+    mismatchedSurfaces: string[];
+    referenceCommit: string | null;
+    expectedCommit: string | null;
+    note: string;
+}
+/**
+ * Pure, source-free cross-service release commit consistency check.
+ *
+ * Mirror of services/api/src/utils/ops-status.ts:evaluateReleaseConsistency.
+ * The gate (production-reliability-operator-console-v1) asserts the two
+ * implementations agree on shared test vectors so they cannot drift apart.
+ */
+export declare function evaluateReleaseConsistency(input: {
+    api?: string | null;
+    dashboard?: string | null;
+    worker?: string | null;
+    expected?: string | null;
+}): ReleaseConsistencyResult;
 export type OpsCliVersionStatus = 'update_available' | 'current' | 'local_newer' | 'unknown';
 export declare function compareOpsCliVersions(localVersion: string | null | undefined, registryVersion: string | null | undefined): OpsCliVersionStatus;
 export declare function buildOpsStatus(options?: OpsStatusOptions): Promise<{
@@ -95,12 +119,26 @@ export declare function buildOpsStatus(options?: OpsStatusOptions): Promise<{
     release: any;
     migrationLedger: any;
     action: any;
+    releaseConsistency: ReleaseConsistencyResult;
+    expectedCommit: string | null;
+    worker: {
+        present: boolean;
+        processRole: string | null;
+        commit: string | null;
+        buildId: string | null;
+        lastSeenAt: string | null;
+        stale: boolean | null;
+        note: string;
+    } | null;
+    databaseTls: any;
+    fatal: any;
     posture: {
         api: "pass" | "fail";
         dashboard: "pass" | "fail";
         runtimeBackend: any;
         npm: "warn" | "pass";
         receiptSigning: string;
+        releaseConsistency: ReleaseConsistencyStatus;
     };
     privacy: {
         sourceUploaded: boolean;

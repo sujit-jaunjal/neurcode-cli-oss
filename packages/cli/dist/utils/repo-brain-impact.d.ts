@@ -98,6 +98,14 @@ export interface ImpactReviewQuestion {
     question: string;
     rationale: string;
 }
+export interface ImpactTestsEvaluation {
+    status: 'measured' | 'not_evaluated';
+    reasonCode: string;
+    parserId: string | null;
+    parserDepth: string | null;
+    coverageStatus: string;
+    manualDiscoveryRecommendation: string | null;
+}
 export interface ImpactRadius {
     riskLevel: 'low' | 'medium' | 'high';
     reasons: string[];
@@ -116,6 +124,7 @@ export interface ImpactRadius {
     advisory: {
         likelyTests: string[];
         whyThisMatters: string;
+        testsEvaluation: ImpactTestsEvaluation;
     };
 }
 export interface RepoBrainImpactReport {
@@ -235,6 +244,7 @@ export interface ImpactSummary {
             semanticEquivalenceClaimed: false;
         }>;
         nearbyTests: string[];
+        testsEvaluation: ImpactTestsEvaluation;
     };
     impactRadius: ImpactRadius;
     reviewRouting: {
@@ -269,7 +279,7 @@ export declare function classifyImpactFileRole(path: string, opts?: {
  */
 export declare function matchesCodeownersPattern(filePath: string, pattern: string): boolean;
 export declare function computeRepoBrainImpact(artifact: LocalRepoBrainArtifact | null, requestedPaths: string[], options?: ComputeRepoBrainImpactOptions): RepoBrainImpactReport;
-export declare function summarizeImpact(report: RepoBrainImpactReport): ImpactSummary;
+export declare function summarizeImpact(report: RepoBrainImpactReport, graphProjection?: import('./repo-graph-impact').GraphImpactProjection | null): ImpactSummary;
 export interface BuildRepoBrainImpactOptions extends ComputeRepoBrainImpactOptions {
     /** Build the brain when no artifact exists yet (default true). */
     autoBuild?: boolean;

@@ -8,12 +8,13 @@
  * - neurcode session end     - End the current or specified session
  * - neurcode session status  - Show status of current session
  */
-import { type AgentPlan, type AgentPlanAmendmentProposal, type AIChangeRecord, type AgentInvocationSummary, type AgentGuardPostureSummary, type ArchitectureObligation, type GovernanceSession, type SessionCompletionStatus, type SessionEvent } from '@neurcode-ai/governance-runtime';
+import { type AgentPlan, type AgentPlanAmendmentProposal, type AIChangeRecord, type AgentInvocationSummary, type AgentGuardPostureSummary, type ArchitectureObligation, type GovernanceSession, type PlanControlMode, type SessionCompletionStatus, type SessionEvent, type RuntimeStateAssessment } from '@neurcode-ai/governance-runtime';
 import { type DiffFile } from '@neurcode-ai/diff-parser';
 import { type ProfileFreshnessSignal } from '../utils/v0-governance';
 import { type RuntimeConnection } from '../utils/runtime-connection';
 import { type ImpactSummary } from '../utils/repo-brain-impact';
 import { type AgentGuardSupervisorInspection } from '../utils/agent-guard-supervisor';
+export { deriveLocalOperatorIdentity } from '../utils/operator-identity';
 interface SessionCommandOptions {
     sessionId?: string;
     projectId?: string;
@@ -54,6 +55,8 @@ interface SessionCommandOptions {
     proposalId?: string;
     decision?: 'accept' | 'reject';
     decidedBy?: string;
+    /** Identity recording a plan freeze/unfreeze. */
+    by?: string;
     force?: boolean;
     completionStatus?: SessionCompletionStatus;
     maxAgeMinutes?: number;
@@ -70,6 +73,7 @@ interface MissingLocalGovernanceStatus {
     active: false;
     message: string;
     connection: RuntimeConnection | null;
+    runtimeState: RuntimeStateAssessment;
 }
 interface PresentLocalGovernanceStatus {
     ok: true;
@@ -82,6 +86,12 @@ interface PresentLocalGovernanceStatus {
     profileFreshness: ProfileFreshnessSignal;
     scopeMode: GovernanceSession['contract']['scopeMode'];
     planCoherenceMode: NonNullable<GovernanceSession['contract']['planCoherenceMode']>;
+    /** Runtime-safety plan control mode (observe / advise / enforce_after_freeze). */
+    planMode: PlanControlMode;
+    /** Whether the plan is currently in the frozen (implementation) phase. */
+    planFrozen: boolean;
+    /** Resolved runtime-safety phase used by the pre-write guard. */
+    planPhase: 'planning' | 'implementation';
     agentPlan: AgentPlan | null;
     agentPlanRevision: number | null;
     pendingPlanAmendments: AgentPlanAmendmentProposal[];
@@ -103,6 +113,7 @@ interface PresentLocalGovernanceStatus {
     } | null;
     recordPath: string;
     connection: RuntimeConnection | null;
+    runtimeState: RuntimeStateAssessment;
 }
 type LocalGovernanceStatus = MissingLocalGovernanceStatus | PresentLocalGovernanceStatus;
 type UnderstandingDiffFile = DiffFile & {
@@ -114,6 +125,14 @@ export declare function localGovernanceStatusCommand(options?: SessionCommandOpt
 export declare function resetStaleGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function replanGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function decideGovernanceReplanCommand(options?: SessionCommandOptions): Promise<void>;
+/** `neurcode session plan` — view the active plan, its mode, and freeze state. */
+export declare function viewPlanCommand(options?: SessionCommandOptions): void;
+/** `neurcode session plan mode` — show + explain the active plan control mode. */
+export declare function showPlanModeCommand(options?: SessionCommandOptions): void;
+/** `neurcode session plan freeze` — freeze the active plan. */
+export declare function freezePlanCommand(options?: SessionCommandOptions): Promise<void>;
+/** `neurcode session plan unfreeze` — reopen the active plan for planning. */
+export declare function unfreezePlanCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function approveGovernanceSessionCommand(options?: SessionCommandOptions): Promise<void>;
 export declare function showGovernanceObligationsCommand(options?: SessionCommandOptions): void;
 export declare function waiveGovernanceObligationCommand(options?: SessionCommandOptions): Promise<void>;
@@ -189,5 +208,4 @@ export declare function listLocalSessionsCommand(options?: SessionCommandOptions
 export declare function currentLocalSessionCommand(options?: SessionCommandOptions): void;
 export declare function resumeLocalSessionCommand(options?: SessionCommandOptions): void;
 export declare function compareLocalSessionsCommand(options?: SessionCommandOptions): void;
-export {};
 //# sourceMappingURL=session.d.ts.map

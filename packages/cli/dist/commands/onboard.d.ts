@@ -24,6 +24,25 @@ export interface OnboardWalkthrough {
     dashboardUrl: string;
 }
 export declare function resolveOnboardAgent(value: string | undefined): OnboardAgent;
+/** The coding environment the next-step guidance is tailored toward. */
+export interface OnboardEnvironment {
+    /** Agent to tailor commands toward; 'terminal' means a generic shell. */
+    target: OnboardAgent | 'terminal';
+    /** Human-readable environment label (e.g. "Claude Code", "generic terminal"). */
+    label: string;
+    /** activated = read from the local runtime manifest; detected = host env signal; default = generic fallback. */
+    source: 'activated' | 'detected' | 'default';
+}
+/**
+ * Detect which coding environment the user is in so the next step is exact.
+ *
+ * Order of trust: (1) an agent already activated in this repo's runtime
+ * manifest, (2) host environment signals, (3) a generic-terminal default. We
+ * read only coarse host markers — never command args, source, or paths.
+ */
+export declare function detectOnboardEnvironment(repoRoot: string, env?: NodeJS.ProcessEnv): OnboardEnvironment;
+/** The exact, copy-pasteable agent setup command for an environment. */
+export declare function agentSetupCommandFor(target: OnboardAgent | 'terminal'): string;
 export declare function buildOnboardWalkthrough(agent: OnboardAgent): OnboardWalkthrough;
 export declare function onboardCommand(program: Command): void;
 //# sourceMappingURL=onboard.d.ts.map

@@ -16,6 +16,7 @@ const node_path_1 = require("node:path");
 const contracts_1 = require("@neurcode-ai/contracts");
 const architecture_obligations_1 = require("./architecture-obligations");
 const intent_privacy_1 = require("./intent-privacy");
+const runtime_safety_kernel_1 = require("./runtime-safety-kernel");
 exports.AI_CHANGE_RECORD_SCHEMA_VERSION = 'neurcode.governed-session-record.v1';
 exports.AI_CHANGE_RECORD_TYPE = 'ai-change-accountability-record';
 exports.AI_CHANGE_RECORD_RECEIPT_SCHEMA_VERSION = 'neurcode.ai-change-record-receipt.v1';
@@ -446,6 +447,7 @@ function approvalEntries(grants, nowIso) {
                 expiresAt: grant.expiresAt ?? null,
                 revokedAt: grant.revokedAt ?? null,
                 approvedBy: grant.approvedBy ?? null,
+                assurance: grant.assurance ?? null,
                 reason: 'approval_recorded',
                 requestId: grant.requestId ?? null,
             }];
@@ -690,6 +692,62 @@ function latestStructuralUnderstanding(events) {
             : null,
         planAlignment: detail.planAlignment ?? null,
         boundaryImpact: Array.isArray(detail.boundaryImpact) ? detail.boundaryImpact : [],
+    };
+}
+function buildRuntimeSafetyFromEvents(session) {
+    const sensitiveSurfacesAttempted = new Set();
+    const pathsBlocked = new Set();
+    const classifications = [];
+    let dependencyChangesGoverned = 0;
+    let credentialBlocksLocal = 0;
+    let planDriftDetected = false;
+    let verificationGapNoted = false;
+    let policyId = session.contract.runtimeSafetyPolicyId ?? null;
+    let planMode = session.contract.planMode ?? null;
+    for (const event of session.events) {
+        if (!event.filePath)
+            continue;
+        const detail = asRecord(event.detail);
+        const runtimeSafety = asRecord(detail?.runtimeSafety);
+        if (!runtimeSafety)
+            continue;
+        policyId = asString(runtimeSafety.policyId) ?? policyId;
+        const families = asStringArray(runtimeSafety.families);
+        const reasonCodes = asStringArray(runtimeSafety.reasonCodes);
+        if (families.length > 0 && families[0] !== 'runtime_scope') {
+            sensitiveSurfacesAttempted.add(event.filePath);
+        }
+        if (event.type === 'check_block')
+            pathsBlocked.add(event.filePath);
+        if (asBoolean(runtimeSafety.credentialDetected))
+            credentialBlocksLocal += 1;
+        const depKinds = asStringArray(runtimeSafety.dependencyChangeKinds);
+        if (depKinds.length > 0)
+            dependencyChangesGoverned += 1;
+        if (families.includes('plan_drift'))
+            planDriftDetected = true;
+        if (families.includes('test_or_verification_gap'))
+            verificationGapNoted = true;
+        classifications.push({
+            filePath: event.filePath,
+            families,
+            reasonCodes,
+            verdict: event.type === 'check_block' ? 'block' : event.type === 'check_warn' ? 'warn' : 'ok',
+        });
+    }
+    return {
+        schemaVersion: runtime_safety_kernel_1.RUNTIME_SAFETY_KERNEL_SCHEMA_VERSION,
+        policyId,
+        planMode,
+        sourceUploaded: false,
+        sensitiveSurfacesAttempted: [...sensitiveSurfacesAttempted].sort(),
+        pathsBlocked: [...pathsBlocked].sort(),
+        pathsApproved: safeRepoTargets(session.contract.approvedPaths, 'exact'),
+        dependencyChangesGoverned,
+        credentialBlocksLocal,
+        planDriftDetected,
+        verificationGapNoted,
+        classifications: classifications.slice(0, 100),
     };
 }
 function latestRepoSymbolPolicy(events) {
@@ -1286,6 +1344,7 @@ function buildAIChangeRecord(session, options = {}) {
         repoIntelligence: {
             latest: latestRepoIntelligence(session.events),
         },
+        runtimeSafety: buildRuntimeSafetyFromEvents(session),
         integrity: {
             replayHash: session.replayHash ?? null,
             replayHashStatus: session.replayHash ? 'present' : 'pending-session-finish',
@@ -1308,6 +1367,7 @@ function buildAIChangeRecord(session, options = {}) {
                 'architecture obligations',
                 'local structural understanding',
                 'repo symbol duplicate policy evaluation',
+                'runtime safety kernel classifications',
                 ...(latestRepoIntelligence(session.events)?.classification === 'deterministic'
                     ? ['repository intelligence v2 deterministic policy evaluation']
                     : []),

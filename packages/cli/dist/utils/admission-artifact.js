@@ -273,6 +273,12 @@ function buildRuntimeAdmissionContext(input) {
     const owners = ownerCounts(events);
     const replayHash = session.replayHash || null;
     const trustLevel = 'self_attested';
+    const assuranceLevels = {};
+    for (const grant of session.contract.approvalGrants ?? []) {
+        const level = grant.assurance || 'unknown';
+        assuranceLevels[level] = (assuranceLevels[level] ?? 0) + 1;
+    }
+    const dominantAssurance = Object.entries(assuranceLevels).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
     return {
         schemaVersion: 'neurcode.runtime-admission-context.v1',
         trustLevel,
@@ -322,6 +328,10 @@ function buildRuntimeAdmissionContext(input) {
             coverageSetHash: manifest.coverageSetHash,
             evidenceIntegrityStatus: 'local_self_attested',
             receipt: buildReceiptSummary(trustLevel),
+        },
+        approvalAssurance: {
+            dominant: dominantAssurance,
+            levels: assuranceLevels,
         },
     };
 }

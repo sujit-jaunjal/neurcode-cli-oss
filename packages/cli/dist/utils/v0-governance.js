@@ -359,6 +359,7 @@ function readTopologyBrainFacts(repoRoot) {
     if (!graph)
         return null;
     const facts = [];
+    const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
     for (const node of graph.nodes) {
         if (!node.path)
             continue;
@@ -371,8 +372,8 @@ function readTopologyBrainFacts(repoRoot) {
         }
     }
     for (const edge of graph.edges) {
-        const from = graph.nodes.find((node) => node.id === edge.fromId);
-        const to = graph.nodes.find((node) => node.id === edge.toId);
+        const from = nodesById.get(edge.fromId);
+        const to = nodesById.get(edge.toId);
         if (!from?.path || !to?.path)
             continue;
         const kind = edge.type === 'imports'
@@ -498,6 +499,30 @@ function normalizeRepoSymbolDuplicateMode(value, errors) {
     errors.push('repoSymbolDuplicateMode must be one of: off, warn, block');
     return 'warn';
 }
+function normalizePlanMode(value, errors) {
+    if (value === undefined || value === null || value === '')
+        return undefined;
+    if (value === 'observe' || value === 'advise' || value === 'enforce_after_freeze')
+        return value;
+    errors.push('planMode must be one of: observe, advise, enforce_after_freeze');
+    return undefined;
+}
+// Parse and fail-closed-validate the optional runtimeSafetyPolicy block. Returns
+// the SAFE, fully-validated policy (credentialWrites is always 'block'); any
+// weakening or malformed value is recorded in `errors` so callers (e.g.
+// `neurcode governance validate`) can reject, while the built profile still uses
+// the safe coerced policy — closing the previous silent drop / silent-weaken gap.
+function normalizeRuntimeSafetyPolicy(value, errors) {
+    if (value === undefined)
+        return undefined;
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+        errors.push('runtimeSafetyPolicy must be an object');
+        return undefined;
+    }
+    const { policy, errors: policyErrors } = (0, governance_runtime_1.validateRuntimeSafetyPolicyProfile)(value);
+    errors.push(...policyErrors);
+    return policy;
+}
 function governanceConfigPath(repoRoot) {
     return (0, path_1.join)(repoRoot, '.neurcode', 'governance.json');
 }
@@ -523,15 +548,18 @@ function readRuntimeGovernanceConfig(repoRoot) {
         };
     }
     const errors = [];
+    const runtimeSafetyPolicy = normalizeRuntimeSafetyPolicy(parsed.runtimeSafetyPolicy, errors);
     const config = {
         approvalRequiredGlobs: normalizeStringArray(parsed.approvalRequiredGlobs, 'approvalRequiredGlobs', errors),
         sensitiveGlobs: normalizeStringArray(parsed.sensitiveGlobs, 'sensitiveGlobs', errors),
         safeSupportGlobs: normalizeStringArray(parsed.safeSupportGlobs, 'safeSupportGlobs', errors),
         ignoredGlobs: normalizeStringArray(parsed.ignoredGlobs, 'ignoredGlobs', errors),
         planCoherence: normalizePlanCoherence(parsed.planCoherence, errors),
+        planMode: normalizePlanMode(parsed.planMode, errors),
         localMode: normalizeLocalMode(parsed.localMode, errors),
         repoSymbolDuplicateMode: normalizeRepoSymbolDuplicateMode(parsed.repoSymbolDuplicateMode, errors),
         architectureObligations: (0, governance_runtime_1.normalizeArchitectureObligationPolicy)(parsed.architectureObligations),
+        ...(runtimeSafetyPolicy ? { runtimeSafetyPolicy } : {}),
     };
     return {
         path,
@@ -658,10 +686,14 @@ function readProfileBuildFileCache(repoRoot, stateFingerprint) {
         return null;
     try {
         const parsed = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
-        if (!parsed.profile || !parsed.expiresAt || stateFingerprint === null || parsed.stateFingerprint === null)
+        if (!parsed.profile || stateFingerprint === null || parsed.stateFingerprint === null)
             return null;
-        if (Date.now() > Date.parse(parsed.expiresAt))
-            return null;
+        // The repository-state fingerprint, not wall-clock age, is the cache's
+        // correctness boundary. Expiring an unchanged cache forced large repos to
+        // reload their complete repository graph every five minutes, which made
+        // otherwise read-only status commands exceed their budgets. Keep writing
+        // expiresAt for backward compatibility with older readers, but reuse the
+        // persisted profile for as long as the source-free fingerprint matches.
         if (parsed.stateFingerprint !== stateFingerprint)
             return null;
         return parsed.profile;
@@ -760,6 +792,35 @@ function profileFreshnessActionForSession(result, sessionProfileHash) {
 }
 const profileStalenessCache = new Map();
 let lastProfileCacheHit = false;
+function changedPathContentFingerprint(root, path) {
+    const absolutePath = (0, path_1.join)(root, path);
+    try {
+        const stat = (0, fs_1.lstatSync)(absolutePath);
+        if (stat.isSymbolicLink()) {
+            return `${path}\0symlink\0${(0, fs_1.readlinkSync)(absolutePath)}`;
+        }
+        if (!stat.isFile())
+            return `${path}\0${stat.mode}\0${stat.size}`;
+        const hash = (0, crypto_1.createHash)('sha256');
+        const descriptor = (0, fs_1.openSync)(absolutePath, 'r');
+        const buffer = Buffer.allocUnsafe(64 * 1024);
+        try {
+            let bytesRead = 0;
+            do {
+                bytesRead = (0, fs_1.readSync)(descriptor, buffer, 0, buffer.length, null);
+                if (bytesRead > 0)
+                    hash.update(buffer.subarray(0, bytesRead));
+            } while (bytesRead > 0);
+        }
+        finally {
+            (0, fs_1.closeSync)(descriptor);
+        }
+        return `${path}\0file\0${stat.mode}\0${stat.size}\0${hash.digest('hex')}`;
+    }
+    catch {
+        return `${path}\0missing`;
+    }
+}
 function profileCacheStateFingerprint(root) {
     try {
         let head = 'unborn';
@@ -768,32 +829,68 @@ function profileCacheStateFingerprint(root) {
                 cwd: root,
                 encoding: 'utf8',
                 stdio: ['ignore', 'pipe', 'ignore'],
+                timeout: 3_000,
             }).trim();
         }
         catch {
             // `git status` remains authoritative before the first commit. Keep an
             // explicit sentinel so staged topology changes still invalidate caches.
         }
-        const status = (0, child_process_1.execSync)('git status --short --untracked-files=normal', {
+        const internalPathExclusions = [
+            '--',
+            '.',
+            ':(exclude).neurcode/**',
+            ':(exclude).neurcode-admission/**',
+            ':(exclude).cursor/rules/neurcode-*',
+        ];
+        const status = (0, child_process_1.execFileSync)('git', [
+            'status', '--porcelain=v2', '-z', '--untracked-files=all',
+            ...internalPathExclusions,
+        ], {
+            cwd: root,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            maxBuffer: 8 * 1024 * 1024,
+            timeout: 5_000,
+        });
+        const stagedSummary = (0, child_process_1.execFileSync)('git', [
+            'diff', '--cached', '--no-ext-diff', '--numstat', '-z',
+            ...internalPathExclusions,
+        ], {
             cwd: root,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
             maxBuffer: 4 * 1024 * 1024,
+            timeout: 5_000,
         });
-        const stagedDiff = (0, child_process_1.execSync)('git diff --cached --no-ext-diff --binary', {
+        const worktreeSummary = (0, child_process_1.execFileSync)('git', [
+            'diff', '--no-ext-diff', '--numstat', '-z',
+            ...internalPathExclusions,
+        ], {
+            cwd: root,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            maxBuffer: 4 * 1024 * 1024,
+            timeout: 5_000,
+        });
+        const changedPaths = (0, child_process_1.execFileSync)('git', [
+            'ls-files', '-m', '-o', '--exclude-standard', '-z',
+            ...internalPathExclusions,
+        ], {
             cwd: root,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
             maxBuffer: 8 * 1024 * 1024,
-        });
-        const worktreeDiff = (0, child_process_1.execSync)('git diff --no-ext-diff --binary', {
-            cwd: root,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore'],
-            maxBuffer: 8 * 1024 * 1024,
-        });
+            timeout: 5_000,
+        }).split('\0').filter(Boolean).sort();
+        // Only dirty/untracked paths are content-hashed. This preserves exact
+        // invalidation (including same-size edits with restored mtimes) without
+        // rescanning every tracked file or following repository symlinks.
+        const workingContent = changedPaths
+            .map((path) => changedPathContentFingerprint(root, path))
+            .join('\n');
         return (0, crypto_1.createHash)('sha256')
-            .update(`${head}\n${status}\n${stagedDiff}\n${worktreeDiff}`)
+            .update(`${head}\n${status}\n${stagedSummary}\n${worktreeSummary}\n${workingContent}`)
             .digest('hex')
             .slice(0, 24);
     }

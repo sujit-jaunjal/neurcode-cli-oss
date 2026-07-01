@@ -1047,6 +1047,9 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         console.log(chalk.cyan('🛡️  General Governance mode (policy only, no plan linked)\n'));
     }
     const diffFilesForPolicy = diffFiles.filter((f) => !ignoreFilter(f.path));
+    const governanceArtifactOnlyDiff = diffFilesForPolicy.length > 0
+        && diffFilesForPolicy.every((file) => (file.path.startsWith('neurcode.')
+            || file.path.startsWith('.neurcode/')));
     const expectedPolicyOnlyFiles = diffFilesForPolicy.map((file) => file.path);
     const signedLogsRequired = isSignedAiLogsRequired(orgGovernanceSettings);
     const activeEngineeringContext = (0, active_engineering_context_1.loadActiveEngineeringContext)(projectRoot);
@@ -1484,7 +1487,14 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
     // a policy rule, but it cannot turn an unevaluated file into verified evidence.
     policyViolations.push(...coverageViolations);
     policyDecision = (0, policy_decision_1.resolvePolicyDecisionFromViolations)(policyViolations);
-    const effectiveVerdict = policyDecision === 'block' || structuralBlockingCount > 0 || coverageIncomplete || coverageNotEvaluated
+    const hasExplicitDiffContext = options.head === true || Boolean(options.base) || options.staged === true;
+    const unevaluatedOnly = hasExplicitDiffContext
+        && coverageNotEvaluated
+        && policyOnlyStructural.filesRequested > 0
+        && policyOnlyStructural.filesAnalyzed === 0
+        && suppressedViolations.length === 0
+        && !governanceArtifactOnlyDiff;
+    const effectiveVerdict = policyDecision === 'block' || structuralBlockingCount > 0 || coverageIncomplete || unevaluatedOnly
         ? 'FAIL'
         : policyDecision === 'warn' || structuralAdvisoryCount > 0
             ? 'WARN'
@@ -1706,8 +1716,9 @@ async function executePolicyOnlyMode(options, diffFiles, ignoreFilter, projectRo
         jsonMode: Boolean(options.json),
         governance: governancePayload,
     });
-    if (coverageNotEvaluated && policyDecision !== 'block' && structuralBlockingCount === 0)
+    if (unevaluatedOnly) {
         return 3;
+    }
     return effectiveVerdict === 'FAIL' ? 2 : effectiveVerdict === 'WARN' ? 1 : 0;
 }
 async function verifyCommand(options) {
@@ -2430,59 +2441,65 @@ async function verifyCommand(options) {
         }
         const untrackedDiffFiles = includeUntracked ? getUntrackedDiffFiles(projectRoot) : [];
         if (!diffText.trim() && untrackedDiffFiles.length === 0) {
-            if (!options.json) {
-                console.log(chalk.yellow('⚠️  Verification not evaluated: no files in the selected diff context.'));
-                console.log(chalk.dim(`   Selected context: ${diffContextLabel || 'unresolved'}. No PASS was produced.`));
+            const allowPolicyOnlyWithoutDiff = options.policyOnly === true
+                && options.head !== true
+                && !options.base
+                && options.staged !== true;
+            if (!allowPolicyOnlyWithoutDiff) {
+                if (!options.json) {
+                    console.log(chalk.yellow('⚠️  Verification not evaluated: no files in the selected diff context.'));
+                    console.log(chalk.dim(`   Selected context: ${diffContextLabel || 'unresolved'}. No PASS was produced.`));
+                }
+                else {
+                    // Surface runtime capabilities even on the empty-diff path so
+                    // CI gates that assert `runtimeCapabilities.intentRuntime` etc.
+                    // never receive a payload that omits the envelope. The intent
+                    // runtime is reported as `inactive` here regardless of whether
+                    // an intent-pack exists — there are no findings to govern.
+                    emitVerifyJson({
+                        grade: 'F',
+                        score: 0,
+                        verdict: 'FAIL',
+                        violations: [],
+                        adherenceScore: 0,
+                        bloatCount: 0,
+                        bloatFiles: [],
+                        plannedFilesModified: 0,
+                        totalPlannedFiles: 0,
+                        message: 'Verification not evaluated: no files in the selected diff context.',
+                        evaluationStatus: 'not_evaluated',
+                        verificationCoverage: {
+                            posture: 'not_evaluated',
+                            context: diffContextLabel,
+                            filesRequested: 0,
+                            filesAnalyzed: 0,
+                            filesSkipped: 0,
+                            filesUnsupported: 0,
+                        },
+                        scopeGuardPassed: false,
+                        runtimeCapabilities: {
+                            schemaVersion: 'neurcode.runtime-capabilities.v1',
+                            executionPath: localOnlyMode ? 'local-only' : 'unresolved',
+                            intentRuntime: 'inactive',
+                            intentContractSource: 'none',
+                            intentRuntimeRequired: options.requireIntentRuntime === true || isEnabledFlag(process.env.NEURCODE_REQUIRE_INTENT_RUNTIME),
+                            intentRuntimeRequirementSatisfied: true,
+                            driftIntelligence: 'inactive',
+                            scopeGuard: 'unenforced',
+                            forbiddenBoundaryEnforcement: 'unenforced',
+                            generatedCodeGovernance: 'pattern-deterministic',
+                            structuralRules: 'inactive',
+                            replayDeterminism: 'enforced',
+                            apiContractStatus: localOnlyMode ? 'offline' : 'unresolved',
+                            observedScopeCategories: [],
+                            observedBoundaryTypes: [],
+                            noChangesDetected: true,
+                        },
+                    });
+                }
+                recordVerifyEvent('NO_CHANGES', 'diff=empty');
+                exitWithEvidence(3);
             }
-            else {
-                // Surface runtime capabilities even on the empty-diff path so
-                // CI gates that assert `runtimeCapabilities.intentRuntime` etc.
-                // never receive a payload that omits the envelope. The intent
-                // runtime is reported as `inactive` here regardless of whether
-                // an intent-pack exists — there are no findings to govern.
-                emitVerifyJson({
-                    grade: 'F',
-                    score: 0,
-                    verdict: 'FAIL',
-                    violations: [],
-                    adherenceScore: 0,
-                    bloatCount: 0,
-                    bloatFiles: [],
-                    plannedFilesModified: 0,
-                    totalPlannedFiles: 0,
-                    message: 'Verification not evaluated: no files in the selected diff context.',
-                    evaluationStatus: 'not_evaluated',
-                    verificationCoverage: {
-                        posture: 'not_evaluated',
-                        context: diffContextLabel,
-                        filesRequested: 0,
-                        filesAnalyzed: 0,
-                        filesSkipped: 0,
-                        filesUnsupported: 0,
-                    },
-                    scopeGuardPassed: false,
-                    runtimeCapabilities: {
-                        schemaVersion: 'neurcode.runtime-capabilities.v1',
-                        executionPath: localOnlyMode ? 'local-only' : 'unresolved',
-                        intentRuntime: 'inactive',
-                        intentContractSource: 'none',
-                        intentRuntimeRequired: options.requireIntentRuntime === true || isEnabledFlag(process.env.NEURCODE_REQUIRE_INTENT_RUNTIME),
-                        intentRuntimeRequirementSatisfied: true,
-                        driftIntelligence: 'inactive',
-                        scopeGuard: 'unenforced',
-                        forbiddenBoundaryEnforcement: 'unenforced',
-                        generatedCodeGovernance: 'pattern-deterministic',
-                        structuralRules: 'inactive',
-                        replayDeterminism: 'enforced',
-                        apiContractStatus: localOnlyMode ? 'offline' : 'unresolved',
-                        observedScopeCategories: [],
-                        observedBoundaryTypes: [],
-                        noChangesDetected: true,
-                    },
-                });
-            }
-            recordVerifyEvent('NO_CHANGES', 'diff=empty');
-            exitWithEvidence(3);
         }
         // Parse tracked/staged diff and merge untracked files so plan adherence
         // correctly counts newly created files before they are git-added.
@@ -2965,36 +2982,42 @@ async function verifyCommand(options) {
         }
         const summary = (0, diff_parser_1.getDiffSummary)(diffFiles);
         if (diffFiles.length === 0) {
-            if (!options.json) {
-                console.log(chalk.yellow('⚠️  Verification not evaluated: all files in the selected diff context were excluded.'));
-                console.log(chalk.dim('   No PASS was produced. Review ignore rules or select a different diff context.'));
+            const allowPolicyOnlyWithoutDiff = options.policyOnly === true
+                && options.head !== true
+                && !options.base
+                && options.staged !== true;
+            if (!allowPolicyOnlyWithoutDiff) {
+                if (!options.json) {
+                    console.log(chalk.yellow('⚠️  Verification not evaluated: all files in the selected diff context were excluded.'));
+                    console.log(chalk.dim('   No PASS was produced. Review ignore rules or select a different diff context.'));
+                }
+                else {
+                    emitVerifyJson({
+                        grade: 'F',
+                        score: 0,
+                        verdict: 'FAIL',
+                        violations: [],
+                        adherenceScore: 0,
+                        bloatCount: 0,
+                        bloatFiles: [],
+                        plannedFilesModified: 0,
+                        totalPlannedFiles: 0,
+                        message: 'Verification not evaluated: all files in the selected diff context were excluded.',
+                        evaluationStatus: 'not_evaluated',
+                        verificationCoverage: {
+                            posture: 'not_evaluated',
+                            context: diffContextLabel,
+                            filesRequested: allDiffFiles.length,
+                            filesAnalyzed: 0,
+                            filesSkipped: allDiffFiles.length,
+                            filesUnsupported: 0,
+                        },
+                        scopeGuardPassed: false,
+                    });
+                }
+                recordVerifyEvent('NO_CHANGES', 'diff_files=0;status=not_evaluated');
+                exitWithEvidence(3);
             }
-            else {
-                emitVerifyJson({
-                    grade: 'F',
-                    score: 0,
-                    verdict: 'FAIL',
-                    violations: [],
-                    adherenceScore: 0,
-                    bloatCount: 0,
-                    bloatFiles: [],
-                    plannedFilesModified: 0,
-                    totalPlannedFiles: 0,
-                    message: 'Verification not evaluated: all files in the selected diff context were excluded.',
-                    evaluationStatus: 'not_evaluated',
-                    verificationCoverage: {
-                        posture: 'not_evaluated',
-                        context: diffContextLabel,
-                        filesRequested: allDiffFiles.length,
-                        filesAnalyzed: 0,
-                        filesSkipped: allDiffFiles.length,
-                        filesUnsupported: 0,
-                    },
-                    scopeGuardPassed: false,
-                });
-            }
-            recordVerifyEvent('NO_CHANGES', 'diff_files=0;status=not_evaluated');
-            exitWithEvidence(3);
         }
         const ignoreFilter = (0, ignore_1.loadIgnore)(projectRoot);
         const runtimeIgnoreSet = getRuntimeIgnoreSetFromEnv();

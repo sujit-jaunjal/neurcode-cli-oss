@@ -14,6 +14,8 @@ const runtime_connection_1 = require("./runtime-connection");
 const brain_lifecycle_1 = require("./brain-lifecycle");
 const runtime_authority_1 = require("./runtime-authority");
 const v0_governance_2 = require("./v0-governance");
+const runtime_state_1 = require("./runtime-state");
+const operator_identity_1 = require("./operator-identity");
 exports.RUNTIME_COMPANION_SCHEMA_VERSION = 'neurcode.runtime-companion.v1';
 const PROFILE_FRESHNESS_CACHE_MS = 5_000;
 const freshnessCache = new Map();
@@ -163,6 +165,7 @@ function buildRuntimeCompanionSnapshot(repoRoot, options = {}) {
     const transport = (0, runtime_outbox_1.inspectRuntimeOutbox)(repoRoot);
     const connection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
     const runtimeAuthority = (0, runtime_authority_1.inspectRuntimeAuthority)(repoRoot);
+    const runtimeState = (0, runtime_state_1.classifyRuntimeState)(repoRoot);
     const profile = (0, v0_governance_2.readGovernanceProfile)(repoRoot).profile;
     const topology = profile?.repositoryTopology ?? session?.contract.repositoryTopology ?? null;
     const brain = (0, brain_lifecycle_1.readBrainLifecycle)(repoRoot);
@@ -202,6 +205,7 @@ function buildRuntimeCompanionSnapshot(repoRoot, options = {}) {
             detail: 'The VS Code companion reflects CLI runtime state. Claude Code hooks provide pre-write hard deny; editor observation does not.',
         },
         runtimeAuthority,
+        runtimeState,
         pairing: {
             repositoryOwnershipBound: Boolean(profile),
             machineAuthenticated: Boolean(connection),
@@ -263,11 +267,14 @@ function approveRuntimeCompanionPath(repoRoot, input) {
     if (/[*?[\]{}!]/.test(input.path)) {
         throw new Error('VS Code runtime companion approvals must target one exact file path.');
     }
+    const localIdentity = (0, operator_identity_1.deriveLocalOperatorIdentity)(repoRoot);
+    const explicitActor = input.approvedBy?.trim() || null;
     const approval = (0, governance_runtime_1.approveSession)(repoRoot, input.path.trim(), {
         reason: input.reason.trim(),
         sessionId: input.sessionId,
         source: 'vscode',
-        approvedBy: input.approvedBy ?? null,
+        approvedBy: explicitActor ?? localIdentity.approvedBy,
+        assurance: explicitActor ? 'local_asserted' : localIdentity.assurance,
         requestId: input.requestId ?? null,
     });
     invalidateRuntimeCompanionFreshness(repoRoot);

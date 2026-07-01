@@ -11,6 +11,7 @@ const state_1 = require("../utils/state");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_authority_1 = require("../utils/runtime-authority");
+const activation_telemetry_1 = require("../utils/activation-telemetry");
 let chalk;
 try {
     chalk = require('chalk');
@@ -512,6 +513,11 @@ function runtimeAdaptersForActivation(agent) {
         return ['vscode-extension', 'daemon'];
     return ['github-action'];
 }
+function activationAgentTarget(agent) {
+    if (agent === 'claude' || agent === 'cursor' || agent === 'codex' || agent === 'vscode')
+        return agent;
+    return 'manual';
+}
 function activateCommand(program) {
     program
         .command('activate [agent]')
@@ -540,6 +546,13 @@ function activateCommand(program) {
             process.exitCode = 2;
             return;
         }
+        const agentTarget = activationAgentTarget(agent);
+        (0, activation_telemetry_1.trackActivationEvent)({
+            eventType: 'agent_setup_started',
+            commandFamily: 'activate',
+            agentTarget,
+            reasonCode: 'agent_setup.started',
+        });
         try {
             const result = agent === 'copilot'
                 ? await activateCopilotCommand(options)
@@ -559,10 +572,24 @@ function activateCommand(program) {
             else {
                 renderActivation(result, options.mcp === false);
             }
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'agent_setup_completed',
+                commandFamily: 'activate',
+                agentTarget,
+                reasonCode: result.ok ? 'agent_setup.completed' : 'agent_setup.failed',
+                success: result.ok,
+            });
             if (!result.ok)
                 process.exitCode = 1;
         }
         catch (error) {
+            (0, activation_telemetry_1.trackActivationEvent)({
+                eventType: 'agent_setup_completed',
+                commandFamily: 'activate',
+                agentTarget,
+                reasonCode: 'agent_setup.failed',
+                success: false,
+            });
             const message = error instanceof Error ? error.message : String(error);
             if (options.json) {
                 console.log(JSON.stringify({ ok: false, error: message }, null, 2));

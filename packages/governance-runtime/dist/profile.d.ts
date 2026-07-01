@@ -9,6 +9,7 @@
  * No source files are read. No network calls. Same inputs → same profileHash.
  */
 import { type ArchitectureObligationPolicy } from './architecture-obligations';
+import { type PlanControlMode, type RuntimeSafetyPolicyProfile } from './runtime-safety-kernel';
 import { type ModuleImportRecord, type RepoArchitectureGraph } from './architecture-graph';
 import { type GeneratedProvenanceEvidence, type RepositoryManifestEvidence, type RepositoryTopologyArtifact, type TopologyBrainFact } from './repository-topology';
 export interface SensitiveBoundary {
@@ -105,6 +106,13 @@ export interface RuntimeGovernanceConfig {
     ignoredGlobs: string[];
     /** How strictly to enforce edits that are not justified by the agent's captured plan. */
     planCoherence?: PlanCoherenceMode;
+    /**
+     * Planning behavior for runtime safety: observe, advise, or enforce after freeze.
+     * Distinct from planCoherence — controls planning-phase blocking posture.
+     */
+    planMode?: PlanControlMode;
+    /** Enterprise runtime safety policy profile (configurable, not hardcoded). */
+    runtimeSafetyPolicy?: Partial<RuntimeSafetyPolicyProfile>;
     /** Local in-flow enforcement posture for harmless task expansion. */
     localMode?: RuntimeLocalMode;
     /**
@@ -117,6 +125,8 @@ export interface RuntimeGovernanceConfig {
 }
 export type PlanCoherenceMode = 'off' | 'warn' | 'block';
 export declare const DEFAULT_PLAN_COHERENCE_MODE: PlanCoherenceMode;
+export type { PlanControlMode } from './runtime-safety-kernel';
+export { DEFAULT_PLAN_CONTROL_MODE } from './runtime-safety-kernel';
 export type RuntimeLocalMode = 'strict' | 'advisory' | 'paused';
 export declare const DEFAULT_RUNTIME_LOCAL_MODE: RuntimeLocalMode;
 export type RepoSymbolDuplicateMode = 'off' | 'warn' | 'block';
