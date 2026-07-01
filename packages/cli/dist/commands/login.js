@@ -66,7 +66,9 @@ async function loginCommand(options) {
             process.exit(1);
         }
         const desiredOrgIdFromState = (0, state_1.getOrgId)() || undefined;
-        const desiredOrgId = desiredOrgIdFromArg || desiredOrgIdFromState;
+        const desiredOrgWasExplicit = Boolean(desiredOrgIdFromArg);
+        let desiredOrgId = desiredOrgIdFromArg || desiredOrgIdFromState;
+        let ignoreStaleStateWorkspace = false;
         const desiredOrgName = desiredOrgId && desiredOrgId === desiredOrgIdFromState ? (0, state_1.getOrgName)() : undefined;
         // Check if user is already logged in (for this org, if applicable)
         const existingApiKey = desiredOrgId ? (0, config_1.getApiKey)(desiredOrgId) : (0, config_1.getApiKey)();
@@ -104,8 +106,14 @@ async function loginCommand(options) {
                 const looksLikeAuth = /authentication failed|unauthorized|forbidden|401|403/i.test(msg);
                 // Runtime credential is invalid/expired (or we couldn't validate); proceed with login
                 (0, user_context_1.clearUserCache)(); // Clear stale cache
+                if (looksLikeAuth && desiredOrgIdFromState && !desiredOrgWasExplicit) {
+                    ignoreStaleStateWorkspace = true;
+                    desiredOrgId = undefined;
+                }
                 (0, messages_1.printWarning)(looksLikeAuth ? 'Existing session expired' : 'Could not validate existing session', looksLikeAuth
-                    ? 'Your previous runtime credential is no longer valid. Let\'s set up a fresh connection.'
+                    ? ignoreStaleStateWorkspace
+                        ? 'Your previous runtime credential or workspace scope is no longer valid. Plain neurcode login will connect to your current browser account workspace; pass --org-id only when you intentionally need a specific workspace.'
+                        : 'Your previous runtime credential is no longer valid. Let\'s set up a fresh connection.'
                     : 'Proceeding with login to refresh authentication.');
             }
         }
