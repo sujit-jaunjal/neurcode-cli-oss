@@ -18,6 +18,7 @@ export interface TrackActivationOptions {
 }
 export declare function activationTelemetryPath(): string;
 export declare function activationTelemetryEnabled(): boolean;
+export declare function getActivationInstallId(): string;
 export declare function setActivationTelemetryEnabled(enabled: boolean): void;
 export declare function buildActivationTelemetryEvent(store: ActivationTelemetryStore, options: TrackActivationOptions): ActivationTelemetryEvent;
 export declare function maybeShowActivationTelemetryNotice(): void;

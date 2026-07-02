@@ -3,6 +3,7 @@ import { type RuntimeEvidenceUploadRequest } from '../api-client';
 import { type LocalGovernanceSessionRecord } from '../utils/runtime-evidence';
 interface RuntimeSyncOptions {
     runtime?: boolean;
+    activation?: boolean;
     dryRun?: boolean;
     since?: string;
     includeActive?: boolean;

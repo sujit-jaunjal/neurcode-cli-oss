@@ -15,6 +15,7 @@ const brain_lifecycle_1 = require("./brain-lifecycle");
 const runtime_connection_1 = require("./runtime-connection");
 const onboard_1 = require("../commands/onboard");
 const agent_adapter_setup_1 = require("./agent-adapter-setup");
+const activation_proof_1 = require("./activation-proof");
 function sha(input) {
     return (0, node_crypto_1.createHash)('sha256').update(input).digest('hex').slice(0, 32);
 }
@@ -67,6 +68,11 @@ function agentForCommand(target) {
         return target;
     }
     return 'terminal';
+}
+function agentGuardCommandFor(target) {
+    const agent = agentForCommand(target);
+    const agentId = agent === 'terminal' ? 'codex' : agent;
+    return `neurcode agent guard start ${agentId} --goal "<bounded task>"`;
 }
 function brainStatusFromLifecycle(state) {
     if (state === 'fresh')
@@ -165,6 +171,7 @@ async function buildFirstValueCliState(options = {}) {
     const projectId = repoConfig.projectId || connection?.projectId || null;
     const apiKey = (0, config_1.getApiKey)(orgId || undefined) || (0, config_1.getApiKey)();
     const cloud = await fetchCloudFirstValueState({ orgId, apiUrl: connection?.apiUrl });
+    const proofQueue = (0, activation_proof_1.getFirstValueActivationProofQueueStatus)(projectId);
     let brainStatus = 'not_evaluated';
     try {
         brainStatus = brainStatusFromLifecycle((await (0, brain_lifecycle_1.inspectBrainLifecycle)(repoRoot)).state);
@@ -179,12 +186,32 @@ async function buildFirstValueCliState(options = {}) {
     const repoLabel = connection?.repo?.name || (repoDetected ? (0, node_path_1.basename)(repoRoot) : null);
     const repoHash = connection?.repo?.repoKey || (repoDetected ? sha(remote || repoRoot) : null);
     const cloudProof = cloud.state?.proof;
+    const cloudRepoConnected = cloudProof?.steps.find((step) => step.id === 'repo_connect')?.complete === true
+        && cloudProof.repoConnection.status !== 'local_proof_queued';
+    const localRepoConnected = Boolean(connection || projectId);
+    const localProofQueued = proofQueue.matchingProjectQueued || (localRepoConnected && !cloudRepoConnected);
+    const repoConnectionStatus = cloudRepoConnected
+        ? cloudProof?.repoConnection.status || 'cloud_proof_synced'
+        : localProofQueued
+            ? 'local_proof_queued'
+            : 'missing';
+    const repoConnectionSource = cloudRepoConnected
+        ? cloudProof?.repoConnection.source || 'activation_proof'
+        : localProofQueued
+            ? 'local_config'
+            : 'none';
     const state = (0, contracts_1.buildFirstValueState)({
         workspaceId: orgId || cloudProof?.workspaceId || null,
         repoLabel: cloudProof?.repo.label || repoLabel,
         repoHash: cloudProof?.repo.hash || repoHash,
+        projectId: projectId || cloudProof?.repoConnection.projectId || null,
+        repoId: cloudProof?.repoConnection.repoId || null,
+        repoConnectionStatus,
+        repoConnectionSource,
+        repoProofSyncedAt: cloudProof?.repoConnection.cloudProofSyncedAt || null,
+        repoProofQueued: localProofQueued,
         loggedIn: Boolean(apiKey || cloudProof?.workspaceId),
-        repoConnected: Boolean(connection || projectId || cloudProof?.steps.find((step) => step.id === 'repo_connect')?.complete),
+        repoConnected: localRepoConnected || cloudRepoConnected,
         brainStatus,
         agentConfigured: runtimeAdapterReady || runtimeAtLeast(cloudProof?.runtimeStatus, 'configured'),
         governedCheckSeen: runtimeAtLeast(cloudProof?.runtimeStatus, 'governed_check_seen'),
@@ -200,6 +227,12 @@ async function buildFirstValueCliState(options = {}) {
         proof: {
             ...state.proof,
             steps: state.proof.steps.map((step) => {
+                if (step.id === 'governed_check') {
+                    return {
+                        ...step,
+                        recommendedCommand: agentGuardCommandFor(commandAgent),
+                    };
+                }
                 if (step.id !== 'agent_setup')
                     return step;
                 return {
@@ -223,6 +256,9 @@ async function buildFirstValueCliState(options = {}) {
     const nextStep = adjusted.proof.steps.find((step) => !step.complete);
     if (nextStep?.id === 'agent_setup') {
         adjusted.proof.nextRecommendedCommand = (0, onboard_1.agentSetupCommandFor)(commandAgent);
+    }
+    else if (nextStep?.id === 'governed_check') {
+        adjusted.proof.nextRecommendedCommand = agentGuardCommandFor(commandAgent);
     }
     return adjusted;
 }
@@ -269,6 +305,9 @@ function renderFirstValueReport(state) {
     lines.push(`Proof ID: ${proof.proofId}`);
     lines.push(`Workspace: ${proof.workspaceId ? 'authenticated' : 'not authenticated'}`);
     lines.push(`Repository: ${proof.repo.label || proof.repo.hash || 'not connected'}`);
+    lines.push(`Repo connection: ${proof.repoConnection.status}`);
+    lines.push(`Cloud proof synced: ${proof.repoConnection.cloudProofSyncedAt ? 'yes' : 'no'}`);
+    lines.push(`Cloud proof queued: ${proof.repoConnection.proofQueued ? 'yes' : 'no'}`);
     lines.push('');
     lines.push('Activation milestones');
     for (const step of proof.steps) {

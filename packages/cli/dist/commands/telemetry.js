@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.telemetryCommand = telemetryCommand;
 const activation_telemetry_1 = require("../utils/activation-telemetry");
+const activation_proof_1 = require("../utils/activation-proof");
 let chalk;
 try {
     chalk = require('chalk');
@@ -21,7 +22,10 @@ function printStatus() {
     console.log(`  Env override: ${status.envDisabled ? 'NEURCODE_TELEMETRY=0' : 'none'}`);
     console.log(`  Install ID:   ${status.anonymousInstallId}`);
     console.log(`  Queue:        ${status.queueLength} event${status.queueLength === 1 ? '' : 's'}`);
+    const proof = (0, activation_proof_1.getFirstValueActivationProofQueueStatus)();
+    console.log(`  Proof queue:  ${proof.queueLength} proof${proof.queueLength === 1 ? '' : 's'}`);
     console.log(chalk.dim(`  State file:   ${status.path}`));
+    console.log(chalk.dim(`  Proof file:   ${proof.path}`));
     console.log(chalk.dim('  Source-free:  no source, prompts, diffs, secrets, paths, raw args, raw IP, or repo contents.'));
 }
 function telemetryCommand(program) {
@@ -56,8 +60,12 @@ function telemetryCommand(program) {
         .command('flush')
         .description('Flush queued activation telemetry now')
         .action(async () => {
-        const result = await (0, activation_telemetry_1.flushActivationTelemetry)();
-        console.log(`Flushed ${result.sent}/${result.attempted} event${result.attempted === 1 ? '' : 's'}; ${result.remaining} queued.`);
+        const [result, proof] = await Promise.all([
+            (0, activation_telemetry_1.flushActivationTelemetry)(),
+            (0, activation_proof_1.flushFirstValueActivationProofQueue)(),
+        ]);
+        console.log(`Flushed ${result.sent}/${result.attempted} telemetry event${result.attempted === 1 ? '' : 's'}; ${result.remaining} queued.`);
+        console.log(`Flushed ${proof.synced}/${proof.attempted} activation proof${proof.attempted === 1 ? '' : 's'}; ${proof.remaining} queued, ${proof.dropped} dropped.`);
     });
 }
 //# sourceMappingURL=telemetry.js.map

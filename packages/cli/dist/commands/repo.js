@@ -38,6 +38,7 @@ const fs_1 = require("fs");
 const path_1 = require("path");
 const project_root_1 = require("../utils/project-root");
 const repo_links_1 = require("../utils/repo-links");
+const activation_proof_1 = require("../utils/activation-proof");
 let chalk;
 try {
     chalk = require('chalk');
@@ -60,6 +61,57 @@ function toAbsolutePath(pathArg, cwd) {
 }
 function emitJson(payload) {
     console.log(JSON.stringify(payload, null, 2));
+}
+async function showRepoConnectStatus(options) {
+    const binding = (0, activation_proof_1.readLocalRepoActivationBinding)();
+    const queue = (0, activation_proof_1.getFirstValueActivationProofQueueStatus)(binding.projectId);
+    const { buildFirstValueCliState } = await Promise.resolve().then(() => __importStar(require('../utils/first-value-proof')));
+    const state = await buildFirstValueCliState();
+    const repoConnection = state.proof.repoConnection;
+    const cloudSynced = repoConnection.status === 'cloud_proof_synced'
+        || repoConnection.status === 'cloud_project_owned'
+        || repoConnection.status === 'cloud_runtime_repo_owned';
+    const queued = queue.matchingProjectQueued || repoConnection.status === 'local_proof_queued';
+    const nextCommand = !binding.orgId || !binding.projectId
+        ? 'neurcode repo connect'
+        : !cloudSynced && queued
+            ? 'neurcode sync --activation'
+            : !cloudSynced
+                ? 'neurcode sync --activation'
+                : state.proof.nextRecommendedCommand;
+    if (options.json) {
+        emitJson({
+            success: true,
+            local: {
+                connected: Boolean(binding.orgId && binding.projectId),
+                workspaceId: binding.orgId,
+                workspaceName: binding.orgName,
+                projectId: binding.projectId,
+                linkedAt: binding.linkedAt,
+            },
+            cloud: {
+                proofStatus: repoConnection.status,
+                proofSynced: cloudSynced,
+                proofQueued: queued,
+                apiReachable: state.local.apiReachable,
+            },
+            queue: {
+                length: queue.queueLength,
+                path: queue.path,
+            },
+            nextCommand,
+        });
+        return;
+    }
+    console.log(chalk.bold('Repo connection status'));
+    console.log(`  Local repo connected: ${binding.orgId && binding.projectId ? chalk.green('yes') : chalk.yellow('no')}`);
+    console.log(`  Workspace:            ${binding.orgName || binding.orgId || 'not linked'}`);
+    console.log(`  Project ID:           ${binding.projectId || 'not linked'}`);
+    console.log(`  Cloud proof:          ${cloudSynced ? chalk.green(repoConnection.status) : queued ? chalk.yellow('queued/offline') : chalk.yellow('missing')}`);
+    console.log(`  API reachable:        ${state.local.apiReachable === null ? 'not checked' : state.local.apiReachable ? 'yes' : 'no'}`);
+    console.log(`  Queue:                ${queue.queueLength} proof${queue.queueLength === 1 ? '' : 's'}`);
+    console.log(chalk.dim(`  Queue file:           ${queue.path}`));
+    console.log(`  Next command:         ${nextCommand}`);
 }
 function listRepoLinks(options) {
     const projectRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
@@ -177,12 +229,27 @@ function repoCommand(program) {
         .option('--org <org-id>', 'Organization/workspace ID to bind this repository to')
         .option('--create <name>', 'Create a project ownership record with this name')
         .option('--project-id <id>', 'Link to an existing project ID')
+        .option('--status', 'Show local/cloud repo connection status without changing config')
+        .option('--relink', 'When already linked, relink to the requested/current workspace')
+        .option('--keep', 'When already linked, keep the existing local workspace/project')
+        .option('--cancel', 'When already linked, cancel without changes')
+        .option('--json', 'Output machine-readable JSON for --status')
         .action(async (options) => {
+        if (options.status) {
+            await showRepoConnectStatus({ json: options.json === true });
+            return;
+        }
+        const actionFlags = [options.relink, options.keep, options.cancel].filter(Boolean).length;
+        if (actionFlags > 1) {
+            console.error(chalk.red('Choose only one of --relink, --keep, or --cancel.'));
+            process.exit(1);
+        }
         const { initCommand } = await Promise.resolve().then(() => __importStar(require('./init')));
         await initCommand({
             orgId: options.org,
             create: options.create,
             projectId: options.projectId,
+            bindingAction: options.relink ? 'relink' : options.keep ? 'keep' : options.cancel ? 'cancel' : undefined,
         });
     });
     repoCmd

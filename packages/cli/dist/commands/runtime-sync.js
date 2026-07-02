@@ -14,6 +14,8 @@ const runtime_evidence_1 = require("../utils/runtime-evidence");
 const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_live_1 = require("../utils/runtime-live");
+const activation_telemetry_1 = require("../utils/activation-telemetry");
+const activation_proof_1 = require("../utils/activation-proof");
 const runtime_outbox_1 = require("../utils/runtime-outbox");
 const runtime_outbox_2 = require("../utils/runtime-outbox");
 const admission_artifact_1 = require("../utils/admission-artifact");
@@ -566,10 +568,73 @@ function aggregateRuntimeEvidenceResponses(responses) {
         privacy: first.privacy,
     };
 }
+async function activationSyncCommand(options) {
+    const binding = (0, activation_proof_1.readLocalRepoActivationBinding)();
+    const beforeQueue = (0, activation_proof_1.getFirstValueActivationProofQueueStatus)(binding.projectId);
+    let synthesized = {
+        attempted: false,
+        synced: false,
+        queued: false,
+        reasonCode: 'proof.not_needed',
+    };
+    if (binding.orgId && binding.projectId && !beforeQueue.matchingProjectQueued) {
+        const proof = (0, activation_proof_1.buildRepoConnectActivationProof)({
+            projectId: binding.projectId,
+            commandFamily: 'repo_connect',
+            reasonCode: 'repo_connect.sync_activation',
+        });
+        const result = await (0, activation_proof_1.submitFirstValueActivationProof)({
+            proof,
+            orgId: binding.orgId,
+        });
+        synthesized = {
+            attempted: true,
+            synced: result.synced,
+            queued: result.queued,
+            reasonCode: result.reasonCode,
+        };
+    }
+    const proof = await (0, activation_proof_1.flushFirstValueActivationProofQueue)({ orgId: binding.orgId });
+    const telemetry = await (0, activation_telemetry_1.flushActivationTelemetry)();
+    if (options.json) {
+        console.log(JSON.stringify({
+            ok: true,
+            activation: true,
+            localRepoConnected: Boolean(binding.orgId && binding.projectId),
+            synthesized,
+            proof,
+            telemetry,
+            privacy: {
+                sourceUploaded: false,
+                promptsUploaded: false,
+                diffsUploaded: false,
+                rawArgsUploaded: false,
+                absolutePathsUploaded: false,
+            },
+        }, null, 2));
+        return;
+    }
+    console.log(chalk.bold('Activation proof sync'));
+    console.log(chalk.dim('-'.repeat(56)));
+    console.log(`Local repo connected: ${binding.orgId && binding.projectId ? chalk.green('yes') : chalk.yellow('no')}`);
+    console.log(`Cloud proof synced:   ${proof.synced + (synthesized.synced ? 1 : 0)}`);
+    console.log(`Cloud proof queued:   ${proof.remaining + (synthesized.queued ? 1 : 0)}`);
+    console.log(`Proof dropped:        ${proof.dropped}`);
+    console.log(`Telemetry flushed:    ${telemetry.sent}/${telemetry.attempted}; ${telemetry.remaining} queued`);
+    if (proof.reasonCodes.length > 0 || synthesized.reasonCode !== 'proof.not_needed') {
+        const reasons = [...new Set([synthesized.reasonCode, ...proof.reasonCodes].filter((reason) => reason !== 'proof.not_needed'))];
+        console.log(chalk.dim(`Reason codes:         ${reasons.join(', ') || 'none'}`));
+    }
+    console.log(chalk.dim('Source-free: no source, prompts, diffs, raw args, secrets, absolute paths, raw IP, or repo contents.'));
+}
 async function runtimeSyncCommand(options = {}) {
     let repoRootForStatus = null;
+    if (options.activation === true) {
+        await activationSyncCommand(options);
+        return;
+    }
     if (options.runtime !== true) {
-        const message = 'Only runtime sync is supported in V0.3. Run `neurcode sync --runtime`.';
+        const message = 'Choose a sync target: `neurcode sync --activation` or `neurcode sync --runtime`.';
         if (options.json) {
             console.log(JSON.stringify({ ok: false, error: message }, null, 2));
         }
@@ -764,7 +829,8 @@ async function runtimeSyncCommand(options = {}) {
 function syncCommand(program) {
     program
         .command('sync')
-        .description('Sync local runtime governance evidence to Neurcode')
+        .description('Sync local source-free activation proof or runtime governance evidence to Neurcode')
+        .option('--activation', 'Sync first-value activation proof queue and activation telemetry')
         .option('--runtime', 'Sync local in-flow governance session records')
         .option('--dry-run', 'Build and validate the upload payload without sending it')
         .option('--since <duration>', 'Limit to sessions with events in the window, e.g. 24h, 7d, 2w')
@@ -773,6 +839,7 @@ function syncCommand(program) {
         .option('--dir <path>', 'Repository root (default: current directory)')
         .option('--json', 'Output machine-readable JSON')
         .action((options) => runtimeSyncCommand({
+        activation: options.activation === true,
         runtime: options.runtime === true,
         dryRun: options.dryRun === true,
         since: options.since,

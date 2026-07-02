@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activationTelemetryPath = activationTelemetryPath;
 exports.activationTelemetryEnabled = activationTelemetryEnabled;
+exports.getActivationInstallId = getActivationInstallId;
 exports.setActivationTelemetryEnabled = setActivationTelemetryEnabled;
 exports.buildActivationTelemetryEvent = buildActivationTelemetryEvent;
 exports.maybeShowActivationTelemetryNotice = maybeShowActivationTelemetryNotice;
@@ -88,6 +89,13 @@ function activationTelemetryEnabled() {
     if (envTelemetryDisabled())
         return false;
     return readStore().enabled !== false;
+}
+function getActivationInstallId() {
+    const store = readStore();
+    if (!(0, fs_1.existsSync)(activationTelemetryPath())) {
+        writeStore(store);
+    }
+    return store.anonymousInstallId;
 }
 function setActivationTelemetryEnabled(enabled) {
     const store = readStore();

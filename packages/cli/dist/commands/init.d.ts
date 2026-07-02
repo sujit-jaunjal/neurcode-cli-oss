@@ -15,6 +15,7 @@ interface InitOptions {
     orgId?: string;
     create?: string;
     projectId?: string;
+    bindingAction?: 'keep' | 'relink' | 'cancel';
 }
 export declare function initCommand(options?: InitOptions): Promise<void>;
 export {};

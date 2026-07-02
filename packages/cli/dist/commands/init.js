@@ -52,6 +52,7 @@ const config_1 = require("../config");
 const api_client_1 = require("../api-client");
 const state_1 = require("../utils/state");
 const activation_telemetry_1 = require("../utils/activation-telemetry");
+const activation_proof_1 = require("../utils/activation-proof");
 const readline = __importStar(require("readline"));
 const messages_1 = require("../utils/messages");
 // Import chalk with fallback
@@ -140,6 +141,45 @@ function workspaceKind(org) {
 function workspaceLabel(org) {
     return `${org.name} (${org.isPersonal ? 'Personal workspace' : 'Organization workspace'} · ${org.role})`;
 }
+async function publishRepoConnectProof(input) {
+    const proof = (0, activation_proof_1.buildRepoConnectActivationProof)({
+        projectId: input.projectId,
+        commandFamily: 'repo_connect',
+        reasonCode: 'repo_connect.completed',
+    });
+    if (input.queueOnly) {
+        (0, activation_proof_1.queueFirstValueActivationProof)({
+            proof,
+            orgId: input.orgId,
+            apiUrl: input.apiUrl,
+            reasonCode: 'proof.queued.no_matching_workspace_credential',
+        });
+        return 'queued';
+    }
+    const result = await (0, activation_proof_1.submitFirstValueActivationProof)({
+        proof,
+        orgId: input.orgId,
+        apiUrl: input.apiUrl,
+        apiKey: input.apiKey,
+    });
+    if (result.synced)
+        return 'synced';
+    if (result.queued)
+        return 'queued';
+    return 'not_synced';
+}
+function printRepoProofSyncStatus(status) {
+    (0, messages_1.printSuccess)('Repo connected locally', '.neurcode/config.json now records this workspace/project ownership.');
+    if (status === 'synced') {
+        (0, messages_1.printSuccess)('Cloud proof synced', 'The dashboard First Value page can use authenticated repo-connect proof.');
+    }
+    else if (status === 'queued') {
+        (0, messages_1.printWarning)('Cloud proof queued', 'Run `neurcode sync --activation` when connectivity or workspace login is ready.');
+    }
+    else {
+        (0, messages_1.printWarning)('Cloud proof not synced', 'Run `neurcode sync --activation` or `neurcode repo connect --status` for the next step.');
+    }
+}
 async function initCommand(options) {
     try {
         (0, activation_telemetry_1.trackActivationEvent)({
@@ -195,15 +235,24 @@ async function initCommand(options) {
         if (existingOrgId && existingProjectId) {
             const existingOrgName = (0, state_1.getOrgName)() || existingOrgId;
             (0, messages_1.printInfo)('Already Linked', `This directory is linked to organization "${existingOrgName}".`);
-            if (nonInteractiveMode) {
+            if (nonInteractiveMode && !options?.bindingAction) {
                 (0, messages_1.printInfo)('Re-linking', 'Non-interactive init requested. Re-linking to requested project scope.');
                 resetLocalState();
             }
             else {
-                const action = await selectOption('Repository ownership is already configured. What should happen next?', [
-                    { label: 'Keep current governance ownership', value: 'keep' },
-                    { label: 'Re-link to a different workspace/project', value: 'relink' },
-                    { label: 'Exit without changes', value: 'exit' },
+                const strictExistingKey = (0, config_1.getApiKey)(existingOrgId) || undefined;
+                const hasOtherCredential = !strictExistingKey && Boolean((0, config_1.getAnyPersistedApiKey)());
+                if (hasOtherCredential) {
+                    (0, messages_1.printWarning)('Workspace binding may be stale', [
+                        `This repo is linked to workspace ${existingOrgName}.`,
+                        'The available machine credential is not scoped to that workspace.',
+                        'Choose whether to relink to the current authenticated workspace, keep the existing binding, or cancel.',
+                    ].join('\n   '));
+                }
+                const action = options?.bindingAction ?? await selectOption('Repository ownership is already configured. What should happen next?', [
+                    { label: 'Re-link to the current workspace/project', value: 'relink' },
+                    { label: 'Keep existing local workspace/project', value: 'keep' },
+                    { label: 'Cancel without changes', value: 'cancel' },
                 ]);
                 if (action === 'keep') {
                     printOperationalSummary('Current repo ownership', [
@@ -211,14 +260,17 @@ async function initCommand(options) {
                         `Workspace ID: ${existingOrgId}`,
                         `Project ID:   ${existingProjectId}`,
                     ]);
-                    (0, activation_telemetry_1.trackActivationEvent)({
-                        eventType: 'repo_connect_completed',
-                        commandFamily: 'init',
-                        reasonCode: 'repo_connect.already_connected',
+                    const proofStatus = await publishRepoConnectProof({
+                        orgId: existingOrgId,
+                        projectId: existingProjectId,
+                        apiUrl,
+                        apiKey: strictExistingKey || null,
+                        queueOnly: !strictExistingKey,
                     });
+                    printRepoProofSyncStatus(proofStatus);
                     return;
                 }
-                else if (action === 'exit') {
+                else if (action === 'cancel') {
                     (0, messages_1.printInfo)('No Changes', 'Project link unchanged.');
                     return;
                 }
@@ -401,6 +453,12 @@ async function initCommand(options) {
         if (shouldBackfillSelectedOrgKey && selectedOrgApiKey) {
             (0, config_1.saveGlobalAuth)(selectedOrgApiKey, apiUrl, selectedOrg.id);
         }
+        const proofStatus = await publishRepoConnectProof({
+            orgId: selectedOrg.id,
+            projectId: project.id,
+            apiUrl,
+            apiKey: selectedOrgApiKey,
+        });
         // ─── Step 6: Success Summary ────────────────────────────────
         printOperationalSummary('Governance ownership activated', [
             `Workspace:    ${selectedOrg.name}`,
@@ -414,6 +472,7 @@ async function initCommand(options) {
             `Commands in this directory now resolve this repo`,
             `to the selected workspace governance boundary.`,
         ]);
+        printRepoProofSyncStatus(proofStatus);
         (0, messages_1.printInfo)('Next steps', [
             'Confirm runtime state: neurcode whoami',
             'Declare change intent: neurcode start "<what you intend to change>"',
