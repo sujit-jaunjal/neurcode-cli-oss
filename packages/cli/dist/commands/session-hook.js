@@ -50,6 +50,7 @@ const consequence_nudges_1 = require("../utils/consequence-nudges");
 const agent_guard_supervisor_1 = require("../utils/agent-guard-supervisor");
 const local_repo_brain_1 = require("../utils/local-repo-brain");
 const runtime_authority_1 = require("../utils/runtime-authority");
+const session_hook_recovery_1 = require("./session-hook-recovery");
 const brain_lifecycle_1 = require("../utils/brain-lifecycle");
 const proposed_change_analysis_1 = require("../utils/proposed-change-analysis");
 const repo_intelligence_v2_1 = require("../utils/repo-intelligence-v2");
@@ -1293,12 +1294,41 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
         (0, runtime_authority_1.assertProtectedRuntimeAuthority)(repoRoot, trustedAdapterId);
     }
     catch (error) {
-        denyPreToolUse(error instanceof Error ? error.message : String(error), {
+        const message = error instanceof Error ? error.message : String(error);
+        // P5 (Local-First Aha V1): this guard used to deny EVERY tool call on a
+        // stale/missing runtime manifest — including the recovery command printed
+        // in its own message — wedging the agent until a human found an unhooked
+        // terminal. Allow exactly the documented recovery commands through the
+        // guard; every other operation stays denied until identity is repaired.
+        const guardToolName = hookInput['tool_name'] ||
+            hookInput['toolName'] ||
+            '';
+        if (/^(bash|shell|runCommand|run_command|runInTerminal|run_in_terminal|terminal)$/i.test(guardToolName)) {
+            const guardToolInput = hookInput['tool_input'] ??
+                hookInput['toolInput'] ??
+                {};
+            const guardCommand = guardToolInput['command'] ||
+                guardToolInput['cmd'] ||
+                hookInput['command'] ||
+                '';
+            if ((0, session_hook_recovery_1.isRuntimeRecoveryCommand)(guardCommand, (0, runtime_authority_1.activeRuntimeEntrypoint)())) {
+                diagnostic('runtime identity is stale; allowing the documented recovery command through the guard');
+                process.stdout.write(JSON.stringify({
+                    hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        permissionDecision: 'allow',
+                        reason: '⚠️ Neurcode runtime identity is stale; this recovery command is allowed so governance can repair itself. All other operations stay blocked until repair completes.',
+                    },
+                }) + '\n');
+                process.exit(0);
+            }
+        }
+        denyPreToolUse(message, {
             blockContext: blockContext({
                 blockType: 'profile_or_runtime_health_block',
-                message: error instanceof Error ? error.message : String(error),
+                message,
                 runtimeMode: 'strict',
-                nextAction: 'Run `neurcode runtime repair`, restart the agent integration if requested, and retry.',
+                nextAction: 'Run `neurcode runtime repair` (allowed through this guard), restart the agent integration if requested, and retry.',
             }),
         });
         return;

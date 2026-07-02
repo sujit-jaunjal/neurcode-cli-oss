@@ -21,6 +21,19 @@ npm install -g @neurcode-ai/cli@latest
 neurcode --version
 ```
 
+## First Run (no account)
+
+```bash
+cd your-project
+neurcode pilot start
+```
+
+Runs a local first-value proof before any login: protected boundaries are
+detected from the repo profile, a protected write is blocked, one exact path is
+approved, and the neighboring path stays blocked. A source-free proof lands in
+`.neurcode/eval/local-first-value.json` (+ `.md`). Log in with `neurcode login`
+only when you want the proof in the dashboard or shared with your team.
+
 ## Primary Runtime Workflow
 
 Start with the agent session launcher:

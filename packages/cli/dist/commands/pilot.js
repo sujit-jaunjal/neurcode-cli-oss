@@ -18,6 +18,7 @@ const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const eval_demo_command_1 = require("../utils/eval-demo-command");
 const activation_telemetry_1 = require("../utils/activation-telemetry");
+const local_first_value_1 = require("../utils/local-first-value");
 const first_value_proof_1 = require("../utils/first-value-proof");
 const pilot_evidence_io_1 = require("../utils/pilot-evidence-io");
 const pilot_evidence_pack_1 = require("../utils/pilot-evidence-pack");
@@ -27,44 +28,55 @@ function emitJson(value) {
 function registerPilotCommands(program) {
     const pilot = program.command('pilot').description('Self-Serve Pilot Operating System utilities');
     // ── start (headline front door) ──────────────────────────────────────────────
-    // The canonical "first aha" entry. A thin alias to the same engine as
-    // `neurcode eval demo --fixture`: one command runs a complete, safe, local
-    // governance loop against a throwaway fixture (no account, no cloud auth, no
-    // source leaves the machine) and writes a source-free summary the dashboard
-    // can import. `eval demo` stays as the equivalent, documented alternative.
+    // Local-First Aha V1: the canonical first command. It runs a complete local
+    // first-value proof in the user's own repository BEFORE any login — detect
+    // boundaries, block a protected write, approve one exact path, show the
+    // neighbor stays blocked, and write a source-free proof artifact. Login and
+    // dashboard sync are offered only after the proof exists. The fixture
+    // sandbox stays available behind `--fixture` (same engine as `eval demo`).
     pilot
         .command('start')
-        .description('Show the exact next command for a source-free first-value proof in this repo')
+        .description('Run a local, login-free first-value proof in this repo (block → exact approval → neighbor containment)')
         .option('--dir <path>', 'Repository root (default: current directory)')
-        .option('--agent <id>', 'Agent posture: claude | codex | cursor | vscode | copilot', 'codex')
-        .option('--fixture', 'Run the safe local fixture demo instead of first-value guidance')
+        .option('--agent <id>', 'Agent posture: claude | codex | cursor | vscode | copilot')
+        .option('--fixture', 'Run the safe throwaway fixture demo instead of the real-repo proof')
         .option('--preflight', 'Only run the buyer-friendly fixture preflight checks, then stop')
+        .option('--yes', 'Approve the demonstrated exact path without prompting')
         .option('--json', 'Output machine-readable JSON')
         .action(async (options) => {
         if (options.fixture || options.preflight) {
             (0, eval_demo_command_1.runEvalDemoCommandAction)(options);
             return;
         }
-        (0, activation_telemetry_1.trackActivationEvent)({
-            eventType: 'onboarding_step_completed',
-            commandFamily: 'pilot_start',
-            reasonCode: 'first_value.started',
-            flush: false,
-        });
-        const state = await (0, first_value_proof_1.buildFirstValueCliState)({ dir: options.dir, agent: options.agent });
-        if (options.json) {
-            emitJson(state);
-        }
-        else {
-            console.log((0, first_value_proof_1.renderFirstValueStart)(state));
-        }
-        if (state.proof.missingSteps.length === 0) {
-            (0, activation_telemetry_1.trackActivationEvent)({
-                eventType: 'onboarding_step_completed',
-                commandFamily: 'pilot_start',
-                reasonCode: 'first_value.completed',
-                flush: false,
+        try {
+            const result = await (0, local_first_value_1.runLocalFirstValue)({
+                dir: options.dir,
+                agent: options.agent,
+                assumeYes: options.yes === true,
+                nonInteractive: options.json === true,
             });
+            if (options.json) {
+                emitJson({
+                    schemaVersion: result.artifact.schemaVersion,
+                    ok: result.ok,
+                    outcome: result.outcome,
+                    artifact: result.artifact,
+                    artifactFiles: result.artifactFiles,
+                });
+            }
+            else {
+                console.log(result.text);
+            }
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (options.json)
+                emitJson({ ok: false, error: message });
+            else {
+                console.error(`Local first-value proof failed: ${message}`);
+                console.error('Try the safe sandbox instead: neurcode pilot start --fixture');
+            }
+            process.exitCode = 1;
         }
     });
     pilot
