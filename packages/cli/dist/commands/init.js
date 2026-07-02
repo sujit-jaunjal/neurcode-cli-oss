@@ -279,12 +279,21 @@ async function initCommand(options) {
         }
         // Ensure we use a credential scoped to the selected workspace before any project operations.
         // This avoids linking a folder to org B while creating/fetching projects in org A.
-        let selectedOrgApiKey = process.env.NEURCODE_API_KEY || (0, config_1.getApiKey)(selectedOrg.id) || undefined;
+        const envApiKey = process.env.NEURCODE_API_KEY || undefined;
+        const strictOrgApiKey = (0, config_1.getApiKey)(selectedOrg.id) || undefined;
+        const fallbackApiKey = config.apiKey || (0, config_1.getApiKey)() || undefined;
+        let shouldBackfillSelectedOrgKey = false;
+        let selectedOrgApiKey = envApiKey || strictOrgApiKey || undefined;
+        if (!selectedOrgApiKey && fallbackApiKey) {
+            selectedOrgApiKey = fallbackApiKey;
+            shouldBackfillSelectedOrgKey = true;
+        }
         if (!selectedOrgApiKey && process.stdout.isTTY && !process.env.CI) {
             (0, messages_1.printInfo)('Workspace Connection Required', `You selected "${selectedOrg.name}". Connecting this runtime to that workspace now...`);
             const { loginCommand } = await Promise.resolve().then(() => __importStar(require('./login')));
             await loginCommand({ orgId: selectedOrg.id });
             selectedOrgApiKey = process.env.NEURCODE_API_KEY || (0, config_1.getApiKey)(selectedOrg.id) || undefined;
+            shouldBackfillSelectedOrgKey = false;
         }
         if (!selectedOrgApiKey) {
             (0, messages_1.printError)('Missing workspace runtime connection', undefined, [
@@ -390,6 +399,9 @@ async function initCommand(options) {
             workspaceRole: selectedOrg.role,
             projectId: project.id,
         });
+        if (shouldBackfillSelectedOrgKey && selectedOrgApiKey) {
+            (0, config_1.saveGlobalAuth)(selectedOrgApiKey, apiUrl, selectedOrg.id);
+        }
         // ─── Step 6: Success Summary ────────────────────────────────
         printOperationalSummary('Governance ownership activated', [
             `Workspace:    ${selectedOrg.name}`,
