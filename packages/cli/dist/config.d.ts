@@ -23,6 +23,17 @@ export interface LocalGovernanceSigningMaterial {
 export declare function getOrCreateLocalGovernanceSigningMaterial(options?: {
     autoProvision?: boolean;
 }): LocalGovernanceSigningMaterial | null;
+/**
+ * Return any persisted runtime credential without using the current repo's
+ * workspace binding as a filter.
+ *
+ * This is intentionally narrower than loadConfig()/getApiKey(): it is used by
+ * repo connection flows that first need to ask the API which workspaces the
+ * authenticated user can actually access. A stale .neurcode/config.json should
+ * not force a fresh browser login when the machine already has a valid runtime
+ * credential for the same user.
+ */
+export declare function getAnyPersistedApiKey(): string | null;
 export declare function loadConfig(): NeurcodeConfig;
 /**
  * Get API key with helpful error message if not found

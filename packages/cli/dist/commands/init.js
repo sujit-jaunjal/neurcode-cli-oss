@@ -169,12 +169,17 @@ async function initCommand(options) {
         config.apiKey = process.env.NEURCODE_API_KEY || config.apiKey;
         const apiUrl = (config.apiUrl || config_1.DEFAULT_API_URL).replace(/\/$/, '');
         if (!config.apiKey) {
+            config.apiKey = process.env.NEURCODE_API_KEY || (0, config_1.getAnyPersistedApiKey)() || undefined;
+        }
+        if (!config.apiKey) {
             if (process.stdout.isTTY && !process.env.CI) {
-                (0, messages_1.printInfo)('Authentication Required', 'Please log in to initialize a project.');
-                const { loginCommand } = await Promise.resolve().then(() => __importStar(require('./login')));
-                await loginCommand();
-                config = (0, config_1.loadConfig)();
-                config.apiKey = process.env.NEURCODE_API_KEY || config.apiKey || (0, config_1.requireApiKey)();
+                (0, messages_1.printError)('Authentication Required', undefined, [
+                    'Please log in before connecting this repository:',
+                    '   neurcode login',
+                    'Then rerun:',
+                    '   neurcode repo connect',
+                ]);
+                process.exit(1);
             }
             else {
                 config.apiKey = (0, config_1.requireApiKey)();
@@ -281,24 +286,18 @@ async function initCommand(options) {
         // This avoids linking a folder to org B while creating/fetching projects in org A.
         const envApiKey = process.env.NEURCODE_API_KEY || undefined;
         const strictOrgApiKey = (0, config_1.getApiKey)(selectedOrg.id) || undefined;
-        const fallbackApiKey = config.apiKey || (0, config_1.getApiKey)() || undefined;
+        const fallbackApiKey = config.apiKey || (0, config_1.getAnyPersistedApiKey)() || undefined;
         let shouldBackfillSelectedOrgKey = false;
         let selectedOrgApiKey = envApiKey || strictOrgApiKey || undefined;
         if (!selectedOrgApiKey && fallbackApiKey) {
             selectedOrgApiKey = fallbackApiKey;
             shouldBackfillSelectedOrgKey = true;
         }
-        if (!selectedOrgApiKey && process.stdout.isTTY && !process.env.CI) {
-            (0, messages_1.printInfo)('Workspace Connection Required', `You selected "${selectedOrg.name}". Connecting this runtime to that workspace now...`);
-            const { loginCommand } = await Promise.resolve().then(() => __importStar(require('./login')));
-            await loginCommand({ orgId: selectedOrg.id });
-            selectedOrgApiKey = process.env.NEURCODE_API_KEY || (0, config_1.getApiKey)(selectedOrg.id) || undefined;
-            shouldBackfillSelectedOrgKey = false;
-        }
         if (!selectedOrgApiKey) {
             (0, messages_1.printError)('Missing workspace runtime connection', undefined, [
+                'Your machine is logged in, but no usable runtime credential was found for this workspace.',
                 `Run: neurcode login --org ${selectedOrg.id}`,
-                'Then rerun: neurcode init',
+                'Then rerun: neurcode repo connect',
             ]);
             process.exit(1);
         }

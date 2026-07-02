@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_API_URL = void 0;
 exports.getOrCreateLocalGovernanceSigningMaterial = getOrCreateLocalGovernanceSigningMaterial;
+exports.getAnyPersistedApiKey = getAnyPersistedApiKey;
 exports.loadConfig = loadConfig;
 exports.getApiKey = getApiKey;
 exports.requireApiKey = requireApiKey;
@@ -165,6 +166,22 @@ function pickApiKeyFromKeyring(globalCfg, desiredOrgId) {
     if (firstOrgId)
         return keyring[firstOrgId];
     return undefined;
+}
+/**
+ * Return any persisted runtime credential without using the current repo's
+ * workspace binding as a filter.
+ *
+ * This is intentionally narrower than loadConfig()/getApiKey(): it is used by
+ * repo connection flows that first need to ask the API which workspaces the
+ * authenticated user can actually access. A stale .neurcode/config.json should
+ * not force a fresh browser login when the machine already has a valid runtime
+ * credential for the same user.
+ */
+function getAnyPersistedApiKey() {
+    const global = readGlobalAuthFile();
+    if (!global)
+        return null;
+    return pickApiKeyFromKeyring(global.data) || null;
 }
 function loadConfig() {
     const config = {};

@@ -215,6 +215,21 @@ async function loginCommand(options) {
             if (pollData.status === 'approved') {
                 if (pollData.apiKey) {
                     const savedOrgId = pollData.organizationId || desiredOrgId || undefined;
+                    if (desiredOrgWasExplicit && desiredOrgId && savedOrgId && savedOrgId !== desiredOrgId) {
+                        (0, messages_1.printError)('Workspace approval mismatch', undefined, [
+                            `Requested workspace: ${desiredOrgId}`,
+                            `Approved workspace:  ${savedOrgId}`,
+                            'No credential was saved for the wrong workspace.',
+                            'Switch workspace in the dashboard or run plain `neurcode login` to connect your current browser workspace.',
+                        ]);
+                        (0, activation_telemetry_1.trackActivationEvent)({
+                            eventType: 'cli_login_completed',
+                            commandFamily: 'login',
+                            reasonCode: 'login.workspace_mismatch',
+                            success: false,
+                        });
+                        process.exit(1);
+                    }
                     // Save runtime credential to global config
                     (0, config_1.saveGlobalAuth)(pollData.apiKey, apiUrl, savedOrgId);
                     // Get user info for personalized message
