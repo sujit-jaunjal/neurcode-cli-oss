@@ -175,15 +175,24 @@ function resolveApiUrl(apiUrl) {
     return (apiUrl || config.apiUrl || config_1.DEFAULT_API_URL).replace(/\/$/, '');
 }
 function resolveApiKey(orgId) {
-    return (0, config_1.getApiKey)(orgId || undefined) || (0, config_1.getApiKey)();
+    // Strict workspace scoping: a proof intended for one workspace must never
+    // be submitted with another workspace's credential (the API can only 403
+    // API_KEY_ORG_MISMATCH, which would burn the queued proof). No cross-org
+    // fallback — a missing workspace credential keeps the proof queued.
+    if (orgId)
+        return (0, config_1.getApiKey)(orgId);
+    return (0, config_1.getApiKey)();
 }
 async function submitFirstValueActivationProof(input) {
     const proof = (0, contracts_1.assertFirstValueActivationProofPayload)(input.proof);
     const apiUrl = resolveApiUrl(input.apiUrl);
     const apiKey = input.apiKey === undefined ? resolveApiKey(input.orgId) : input.apiKey;
     if (!apiKey) {
-        queueFirstValueActivationProof({ proof, orgId: input.orgId, apiUrl, reasonCode: 'proof.queued.no_auth' });
-        return { synced: false, queued: true, duplicate: false, reasonCode: 'proof.queued.no_auth' };
+        const reasonCode = input.orgId && input.apiKey === undefined
+            ? 'proof.queued.no_matching_workspace_credential'
+            : 'proof.queued.no_auth';
+        queueFirstValueActivationProof({ proof, orgId: input.orgId, apiUrl, reasonCode });
+        return { synced: false, queued: true, duplicate: false, reasonCode };
     }
     const response = await postProof({
         proof,
@@ -244,9 +253,12 @@ async function flushFirstValueActivationProofQueue(options = {}) {
         const apiUrl = resolveApiUrl(options.apiUrl || item.apiUrl);
         const apiKey = resolveApiKey(orgId || undefined);
         if (!apiKey) {
+            const reasonCode = orgId
+                ? 'proof.retry.no_matching_workspace_credential'
+                : 'proof.retry.no_auth';
             retryable += 1;
-            reasonCodes.add('proof.retry.no_auth');
-            remaining.push({ ...item, attempts: item.attempts + 1, lastReasonCode: 'proof.retry.no_auth' });
+            reasonCodes.add(reasonCode);
+            remaining.push({ ...item, attempts: item.attempts + 1, lastReasonCode: reasonCode });
             continue;
         }
         const response = await postProof({

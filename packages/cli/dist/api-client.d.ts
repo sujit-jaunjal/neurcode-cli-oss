@@ -657,6 +657,7 @@ export declare class ApiClient {
     private apiUrl;
     private apiKey?;
     private scopedOrgId?;
+    private readonly disableOrgHeaderFallback;
     private readonly requestTimeout;
     private readonly applyRequestTimeout;
     private readonly applyRecoveryWaitMs;

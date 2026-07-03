@@ -8,7 +8,7 @@ Public, sanitized repository for the Neurcode CLI runtime.
 
 This repository is generated from the private `neurcode` monorepo and synced to the `@neurcode-ai/cli` command surface.
 
-Current exported CLI package version in this repo: `0.20.23`.
+Current exported CLI package version in this repo: `0.20.24`.
 
 ## Why this repository exists
 

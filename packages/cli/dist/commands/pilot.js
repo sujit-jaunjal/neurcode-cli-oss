@@ -83,7 +83,9 @@ function registerPilotCommands(program) {
         .command('first-value')
         .description('Alias for the guided source-free first-value proof workflow')
         .option('--dir <path>', 'Repository root (default: current directory)')
-        .option('--agent <id>', 'Agent posture: claude | codex | cursor | vscode | copilot', 'codex')
+        // No default agent: an unset --agent lets detectOnboardEnvironment pick the
+        // real host (Claude/Cursor/VS Code/Codex) instead of hardcoding codex.
+        .option('--agent <id>', 'Agent posture: claude | codex | cursor | vscode | copilot')
         .option('--json', 'Output machine-readable JSON')
         .action(async (options) => {
         (0, activation_telemetry_1.trackActivationEvent)({
@@ -103,7 +105,9 @@ function registerPilotCommands(program) {
         .description('Generate source-free pilot reports')
         .option('--first-value', 'Summarize first-value proof progress')
         .option('--dir <path>', 'Repository root (default: current directory)')
-        .option('--agent <id>', 'Agent posture: claude | codex | cursor | vscode | copilot', 'codex')
+        // No default agent: environment detection picks the real host unless the
+        // caller explicitly overrides.
+        .option('--agent <id>', 'Agent posture: claude | codex | cursor | vscode | copilot')
         .option('--json', 'Output machine-readable JSON')
         .action(async (options) => {
         if (!options.firstValue) {

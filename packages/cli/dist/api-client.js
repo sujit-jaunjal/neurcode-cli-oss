@@ -40,6 +40,7 @@ class ApiClient {
     apiUrl;
     apiKey;
     scopedOrgId;
+    disableOrgHeaderFallback;
     requestTimeout;
     applyRequestTimeout;
     applyRecoveryWaitMs;
@@ -60,6 +61,7 @@ class ApiClient {
         this.apiUrl = (config.apiUrl || 'https://api.neurcode.com').replace(/\/$/, ''); // Remove trailing slash
         this.apiKey = config.apiKey;
         this.scopedOrgId = typeof config.orgId === 'string' && config.orgId.trim() ? config.orgId.trim() : undefined;
+        this.disableOrgHeaderFallback = config.disableOrgHeaderFallback === true;
         this.requestTimeout = parsePositiveIntEnv('NEURCODE_REQUEST_TIMEOUT_MS', 300000);
         // Apply often includes model retries + per-file fallback, so use a longer default.
         this.applyRequestTimeout = parsePositiveIntEnv('NEURCODE_APPLY_TIMEOUT_MS', Math.max(this.requestTimeout, 900000));
@@ -88,7 +90,9 @@ class ApiClient {
      * Explicit constructor scope wins; fallback is project-local state.
      */
     resolveRequestOrgId() {
-        return this.scopedOrgId || (0, state_1.getOrgId)();
+        if (this.scopedOrgId)
+            return this.scopedOrgId;
+        return this.disableOrgHeaderFallback ? null : (0, state_1.getOrgId)();
     }
     /**
      * Create a fetch request with timeout support

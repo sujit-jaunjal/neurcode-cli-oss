@@ -9,6 +9,11 @@ export interface NeurcodeConfig {
     apiKey?: string;
     projectId?: string;
     orgId?: string;
+    /**
+     * Disable ApiClient's project-local org fallback for cross-workspace
+     * discovery endpoints. Most API calls should keep the fallback enabled.
+     */
+    disableOrgHeaderFallback?: boolean;
 }
 export interface LocalGovernanceSigningMaterial {
     signingKey: string;

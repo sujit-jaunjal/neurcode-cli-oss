@@ -71,11 +71,13 @@ async function showRepoConnectStatus(options) {
     const cloudSynced = repoConnection.status === 'cloud_proof_synced'
         || repoConnection.status === 'cloud_project_owned'
         || repoConnection.status === 'cloud_runtime_repo_owned';
-    const queued = queue.matchingProjectQueued || repoConnection.status === 'local_proof_queued';
+    const staleBinding = repoConnection.status === 'stale_local_config';
+    const queued = !staleBinding
+        && (queue.matchingProjectQueued || repoConnection.status === 'local_proof_queued');
     const nextCommand = !binding.orgId || !binding.projectId
         ? 'neurcode repo connect'
-        : !cloudSynced && queued
-            ? 'neurcode sync --activation'
+        : staleBinding
+            ? 'neurcode repo connect --relink'
             : !cloudSynced
                 ? 'neurcode sync --activation'
                 : state.proof.nextRecommendedCommand;
@@ -93,6 +95,7 @@ async function showRepoConnectStatus(options) {
                 proofStatus: repoConnection.status,
                 proofSynced: cloudSynced,
                 proofQueued: queued,
+                staleWorkspaceBinding: staleBinding,
                 apiReachable: state.local.apiReachable,
             },
             queue: {
@@ -107,7 +110,7 @@ async function showRepoConnectStatus(options) {
     console.log(`  Local repo connected: ${binding.orgId && binding.projectId ? chalk.green('yes') : chalk.yellow('no')}`);
     console.log(`  Workspace:            ${binding.orgName || binding.orgId || 'not linked'}`);
     console.log(`  Project ID:           ${binding.projectId || 'not linked'}`);
-    console.log(`  Cloud proof:          ${cloudSynced ? chalk.green(repoConnection.status) : queued ? chalk.yellow('queued/offline') : chalk.yellow('missing')}`);
+    console.log(`  Cloud proof:          ${cloudSynced ? chalk.green(repoConnection.status) : staleBinding ? chalk.yellow('stale (binding belongs to a different workspace)') : queued ? chalk.yellow('queued/offline') : chalk.yellow('missing')}`);
     console.log(`  API reachable:        ${state.local.apiReachable === null ? 'not checked' : state.local.apiReachable ? 'yes' : 'no'}`);
     console.log(`  Queue:                ${queue.queueLength} proof${queue.queueLength === 1 ? '' : 's'}`);
     console.log(chalk.dim(`  Queue file:           ${queue.path}`));

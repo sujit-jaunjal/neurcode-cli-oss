@@ -169,7 +169,17 @@ async function buildFirstValueCliState(options = {}) {
     const runtimeAdapterReady = localAgentReady(repoRoot, setupTarget);
     const orgId = repoConfig.orgId || connection?.organizationId || null;
     const projectId = repoConfig.projectId || connection?.projectId || null;
-    const apiKey = (0, config_1.getApiKey)(orgId || undefined) || (0, config_1.getApiKey)();
+    const envCredential = process.env.NEURCODE_API_KEY || null;
+    const bindingScopedCredential = orgId ? (0, config_1.getApiKey)(orgId) : null;
+    const anyPersistedCredential = (0, config_1.getAnyPersistedApiKey)();
+    const machineCredential = envCredential || bindingScopedCredential || (0, config_1.getApiKey)();
+    // A local binding whose workspace has no matching machine credential while
+    // other workspace credentials exist is stale config from another account.
+    // It must never complete steps or claim a syncable queued proof.
+    const staleLocalBinding = Boolean(orgId)
+        && !bindingScopedCredential
+        && !envCredential
+        && Boolean(anyPersistedCredential);
     const cloud = await fetchCloudFirstValueState({ orgId, apiUrl: connection?.apiUrl });
     const proofQueue = (0, activation_proof_1.getFirstValueActivationProofQueueStatus)(projectId);
     let brainStatus = 'not_evaluated';
@@ -188,20 +198,28 @@ async function buildFirstValueCliState(options = {}) {
     const cloudProof = cloud.state?.proof;
     const cloudRepoConnected = cloudProof?.steps.find((step) => step.id === 'repo_connect')?.complete === true
         && cloudProof.repoConnection.status !== 'local_proof_queued';
-    const localRepoConnected = Boolean(connection || projectId);
-    const localProofQueued = proofQueue.matchingProjectQueued || (localRepoConnected && !cloudRepoConnected);
+    const localRepoConnected = Boolean(connection || projectId) && !staleLocalBinding;
+    const localProofQueued = !staleLocalBinding
+        && (proofQueue.matchingProjectQueued || (localRepoConnected && !cloudRepoConnected));
     const repoConnectionStatus = cloudRepoConnected
         ? cloudProof?.repoConnection.status || 'cloud_proof_synced'
-        : localProofQueued
-            ? 'local_proof_queued'
-            : 'missing';
+        : staleLocalBinding
+            ? 'stale_local_config'
+            : localProofQueued
+                ? 'local_proof_queued'
+                : 'missing';
     const repoConnectionSource = cloudRepoConnected
         ? cloudProof?.repoConnection.source || 'activation_proof'
-        : localProofQueued
+        : staleLocalBinding || localProofQueued
             ? 'local_config'
             : 'none';
+    // Login reflects credentials on this machine (or an authenticated cloud
+    // proof) — never the bare repo binding, which any clone can carry.
+    const loggedIn = Boolean(machineCredential || anyPersistedCredential || cloudProof?.workspaceId);
     const state = (0, contracts_1.buildFirstValueState)({
-        workspaceId: orgId || cloudProof?.workspaceId || null,
+        workspaceId: loggedIn && !staleLocalBinding
+            ? (orgId || cloudProof?.workspaceId || null)
+            : (cloudProof?.workspaceId || null),
         repoLabel: cloudProof?.repo.label || repoLabel,
         repoHash: cloudProof?.repo.hash || repoHash,
         projectId: projectId || cloudProof?.repoConnection.projectId || null,
@@ -210,7 +228,7 @@ async function buildFirstValueCliState(options = {}) {
         repoConnectionSource,
         repoProofSyncedAt: cloudProof?.repoConnection.cloudProofSyncedAt || null,
         repoProofQueued: localProofQueued,
-        loggedIn: Boolean(apiKey || cloudProof?.workspaceId),
+        loggedIn,
         repoConnected: localRepoConnected || cloudRepoConnected,
         brainStatus,
         agentConfigured: runtimeAdapterReady || runtimeAtLeast(cloudProof?.runtimeStatus, 'configured'),
@@ -227,6 +245,12 @@ async function buildFirstValueCliState(options = {}) {
         proof: {
             ...state.proof,
             steps: state.proof.steps.map((step) => {
+                if (step.id === 'repo_connect' && staleLocalBinding) {
+                    return {
+                        ...step,
+                        recommendedCommand: 'neurcode repo connect --relink',
+                    };
+                }
                 if (step.id === 'governed_check') {
                     return {
                         ...step,
@@ -254,7 +278,10 @@ async function buildFirstValueCliState(options = {}) {
         },
     };
     const nextStep = adjusted.proof.steps.find((step) => !step.complete);
-    if (nextStep?.id === 'agent_setup') {
+    if (nextStep?.id === 'repo_connect' && staleLocalBinding) {
+        adjusted.proof.nextRecommendedCommand = 'neurcode repo connect --relink';
+    }
+    else if (nextStep?.id === 'agent_setup') {
         adjusted.proof.nextRecommendedCommand = (0, onboard_1.agentSetupCommandFor)(commandAgent);
     }
     else if (nextStep?.id === 'governed_check') {

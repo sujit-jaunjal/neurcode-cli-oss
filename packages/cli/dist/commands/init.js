@@ -226,7 +226,13 @@ async function initCommand(options) {
             }
         }
         config.apiUrl = apiUrl;
-        const client = new api_client_1.ApiClient(config);
+        // Workspace Discovery must not be pinned to the repo's existing binding:
+        // a stale .neurcode/config.json from another account would send its org as
+        // x-org-id and turn the membership listing into a guaranteed 403, making
+        // relink impossible. Listing the authenticated user's workspaces is
+        // inherently cross-org, so this client explicitly disables project-local
+        // org-header fallback.
+        const client = new api_client_1.ApiClient({ ...config, orgId: undefined, disableOrgHeaderFallback: true });
         const cwd = process.cwd();
         const dirName = (0, path_1.basename)(cwd);
         // Check if already linked
