@@ -2,6 +2,8 @@
 
 [![OSS CI](https://github.com/sujit-jaunjal/neurcode-cli-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/sujit-jaunjal/neurcode-cli-oss/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@neurcode-ai/cli)](https://www.npmjs.com/package/@neurcode-ai/cli)
+[![CLI downloads](https://img.shields.io/npm/dy/@neurcode-ai/cli?label=CLI%20downloads%20%2812mo%29)](https://www.npmjs.com/package/@neurcode-ai/cli)
+[![Open VSX downloads](https://img.shields.io/open-vsx/dt/sujit-jaunjal/neurcode-governance?label=Open%20VSX%20installs)](https://open-vsx.org/extension/sujit-jaunjal/neurcode-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Public, sanitized repository for the Neurcode CLI runtime.
@@ -9,6 +11,16 @@ Public, sanitized repository for the Neurcode CLI runtime.
 This repository is generated from the private `neurcode` monorepo and synced to the `@neurcode-ai/cli` command surface.
 
 Current exported CLI package version in this repo: `0.20.24`.
+
+## Distribution snapshot
+
+| Surface | Current public signal | Source |
+|---|---:|---|
+| Neurcode npm maintainer packages | 59,019 downloads / last 12 months across 14 packages | [`npm: neurcode`](https://www.npmjs.com/~neurcode) |
+| `@neurcode-ai/cli` | 30,727 downloads / last 12 months | [`@neurcode-ai/cli`](https://www.npmjs.com/package/@neurcode-ai/cli) |
+| VS Code / Cursor-compatible extension | 3,245 Open VSX installs | [`sujit-jaunjal.neurcode-governance`](https://open-vsx.org/extension/sujit-jaunjal/neurcode-governance) |
+
+_Snapshot generated from the public npm downloads API and Open VSX API on 2026-07-06 UTC. npm downloads indicate registry install activity, not unique active users._
 
 ## Why this repository exists
 
