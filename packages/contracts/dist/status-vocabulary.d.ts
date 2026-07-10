@@ -1,0 +1,45 @@
+export declare const STATUS_VOCABULARY_VERSION = "neurcode.status.v1";
+export declare const STATUS_TERMS: {
+    readonly verificationComplete: "Verification Complete";
+    readonly safePatchApplied: "Safe Patch Applied";
+    readonly patchRejected: "Patch Rejected";
+    readonly rollbackAvailable: "Rollback Available";
+    readonly rollbackApplied: "Rollback Applied";
+    readonly replayAvailable: "Replay Available";
+    readonly evidenceGenerated: "Evidence Generated";
+    readonly manualReviewRecommended: "Manual Review Recommended";
+    readonly filesystemChangedSincePreview: "Filesystem Changed Since Preview";
+    readonly transactionVerified: "Transaction Verified";
+    readonly retrySafe: "Retry Safe";
+};
+export type StatusTermKey = keyof typeof STATUS_TERMS;
+export type SeverityLabel = 'critical' | 'blocking' | 'high' | 'advisory' | 'medium' | 'warning' | 'low' | 'info';
+export declare const SEVERITY_LABELS: Record<SeverityLabel, string>;
+export type VerificationSummaryState = 'clean' | 'issues' | 'partial' | 'failed';
+export declare const VERIFICATION_SUMMARY_LABELS: Record<VerificationSummaryState, string>;
+export type PatchState = 'applied' | 'partial' | 'rejected' | 'stale_preview' | 'filesystem_changed_since_preview' | 'rollback_applied' | 'rollback_stale' | 'rollback_rejected';
+export type ConfidenceLabel = 'HIGH' | 'MEDIUM' | 'LOW';
+export declare const CONFIDENCE_LABELS: Record<ConfidenceLabel, string>;
+export declare function statusTerm(key: StatusTermKey): string;
+export declare function severityLabel(severity: SeverityLabel): string;
+export declare function toPatchStateLabel(state: PatchState): string;
+export declare function toRetrySafeMessage(context: string): string;
+export declare function toManualReviewMessage(context: string): string;
+export declare function toVerificationCompleteTitle(confidenceSuffix?: string): string;
+export declare function toVerificationSummaryLabel(state: VerificationSummaryState): string;
+export declare const DAEMON_ERROR_CODES: {
+    readonly badRequest: "daemon.bad_request";
+    readonly unauthorized: "daemon.unauthorized";
+    readonly forbidden: "daemon.forbidden";
+    readonly notFound: "daemon.not_found";
+    readonly routeNotFound: "daemon.route_not_found";
+    readonly timeout: "daemon.timeout";
+    readonly conflict: "daemon.conflict";
+    readonly validationFailed: "daemon.validation_failed";
+    readonly rateLimited: "daemon.rate_limited";
+    readonly internalError: "daemon.internal_error";
+    readonly unknown: "daemon.error";
+};
+export type DaemonErrorCode = typeof DAEMON_ERROR_CODES[keyof typeof DAEMON_ERROR_CODES];
+export declare const ONBOARDING_HINTS: readonly ["Run your first verification", "Review findings", "Preview deterministic patch", "Apply safe patch", "View evidence", "Replay execution history"];
+//# sourceMappingURL=status-vocabulary.d.ts.map

@@ -16,7 +16,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@neurcode-ai/contracts": "^0.2.5",
+    "@neurcode-ai/contracts": "file:../contracts",
     "micromatch": "^4.0.8"
   }
 }

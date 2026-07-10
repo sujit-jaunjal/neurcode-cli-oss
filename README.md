@@ -25,6 +25,7 @@ It is designed for:
 Included:
 
 - published CLI runtime artifacts (`packages/cli/dist`)
+- compiled source-free contracts consumed by the CLI (`packages/contracts/dist`)
 - local telemetry package consumed by the CLI (`packages/telemetry/dist`)
 - OSS-safe docs and governance files
 - repository safety checks and boundary validation scripts
@@ -32,7 +33,7 @@ Included:
 Excluded:
 
 - Private API/control-plane implementation
-- Internal monorepo sources outside the exported CLI + telemetry packages
+- Internal monorepo sources outside the exported CLI, contracts, governance runtime, and telemetry artifacts
 - Local runtime artifacts and credential-bearing files
 
 ## Quick start
