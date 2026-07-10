@@ -17,22 +17,38 @@ For terminology, see [docs/governance-vocabulary.md](https://github.com/sujit-ja
 ## Install
 
 ```bash
-npm install -g @neurcode-ai/cli@latest
-neurcode --version
+npx -y @neurcode-ai/cli@latest setup
 ```
 
-## First Run (no account)
+`setup` is the canonical account-backed first run and resume command. It detects
+login, repository ownership, Brain indexing, and agent integration state, then
+prints exactly one next action. In an interactive terminal it can open browser
+login and invoke repository connection; `--status` and `--json` are read-only.
 
 ```bash
-cd your-project
-neurcode pilot start
+neurcode setup --agent claude
+neurcode setup --status
+neurcode setup --json
 ```
 
-Runs a local first-value proof before any login: protected boundaries are
-detected from the repo profile, a protected write is blocked, one exact path is
-approved, and the neighboring path stays blocked. A source-free proof lands in
-`.neurcode/eval/local-first-value.json` (+ `.md`). Log in with `neurcode login`
-only when you want the proof in the dashboard or shared with your team.
+Browser login always requires an explicit workspace confirmation. Use
+`neurcode login --choose-workspace` when a repo-local workspace binding is stale
+or when you intentionally want to choose a different accessible workspace.
+
+## First Proof (no account)
+
+```bash
+npx -y @neurcode-ai/cli@latest pilot start --fixture --agent codex
+```
+
+Runs a throwaway local first-value proof before any login: a protected write is
+blocked, one exact path is approved, and the neighboring path stays blocked.
+The proof is source-free and does not modify a real repository. When you want a
+real repository in a personal or team dashboard, run `neurcode setup --agent
+<agent>` rather than assembling login and repository commands manually.
+
+Advanced evaluators may omit `--fixture` to run the local proof in the current
+repository; that still does not establish cloud ownership or evidence sync.
 
 ## Primary Runtime Workflow
 
@@ -46,6 +62,10 @@ neurcode run claude --goal "Add retry with backoff to the export task"
 The launcher refreshes repo metadata, creates the governed session contract,
 prints the agent starter prompt, records a source-free launch event, and exposes
 the same state to the local daemon / Runtime Companion.
+
+`neurcode daemon` is the legacy localhost dashboard/process transport. It is
+not required for login, setup, repository sync, Brain indexing, or normal agent
+governance; run it only for workflows that explicitly depend on that bridge.
 
 Local session files are classified `local_private`, bounded, and secret-redacted before persistence. Cloud runtime payloads use `neurcode.intent-summary.v1` and exclude raw prompts, plan prose, chat, source, diffs, shell command bodies, absolute paths, and credentials.
 

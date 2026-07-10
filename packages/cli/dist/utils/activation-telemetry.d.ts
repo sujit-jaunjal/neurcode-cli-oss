@@ -23,6 +23,18 @@ export declare function setActivationTelemetryEnabled(enabled: boolean): void;
 export declare function buildActivationTelemetryEvent(store: ActivationTelemetryStore, options: TrackActivationOptions): ActivationTelemetryEvent;
 export declare function maybeShowActivationTelemetryNotice(): void;
 export declare function trackActivationEvent(options: TrackActivationOptions): void;
+/**
+ * Record a completion milestone and wait for one bounded delivery attempt.
+ *
+ * The event is persisted before network I/O. A timeout or server failure leaves
+ * it in the durable queue, so command correctness never depends on telemetry
+ * availability while dashboards can update immediately when the API is healthy.
+ */
+export declare function trackActivationEventAndFlush(options: TrackActivationOptions): Promise<{
+    attempted: number;
+    sent: number;
+    remaining: number;
+}>;
 export declare function flushActivationTelemetry(): Promise<{
     attempted: number;
     sent: number;

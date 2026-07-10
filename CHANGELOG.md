@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.25] - 2026-07-10
+
+### Added
+
+- Added `neurcode setup`, the canonical resumable first-run command for explicit workspace login, repository ownership, local Brain indexing, and agent integration.
+- Added profile-aware agent selection without silently defaulting to an unrelated coding environment.
+
+### Changed
+
+- Browser device authorization now requires an explicit personal or organization workspace and returns the workspace-scoped credential only once to the waiting CLI.
+- `neurcode daemon` is documented as an optional legacy bridge, not an onboarding or runtime prerequisite.
+- Login, dashboard setup, public docs, and the OSS export now share the same proof-versus-real-repository entry points.
+
+### Security
+
+- Approval, denial, and credential exchange now serialize on the device request row; expired unclaimed credentials are cleared and revoked.
+- CLI authorization routes no longer expose raw internal failures or full connection codes in server logs.
+
 ## [0.9.44] - 2026-04-12
 
 ### Fixed

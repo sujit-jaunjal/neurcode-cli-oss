@@ -1,0 +1,388 @@
+"use strict";
+/**
+ * Canonical first-run/resume surface.
+ *
+ * `neurcode setup` owns only the deterministic activation sequence. Existing
+ * commands remain available as compatibility/advanced surfaces, but users no
+ * longer need to guess whether login, init, onboard, or activate comes first.
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.buildSetupPlan = buildSetupPlan;
+exports.normalizeProfileAgent = normalizeProfileAgent;
+exports.validateSetupAuthentication = validateSetupAuthentication;
+exports.collectSetupPlan = collectSetupPlan;
+exports.setupCommand = setupCommand;
+const brain_1 = require("@neurcode-ai/brain");
+const cli_runtime_1 = require("@neurcode-ai/cli-runtime");
+const config_1 = require("../config");
+const state_1 = require("../utils/state");
+const project_root_1 = require("../utils/project-root");
+const activation_telemetry_1 = require("../utils/activation-telemetry");
+const init_1 = require("./init");
+const login_1 = require("./login");
+const onboard_1 = require("./onboard");
+let chalk;
+try {
+    chalk = require('chalk');
+}
+catch {
+    chalk = {
+        bold: (value) => value,
+        dim: (value) => value,
+        green: (value) => value,
+        yellow: (value) => value,
+        cyan: (value) => value,
+        red: (value) => value,
+    };
+}
+const AGENT_ADAPTERS = {
+    claude: new Set(['claude-code-hooks']),
+    cursor: new Set(['cursor-mcp']),
+    codex: new Set(['codex-mcp']),
+    copilot: new Set(['copilot-hooks']),
+    vscode: new Set(['copilot-hooks', 'vscode-extension']),
+    action: new Set(['github-action']),
+};
+function enforcementPostureFor(agent) {
+    if (!agent) {
+        return 'No coding environment has been selected; no enforcement capability is assumed.';
+    }
+    switch (agent) {
+        case 'claude':
+            return 'Hard pre-write denial only when Claude hooks are installed and healthy.';
+        case 'copilot':
+        case 'vscode':
+            return 'Hook-backed enforcement only where the host integration is installed and healthy.';
+        case 'action':
+            return 'Post-change CI advisory/admission evidence; not live host-level pre-write enforcement.';
+        case 'cursor':
+        case 'codex':
+            return 'Cooperative runtime checks and supervisor evidence; no host-level hard pre-write denial is claimed.';
+    }
+}
+function firstValueProofFor(agent) {
+    return agent === 'action'
+        ? 'neurcode pilot start --fixture'
+        : `neurcode pilot start --agent ${agent}`;
+}
+/** Pure planner used by the CLI and focused next-step tests. */
+function buildSetupPlan(input) {
+    const brainComplete = input.snapshot.brainState === 'fresh'
+        || input.snapshot.brainState === 'partial';
+    const warnings = input.snapshot.brainState === 'partial'
+        ? ['Repository Brain is partial. Setup can continue, but coverage limits remain visible in Brain status.']
+        : [];
+    const stages = [
+        { id: 'install', label: 'CLI available', complete: input.snapshot.installed },
+        { id: 'login', label: 'Workspace credential', complete: input.snapshot.authState === 'authenticated' },
+        { id: 'repository', label: 'Repository ownership', complete: input.snapshot.repositoryConnected },
+        { id: 'brain', label: 'Repository Brain', complete: brainComplete },
+        { id: 'agent', label: input.agent ? `${input.environment.label} integration` : 'Coding environment selected', complete: input.snapshot.agentConfigured },
+    ];
+    const firstIncomplete = stages.find((stage) => !stage.complete);
+    let nextAction;
+    switch (firstIncomplete?.id) {
+        case 'install':
+            nextAction = {
+                stage: 'install',
+                label: 'Use the current CLI release',
+                command: 'npx -y @neurcode-ai/cli@latest setup',
+                reason: 'Run setup through the current published CLI.',
+            };
+            break;
+        case 'login':
+            nextAction = input.snapshot.authState === 'unknown'
+                ? {
+                    stage: 'login',
+                    label: 'Diagnose credential reachability',
+                    command: 'neurcode doctor',
+                    reason: 'A saved credential exists, but the API could not be reached to validate it. Setup will not claim authentication while offline.',
+                }
+                : {
+                    stage: 'login',
+                    label: input.snapshot.authState === 'invalid' ? 'Replace the invalid credential' : 'Connect a workspace',
+                    command: 'neurcode login',
+                    reason: 'Browser approval requires an explicit personal or organization workspace.',
+                };
+            break;
+        case 'repository':
+            nextAction = {
+                stage: 'repository',
+                label: 'Bind this repository',
+                command: 'neurcode repo connect',
+                reason: 'Repository evidence needs an explicit workspace and project owner.',
+            };
+            break;
+        case 'brain':
+            nextAction = {
+                stage: 'brain',
+                label: 'Build repository intelligence',
+                command: 'neurcode brain index',
+                reason: input.snapshot.brainState === 'stale'
+                    ? 'The repository graph is stale and must be refreshed before agent setup.'
+                    : 'Create the source-free local repository graph used by governance checks.',
+            };
+            break;
+        case 'agent':
+            nextAction = input.agent
+                ? {
+                    stage: 'agent',
+                    label: `Configure ${input.environment.label}`,
+                    command: (0, onboard_1.agentSetupCommandFor)(input.agent),
+                    reason: enforcementPostureFor(input.agent),
+                }
+                : {
+                    stage: 'agent_selection',
+                    label: 'Choose your coding environment',
+                    command: 'neurcode setup --agent <claude|cursor|codex|vscode|copilot|action>',
+                    reason: 'Neurcode will not guess an agent or apply the wrong integration posture.',
+                };
+            break;
+        default:
+            if (!input.agent) {
+                nextAction = {
+                    stage: 'agent_selection',
+                    label: 'Choose your coding environment',
+                    command: 'neurcode setup --agent <claude|cursor|codex|vscode|copilot|action>',
+                    reason: 'Neurcode will not guess an agent or apply the wrong integration posture.',
+                };
+                break;
+            }
+            nextAction = {
+                stage: 'first_value_proof',
+                label: 'Run the safe first-value proof',
+                command: firstValueProofFor(input.agent),
+                reason: 'Demonstrate block, exact-path approval, and neighboring-path containment without requiring an active session.',
+            };
+    }
+    return {
+        complete: stages.every((stage) => stage.complete) && Boolean(input.agent),
+        agent: input.agent,
+        environment: input.environment,
+        enforcementPosture: enforcementPostureFor(input.agent),
+        warnings,
+        stages,
+        nextAction,
+    };
+}
+function selectedAgent(requested, detected, profileAgent) {
+    if (requested) {
+        const normalized = requested.trim().toLowerCase();
+        if (!onboard_1.ONBOARD_AGENTS.includes(normalized)) {
+            throw new Error(`Unsupported agent "${requested}". Choose: ${onboard_1.ONBOARD_AGENTS.join(', ')}.`);
+        }
+        return normalized;
+    }
+    if (detected.target !== 'terminal')
+        return detected.target;
+    return profileAgent || null;
+}
+function selectedEnvironment(agent, detected) {
+    if (!agent)
+        return detected;
+    if (detected.target === agent)
+        return detected;
+    const label = {
+        claude: 'Claude Code',
+        cursor: 'Cursor',
+        codex: 'Codex',
+        copilot: 'GitHub Copilot',
+        vscode: 'VS Code',
+        action: 'GitHub Action',
+    };
+    return { target: agent, label: label[agent], source: detected.source };
+}
+async function readBrainState(repoRoot) {
+    try {
+        const status = await (0, brain_1.repositoryGraphStatus)(repoRoot);
+        if (status.state === 'fresh' || status.state === 'partial' || status.state === 'stale') {
+            return status.state;
+        }
+        return 'missing';
+    }
+    catch {
+        return 'missing';
+    }
+}
+function agentIsConfigured(repoRoot, agent) {
+    if (!agent)
+        return false;
+    try {
+        const manifest = (0, cli_runtime_1.readActivatedRuntimeManifest)(repoRoot);
+        const expected = AGENT_ADAPTERS[agent];
+        return Boolean(manifest?.integrations?.some((integration) => expected.has(integration.adapter)));
+    }
+    catch {
+        return false;
+    }
+}
+function normalizeProfileAgent(value) {
+    if (typeof value !== 'string')
+        return null;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'claude-code' || normalized === 'claude_code')
+        return 'claude';
+    if (normalized === 'github-copilot')
+        return 'copilot';
+    if (normalized === 'vscode_copilot')
+        return 'vscode';
+    if (normalized === 'github_actions')
+        return 'action';
+    return onboard_1.ONBOARD_AGENTS.includes(normalized)
+        ? normalized
+        : null;
+}
+async function fetchProfileAgent(apiKey) {
+    const config = (0, config_1.loadConfig)();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1200);
+    try {
+        const headers = {
+            accept: 'application/json',
+            authorization: `Bearer ${apiKey}`,
+        };
+        const orgId = (0, state_1.getOrgId)();
+        if (orgId)
+            headers['x-org-id'] = orgId;
+        const response = await fetch(`${(config.apiUrl || config_1.DEFAULT_API_URL).replace(/\/$/, '')}/api/v1/account-onboarding/bootstrap`, { headers, signal: controller.signal });
+        if (!response.ok)
+            return null;
+        const body = await response.json();
+        return normalizeProfileAgent(body.profile?.primaryAgent);
+    }
+    catch {
+        return null;
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+}
+async function validateSetupAuthentication(input) {
+    if (!input.apiKey)
+        return 'missing';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1200);
+    try {
+        const headers = {
+            accept: 'application/json',
+            authorization: `Bearer ${input.apiKey}`,
+        };
+        if (input.organizationId)
+            headers['x-org-id'] = input.organizationId;
+        const response = await (input.fetchImpl || fetch)(`${input.apiUrl.replace(/\/$/, '')}/api/v1/users/me`, { headers, signal: controller.signal });
+        if (response.ok)
+            return 'authenticated';
+        if (response.status === 401 || response.status === 403)
+            return 'invalid';
+        return 'unknown';
+    }
+    catch {
+        return 'unknown';
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+}
+async function collectSetupPlan(requestedAgent) {
+    const repoRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+    const detected = (0, onboard_1.detectOnboardEnvironment)(repoRoot);
+    const config = (0, config_1.loadConfig)();
+    const organizationId = (0, state_1.getOrgId)();
+    const apiKey = organizationId
+        ? ((0, config_1.getApiKey)(organizationId) || null)
+        : (0, config_1.getAnyPersistedApiKey)();
+    const authState = await validateSetupAuthentication({
+        apiKey,
+        apiUrl: config.apiUrl || config_1.DEFAULT_API_URL,
+        organizationId,
+    });
+    const profileAgent = requestedAgent || detected.target !== 'terminal' || authState !== 'authenticated' || !apiKey
+        ? null
+        : await fetchProfileAgent(apiKey);
+    const agent = selectedAgent(requestedAgent, detected, profileAgent);
+    const environment = requestedAgent
+        ? { ...selectedEnvironment(agent, detected), source: 'explicit' }
+        : profileAgent && agent === profileAgent && detected.target === 'terminal'
+            ? { ...selectedEnvironment(agent, detected), source: 'profile' }
+            : selectedEnvironment(agent, detected);
+    const snapshot = {
+        installed: true,
+        authState,
+        repositoryConnected: Boolean((0, state_1.getOrgId)() && (0, state_1.getProjectId)()),
+        brainState: await readBrainState(repoRoot),
+        agentConfigured: agentIsConfigured(repoRoot, agent),
+    };
+    return buildSetupPlan({ snapshot, agent, environment });
+}
+function renderSetupPlan(plan, readOnly) {
+    console.log('');
+    console.log(chalk.bold('Neurcode setup'));
+    console.log(chalk.dim(`Agent: ${plan.environment.label}`));
+    console.log(chalk.dim(`Posture: ${plan.enforcementPosture}`));
+    for (const warning of plan.warnings)
+        console.log(chalk.yellow(`Warning: ${warning}`));
+    console.log('');
+    for (const stage of plan.stages) {
+        const marker = stage.complete ? chalk.green('complete') : chalk.yellow('pending');
+        console.log(`  ${marker.padEnd(12)} ${stage.label}`);
+    }
+    console.log('');
+    console.log(chalk.bold('Next action'));
+    console.log(`  ${plan.nextAction.label}`);
+    console.log(chalk.dim(`  ${plan.nextAction.reason}`));
+    console.log(chalk.cyan(`  ${plan.nextAction.command}`));
+    if (readOnly) {
+        console.log(chalk.dim('  Status mode made no changes.'));
+    }
+    console.log('');
+}
+function setupCommand(program) {
+    program
+        .command('setup')
+        .description('Canonical first-run and resume flow: login, repo, Brain, and agent readiness')
+        .option('--agent <agent>', `Target agent: ${onboard_1.ONBOARD_AGENTS.join(' | ')}`)
+        .option('--status', 'Inspect progress without starting interactive login or repository binding')
+        .option('--json', 'Output machine-readable progress without making changes')
+        .action(async (options) => {
+        try {
+            let plan = await collectSetupPlan(options.agent);
+            const readOnly = options.status === true || options.json === true;
+            const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY && !process.env.CI);
+            if (!readOnly && interactive) {
+                const loginStage = plan.stages.find((stage) => stage.id === 'login');
+                if (!loginStage?.complete && plan.nextAction.command === 'neurcode login') {
+                    await (0, login_1.loginCommand)();
+                    plan = await collectSetupPlan(options.agent);
+                }
+                const repoStage = plan.stages.find((stage) => stage.id === 'repository');
+                if (plan.stages.find((stage) => stage.id === 'login')?.complete && !repoStage?.complete) {
+                    await (0, init_1.initCommand)();
+                    plan = await collectSetupPlan(options.agent);
+                }
+                // login/init completion events were durably queued by their commands;
+                // make one bounded delivery attempt before rendering the resumed state.
+                await (0, activation_telemetry_1.flushActivationTelemetry)();
+            }
+            if (options.json) {
+                console.log(JSON.stringify({
+                    ok: true,
+                    mode: 'status',
+                    ...plan,
+                }, null, 2));
+                return;
+            }
+            renderSetupPlan(plan, readOnly || !interactive);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (options.json) {
+                console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+            }
+            else {
+                console.error(chalk.red(`Setup failed: ${message}`));
+            }
+            process.exitCode = 2;
+        }
+    });
+}
+//# sourceMappingURL=setup.js.map

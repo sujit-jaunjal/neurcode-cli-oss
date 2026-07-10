@@ -58,6 +58,7 @@ const bootstrap_1 = require("./commands/bootstrap");
 const quickstart_1 = require("./commands/quickstart");
 const home_1 = require("./commands/home");
 const onboard_1 = require("./commands/onboard");
+const setup_1 = require("./commands/setup");
 const telemetry_1 = require("./commands/telemetry");
 const bootstrap_policy_1 = require("./commands/bootstrap-policy");
 const messages_1 = require("./utils/messages");
@@ -108,6 +109,10 @@ catch (error) {
 });
 const program = new commander_1.Command();
 const CORE_WORKFLOW_STEPS = [
+    {
+        command: 'npx -y @neurcode-ai/cli@latest setup',
+        description: 'Resume login, repository, Brain, and agent setup from the first incomplete stage',
+    },
     {
         command: 'npx -y @neurcode-ai/cli@latest eval demo --fixture --agent codex',
         description: 'Run the complete enterprise evaluation in a safe local fixture',
@@ -178,6 +183,7 @@ const CORE_WORKFLOW_STEPS = [
     },
 ];
 const CANONICAL_OPERATOR_COMMAND_NAMES = new Set([
+    'setup',
     'activate',
     'agent',
     'run',
@@ -258,7 +264,7 @@ function buildAdvancedLegacyHints(root) {
     return fallbackCommands.map((commandName) => `neurcode ${commandName}`);
 }
 function configurePrimaryHelpView(root) {
-    const primaryOrder = ['activate', 'agent', 'run', 'status', 'runtime', 'ops', 'sessions', 'report', 'sync', 'admission', 'demo', 'login', 'init', 'start', 'quickstart', 'replay'];
+    const primaryOrder = ['setup', 'activate', 'agent', 'run', 'status', 'runtime', 'ops', 'sessions', 'report', 'sync', 'admission', 'demo', 'login', 'init', 'start', 'quickstart', 'replay'];
     root.configureHelp({
         visibleCommands: (command) => {
             const filtered = command.commands.filter((subcommand) => {
@@ -486,6 +492,7 @@ program
 (0, workspace_1.workspaceCommand)(program);
 (0, replay_1.replayCommand)(program);
 (0, home_1.homeCommand)(program);
+(0, setup_1.setupCommand)(program);
 (0, onboard_1.onboardCommand)(program);
 (0, telemetry_1.telemetryCommand)(program);
 // Top-level discoverability alias for `neurcode replay timeline`. Reviewers
@@ -562,8 +569,9 @@ program
     .command('login')
     .description('Connect this machine/runtime to a Neurcode workspace')
     .option('--org <id>', 'Connect to a specific workspace/organization (internal UUID)')
+    .option('--choose-workspace', 'Ignore repo-local scope and explicitly choose a workspace in the browser')
     .action((options) => {
-    (0, login_1.loginCommand)({ orgId: options.org });
+    (0, login_1.loginCommand)({ orgId: options.org, chooseWorkspace: options.chooseWorkspace === true });
 });
 program
     .command('logout')
@@ -2040,7 +2048,8 @@ program
 // ── Daemon ────────────────────────────────────────────────────────────────────
 program
     .command('daemon')
-    .description('Start the local governance bridge for verify, findings, replay, and remediation export (http://localhost:4321)')
+    .description('Legacy local dashboard/process transport (not required for setup or normal CLI use)')
+    .addHelpText('after', '\nThe daemon serves the older localhost:4321 dashboard/process bridge for verify, findings, replay, and remediation export.\nIt is not a login, repository sync, activation, or onboarding prerequisite. Use `neurcode setup` for first run.\n')
     .action(() => {
     (0, server_1.startDaemon)();
 });

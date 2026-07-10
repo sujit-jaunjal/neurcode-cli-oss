@@ -47,7 +47,7 @@ const state_1 = require("../utils/state");
 const activation_telemetry_1 = require("../utils/activation-telemetry");
 const messages_1 = require("../utils/messages");
 const POLL_INTERVAL = 3000; // 3 seconds
-const MAX_POLL_ATTEMPTS = 100; // 5 minutes total (100 * 3s)
+const MAX_POLL_ATTEMPTS = 300; // 15 minutes, aligned with server device-code expiry
 async function loginCommand(options) {
     try {
         (0, activation_telemetry_1.trackActivationEvent)({
@@ -65,13 +65,15 @@ async function loginCommand(options) {
             (0, messages_1.printError)('Invalid organization ID', `Expected an internal UUID. Got: ${desiredOrgIdFromArg}`);
             process.exit(1);
         }
-        const desiredOrgIdFromState = (0, state_1.getOrgId)() || undefined;
+        const desiredOrgIdFromState = options?.chooseWorkspace ? undefined : ((0, state_1.getOrgId)() || undefined);
         const desiredOrgWasExplicit = Boolean(desiredOrgIdFromArg);
         let desiredOrgId = desiredOrgIdFromArg || desiredOrgIdFromState;
         let ignoreStaleStateWorkspace = false;
         const desiredOrgName = desiredOrgId && desiredOrgId === desiredOrgIdFromState ? (0, state_1.getOrgName)() : undefined;
         // Check if user is already logged in (for this org, if applicable)
-        const existingApiKey = desiredOrgId ? (0, config_1.getApiKey)(desiredOrgId) : (0, config_1.getApiKey)();
+        const existingApiKey = options?.chooseWorkspace
+            ? null
+            : desiredOrgId ? (0, config_1.getApiKey)(desiredOrgId) : (0, config_1.getApiKey)();
         if (existingApiKey) {
             try {
                 // Validate the existing runtime credential by fetching user info
@@ -92,9 +94,9 @@ async function loginCommand(options) {
                     'Disconnect: neurcode logout',
                 ].join('\n   '));
                 if (!existingProjectId) {
-                    (0, messages_1.printInfo)('Next step', 'Bind this repository to a governance workspace:\n   neurcode init');
+                    (0, messages_1.printInfo)('Next step', 'Resume setup:\n   neurcode setup');
                 }
-                (0, activation_telemetry_1.trackActivationEvent)({
+                await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                     eventType: 'cli_login_completed',
                     commandFamily: 'login',
                     reasonCode: 'login.already_connected',
@@ -112,7 +114,7 @@ async function loginCommand(options) {
                 }
                 (0, messages_1.printWarning)(looksLikeAuth ? 'Existing session expired' : 'Could not validate existing session', looksLikeAuth
                     ? ignoreStaleStateWorkspace
-                        ? 'Your previous runtime credential or workspace scope is no longer valid. Plain neurcode login will connect to your current browser account workspace; pass --org-id only when you intentionally need a specific workspace.'
+                        ? 'Your previous runtime credential or workspace scope is no longer valid. The browser will require an explicit workspace choice; use --org only when you intentionally need to pre-scope the request.'
                         : 'Your previous runtime credential is no longer valid. Let\'s set up a fresh connection.'
                     : 'Proceeding with login to refresh authentication.');
             }
@@ -121,6 +123,9 @@ async function loginCommand(options) {
         (0, messages_1.printInfo)('Browser approval', 'We will open the browser to connect this machine to a Neurcode workspace. The credential is stored in the local keyring and is not part of the normal workflow.');
         if (desiredOrgId) {
             (0, messages_1.printInfo)('Workspace scope', `This runtime connection will be scoped to: ${desiredOrgName || desiredOrgId}`);
+        }
+        else {
+            (0, messages_1.printInfo)('Workspace selection', 'The browser will require you to explicitly choose a personal or organization workspace. No workspace is selected automatically.');
         }
         // Step 1: Initialize device flow
         const initUrl = `${apiUrl}/cli/auth/init`;
@@ -162,19 +167,23 @@ async function loginCommand(options) {
             catch {
                 // fallback to system open
             }
-            const { exec } = await Promise.resolve().then(() => __importStar(require('child_process')));
-            let command;
+            const { execFile } = await Promise.resolve().then(() => __importStar(require('child_process')));
+            let executable;
+            let args;
             if (platform === 'darwin') {
-                command = `open "${verificationUrl}"`;
+                executable = 'open';
+                args = [verificationUrl];
             }
             else if (platform === 'win32') {
-                command = `start "" "${verificationUrl}"`;
+                executable = 'rundll32';
+                args = ['url.dll,FileProtocolHandler', verificationUrl];
             }
             else {
-                command = `xdg-open "${verificationUrl}"`;
+                executable = 'xdg-open';
+                args = [verificationUrl];
             }
             await new Promise((resolve, reject) => {
-                exec(command, (error) => {
+                execFile(executable, args, (error) => {
                     if (error)
                         reject(error);
                     else
@@ -215,14 +224,24 @@ async function loginCommand(options) {
             if (pollData.status === 'approved') {
                 if (pollData.apiKey) {
                     const savedOrgId = pollData.organizationId || desiredOrgId || undefined;
-                    if (desiredOrgWasExplicit && desiredOrgId && savedOrgId && savedOrgId !== desiredOrgId) {
+                    if (!savedOrgId) {
+                        (0, messages_1.printError)('Workspace approval was incomplete', 'The server did not return the workspace bound to this credential. No credential was saved.');
+                        await (0, activation_telemetry_1.trackActivationEventAndFlush)({
+                            eventType: 'cli_login_completed',
+                            commandFamily: 'login',
+                            reasonCode: 'login.workspace_missing',
+                            success: false,
+                        });
+                        process.exit(1);
+                    }
+                    if (desiredOrgId && savedOrgId !== desiredOrgId) {
                         (0, messages_1.printError)('Workspace approval mismatch', undefined, [
                             `Requested workspace: ${desiredOrgId}`,
                             `Approved workspace:  ${savedOrgId}`,
                             'No credential was saved for the wrong workspace.',
-                            'Switch workspace in the dashboard or run plain `neurcode login` to connect your current browser workspace.',
+                            'Run `neurcode login --choose-workspace` to start a fresh explicit workspace selection.',
                         ]);
-                        (0, activation_telemetry_1.trackActivationEvent)({
+                        await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                             eventType: 'cli_login_completed',
                             commandFamily: 'login',
                             reasonCode: 'login.workspace_mismatch',
@@ -232,6 +251,7 @@ async function loginCommand(options) {
                     }
                     // Save runtime credential to global config
                     (0, config_1.saveGlobalAuth)(pollData.apiKey, apiUrl, savedOrgId);
+                    (0, user_context_1.clearUserCache)();
                     // Get user info for personalized message
                     const userInfo = await (0, user_context_1.getUserInfo)();
                     const userName = userInfo?.displayName || userInfo?.email || 'there';
@@ -244,10 +264,8 @@ async function loginCommand(options) {
                             : 'Repo ownership: not initialized in this directory',
                         'Token handling: automatic; manual API keys are only needed for CI or advanced environments.',
                     ].join('\n   '));
-                    (0, messages_1.printInfo)('Next step', existingProjectId
-                        ? 'Confirm state and continue:\n   neurcode whoami\n   neurcode start "what you intend to change"'
-                        : 'Bind this repository to a personal or organization workspace:\n   neurcode init');
-                    (0, activation_telemetry_1.trackActivationEvent)({
+                    (0, messages_1.printInfo)('Next step', 'Resume from the first incomplete setup stage:\n   neurcode setup');
+                    await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                         eventType: 'cli_login_completed',
                         commandFamily: 'login',
                         reasonCode: 'login.completed',
@@ -256,12 +274,13 @@ async function loginCommand(options) {
                 }
                 else {
                     (0, messages_1.printWarning)('Browser approved, but the terminal did not receive the connection credential', 'Run neurcode login again. If the browser says the request was already approved, start a fresh login request.');
-                    (0, activation_telemetry_1.trackActivationEvent)({
+                    await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                         eventType: 'cli_login_completed',
                         commandFamily: 'login',
                         reasonCode: 'login.missing_credential',
                         success: false,
                     });
+                    process.exitCode = 1;
                     approved = true;
                 }
             }
@@ -271,7 +290,7 @@ async function loginCommand(options) {
                     'If this was unintentional, please try: neurcode login',
                     'Contact support if you continue experiencing issues'
                 ]);
-                (0, activation_telemetry_1.trackActivationEvent)({
+                await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                     eventType: 'cli_login_completed',
                     commandFamily: 'login',
                     reasonCode: 'login.denied',
@@ -283,9 +302,9 @@ async function loginCommand(options) {
                 (0, messages_1.printError)('Authentication Request Expired', undefined, [
                     'The runtime connection request has timed out',
                     'Please try again: neurcode login',
-                    'Complete browser approval within 5 minutes'
+                    'Complete browser approval within 15 minutes'
                 ]);
-                (0, activation_telemetry_1.trackActivationEvent)({
+                await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                     eventType: 'cli_login_completed',
                     commandFamily: 'login',
                     reasonCode: 'login.expired',
@@ -306,7 +325,7 @@ async function loginCommand(options) {
                 'Complete browser approval promptly',
                 'Check your internet connection if issues persist'
             ]);
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'cli_login_completed',
                 commandFamily: 'login',
                 reasonCode: 'login.timeout',
@@ -316,7 +335,7 @@ async function loginCommand(options) {
         }
     }
     catch (error) {
-        (0, activation_telemetry_1.trackActivationEvent)({
+        await (0, activation_telemetry_1.trackActivationEventAndFlush)({
             eventType: 'cli_login_completed',
             commandFamily: 'login',
             reasonCode: 'login.failed',

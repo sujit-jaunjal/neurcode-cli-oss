@@ -1,12 +1,13 @@
 "use strict";
 /**
- * `neurcode onboard` — Self-serve enterprise onboarding walkthrough.
+ * `neurcode onboard` — compatibility walkthrough recipes.
  *
  * Prints the step-by-step recipe for a first governed session, adapted to the
  * selected agent. Covers: install, repo brain index, agent activation, health
  * check, first governed session, boundary block, approval, evidence export.
  *
- * Use --agent to select the agent path. Defaults to claude.
+ * New users should run `neurcode setup`; these recipes remain for existing
+ * evaluation scripts that need the full expanded walkthrough.
  * Use --json for machine-readable output.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -111,7 +112,7 @@ function agentSetupCommandFor(target) {
         case 'copilot':
         case 'vscode': return 'npx -y @neurcode-ai/cli@latest activate copilot --dir .';
         case 'codex': return 'npx -y @neurcode-ai/cli@latest agent bootstrap codex';
-        case 'action': return 'neurcode admission doctor';
+        case 'action': return 'npx -y @neurcode-ai/cli@latest activate action --dir .';
         case 'terminal': return 'neurcode agent setup codex   # or: claude | cursor | vscode';
     }
 }
@@ -393,31 +394,10 @@ function renderOnboardStatus(steps) {
     }
     console.log('');
 }
-function renderOnboardNext(steps, environment) {
-    const next = steps.find((step) => !step.complete);
-    console.log('');
-    const detail = environment.source === 'default'
-        ? chalk.dim('  (no agent detected — pick one in the command below)')
-        : environment.source === 'activated'
-            ? chalk.dim('  (from your activated runtime)')
-            : chalk.dim('  (detected from this shell)');
-    console.log(`${chalk.bold('Environment:')} ${environment.label}${detail}`);
-    if (!next) {
-        console.log('');
-        console.log(`${chalk.green('Setup is complete.')} Open Runtime Evidence to review governed sessions.`);
-        console.log('');
-        return;
-    }
-    console.log('');
-    console.log(`${chalk.bold('Next step:')} ${next.label}`);
-    console.log(chalk.dim(`  ${next.message}`));
-    console.log(chalk.green(`  ${next.command}`));
-    console.log('');
-}
 function onboardCommand(program) {
     const cmd = program
         .command('onboard')
-        .description('Guided step-by-step onboarding walkthrough for the selected AI agent.\n' +
+        .description('Compatibility: print the expanded agent walkthrough (canonical first run: `neurcode setup`).\n' +
         'Covers: install, repo brain, activation, health check, governed session,\n' +
         'boundary block, exact-path approval, AI Change Record export.\n' +
         'For the one-command evaluation, prefer the canonical `neurcode pilot start`.')
@@ -461,6 +441,7 @@ function onboardCommand(program) {
         console.log(SEP);
         console.log('');
         console.log(bold('  Next steps'));
+        console.log(green('  Canonical resume: neurcode setup'));
         console.log(dim('  Dashboard:       https://app.neurcode.com'));
         console.log(dim('  Setup checklist: /w/me/setup'));
         console.log(dim('  Tech eval:       /w/me/enterprise-eval'));
@@ -492,17 +473,29 @@ function onboardCommand(program) {
     });
     cmd
         .command('next')
-        .description('Print the exact next onboarding action')
+        .description('Point to the canonical progress-aware setup resume command')
         .option('--json', 'Output machine-readable JSON')
         .action(async (options, command) => {
         const { steps, environment } = await buildOnboardStatus();
-        const next = steps.find((step) => !step.complete) ?? null;
         const json = Boolean(options.json || command?.parent?.opts?.()?.json);
         if (json) {
-            console.log(JSON.stringify({ ok: true, environment, next }, null, 2));
+            console.log(JSON.stringify({
+                ok: true,
+                environment,
+                next: {
+                    stage: 'canonical_setup',
+                    label: 'Resume canonical setup',
+                    command: 'neurcode setup',
+                    message: 'Setup detects login, repository, Brain, and agent state before choosing one next action.',
+                },
+            }, null, 2));
             return;
         }
-        renderOnboardNext(steps, environment);
+        console.log('');
+        console.log(`${chalk.bold('Next step:')} Resume canonical setup`);
+        console.log(chalk.dim('  Setup detects completed stages and prints exactly one next action.'));
+        console.log(chalk.green('  neurcode setup'));
+        console.log('');
     });
 }
 //# sourceMappingURL=onboard.js.map

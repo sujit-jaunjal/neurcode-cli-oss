@@ -1,11 +1,12 @@
 /**
- * `neurcode onboard` — Self-serve enterprise onboarding walkthrough.
+ * `neurcode onboard` — compatibility walkthrough recipes.
  *
  * Prints the step-by-step recipe for a first governed session, adapted to the
  * selected agent. Covers: install, repo brain index, agent activation, health
  * check, first governed session, boundary block, approval, evidence export.
  *
- * Use --agent to select the agent path. Defaults to claude.
+ * New users should run `neurcode setup`; these recipes remain for existing
+ * evaluation scripts that need the full expanded walkthrough.
  * Use --json for machine-readable output.
  */
 import type { Command } from 'commander';
@@ -30,8 +31,8 @@ export interface OnboardEnvironment {
     target: OnboardAgent | 'terminal';
     /** Human-readable environment label (e.g. "Claude Code", "generic terminal"). */
     label: string;
-    /** activated = read from the local runtime manifest; detected = host env signal; default = generic fallback. */
-    source: 'activated' | 'detected' | 'default';
+    /** activated = local manifest; detected = host signal; explicit = CLI flag; profile = account choice; default = undecided. */
+    source: 'activated' | 'detected' | 'explicit' | 'profile' | 'default';
 }
 /**
  * Detect which coding environment the user is in so the next step is exact.

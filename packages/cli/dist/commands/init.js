@@ -485,14 +485,14 @@ async function initCommand(options) {
             'Run governed verification: neurcode verify --evidence',
             'Inspect continuity: neurcode home',
         ].join('\n   '));
-        (0, activation_telemetry_1.trackActivationEvent)({
+        await (0, activation_telemetry_1.trackActivationEventAndFlush)({
             eventType: 'repo_connect_completed',
             commandFamily: 'init',
             reasonCode: 'repo_connect.completed',
         });
     }
     catch (error) {
-        (0, activation_telemetry_1.trackActivationEvent)({
+        await (0, activation_telemetry_1.trackActivationEventAndFlush)({
             eventType: 'repo_connect_completed',
             commandFamily: 'init',
             reasonCode: 'repo_connect.failed',

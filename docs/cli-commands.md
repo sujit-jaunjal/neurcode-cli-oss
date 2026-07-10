@@ -1,8 +1,14 @@
 # Neurcode CLI Commands
 
-This reference now follows one canonical runtime lifecycle:
+This reference follows one canonical account-backed lifecycle:
 
-`connect repo -> activate agent -> govern session -> approve exact path -> export evidence`
+`setup -> explicit workspace -> connect repo -> build Brain -> activate agent -> govern -> export evidence`
+
+For a no-account local proof, use the separate fixture path:
+
+```bash
+npx -y @neurcode-ai/cli@latest pilot start --fixture --agent codex
+```
 
 The lifecycle separates five identities that must not blur together:
 
@@ -15,10 +21,7 @@ The lifecycle separates five identities that must not blur together:
 ## Core Runtime Workflow
 
 ```bash
-npm install -g @neurcode-ai/cli@latest
-neurcode login
-neurcode init
-neurcode activate claude --connect <token>
+npx -y @neurcode-ai/cli@latest setup --agent claude
 neurcode doctor --runtime
 neurcode status --json
 neurcode runtime cloud-status --json
@@ -27,15 +30,42 @@ neurcode report --runtime
 neurcode demo rehearse
 ```
 
-Primary loop:
+Primary first-run and resume command:
 
-`login -> init -> activate -> governed session -> exact approval -> evidence export`
+```bash
+npx -y @neurcode-ai/cli@latest setup --agent <claude|codex|cursor|vscode|copilot|action>
+neurcode setup --agent codex --status
+neurcode setup --agent codex --status --json
+```
+
+`setup` detects completed stages and prints exactly one next action. The older
+`login`, `init`, `repo connect`, `onboard`, and `activate` surfaces remain
+available as compatibility or advanced commands, not competing onboarding
+flows.
 
 Neurcode governs in-flow where the host exposes hooks, records source-free runtime evidence, and keeps CI/verify/remediation commands as compatibility/backstop surfaces.
 
 See also: `neurcode agent guard start <agent>` for supervised non-Claude workflows, `neurcode admission export` for GitHub Action admission records, and `neurcode verify --ci` for compatibility CI checks.
 
 ## Runtime Command Reference
+
+### `neurcode setup`
+
+Start or resume account-backed setup for a real repository.
+
+```bash
+npx -y @neurcode-ai/cli@latest setup --agent codex
+neurcode setup --agent codex --status
+neurcode setup --agent codex --status --json
+```
+
+The ordered stages are browser login, explicit personal or organization
+workspace, repository ownership, local source-free Brain, and agent
+integration. A stale organization target produces an error instead of silently
+falling back to a personal workspace. Agent enforcement remains explicit:
+Claude hard hooks only when healthy; cooperative/supervised evidence for Codex
+and Cursor; host-dependent hooks for VS Code/Copilot; post-change advisory
+routing for the Action.
 
 ### `neurcode activate <agent>`
 
@@ -309,13 +339,21 @@ Patch JSON now includes:
 - `receipt`: transaction metadata (`transactionId`, hashes, rollback/stale flags)
 - `reverifyRequired`: whether a follow-up verify is required
 
-### `neurcode daemon`
+### `neurcode daemon` (optional legacy bridge)
 
-Start a local HTTP bridge on `http://localhost:4321` so the dashboard can run `verify`, `fix`, `patch`, and rollback actions without leaving the browser.
+Start the older local HTTP dashboard/process bridge on
+`http://localhost:4321`. It can expose `verify`, `fix`, `patch`, and rollback
+operations to a compatible local dashboard.
 
 ```bash
 neurcode daemon
 ```
+
+The daemon is **not** required for setup, login, repository pairing, Brain
+indexing, activation sync, or normal CLI/agent use. Run it only when a legacy
+localhost dashboard or companion integration explicitly asks for it. It binds
+to loopback by default; remote exposure must be a deliberate trusted-network
+decision.
 
 Daemon environment options:
 
@@ -429,7 +467,11 @@ neurcode policy list
 
 ### `neurcode login` / `neurcode logout`
 
-Connect or disconnect this machine/runtime. Login opens browser approval and stores the underlying credential in the local keyring. API keys are implementation detail for CI/manual environments, not the normal CLI workflow.
+Advanced/compatibility authentication surface. New users should run
+`neurcode setup --agent <agent>`. Login opens browser approval, requires an
+explicit target workspace, and stores the underlying credential in the local
+keyring. API keys are an implementation detail for CI/manual environments, not
+the normal CLI workflow.
 
 ```bash
 neurcode login
@@ -448,7 +490,11 @@ Use `neurcode whoami` after login/init to inspect:
 
 ### `neurcode init`
 
-Bind the current repository to a personal or organization workspace. This creates the repo ownership context in `.neurcode/config.json` and determines the governance boundary used by later commands.
+Advanced/compatibility repository-binding surface. `neurcode setup` invokes the
+canonical repository stage. Direct `init` binds the current repository to a
+personal or organization workspace, creates the repo ownership context in
+`.neurcode/config.json`, and determines the governance boundary used by later
+commands.
 
 ```bash
 neurcode init

@@ -6,5 +6,6 @@
  */
 export declare function loginCommand(options?: {
     orgId?: string;
+    chooseWorkspace?: boolean;
 }): Promise<void>;
 //# sourceMappingURL=login.d.ts.map

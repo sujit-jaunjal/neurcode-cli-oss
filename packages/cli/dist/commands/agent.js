@@ -1315,7 +1315,7 @@ function agentCommand(program) {
         .option('--goal <goal>', 'Example first governed task for generated commands')
         .option('--global', 'For Cursor, write/check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
         .option('--json', 'Output machine-readable JSON')
-        .action((agent, options) => {
+        .action(async (agent, options) => {
         const agentTarget = toActivationAgentTarget(agent);
         (0, activation_telemetry_1.trackActivationEvent)({
             eventType: 'agent_setup_started',
@@ -1334,7 +1334,7 @@ function agentCommand(program) {
                 emitJson(payload);
             else
                 renderSetup(payload);
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'agent_setup_completed',
                 commandFamily: 'agent:bootstrap',
                 agentTarget,
@@ -1342,7 +1342,7 @@ function agentCommand(program) {
             });
         }
         catch (error) {
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'agent_setup_completed',
                 commandFamily: 'agent:bootstrap',
                 agentTarget,
@@ -1382,7 +1382,7 @@ function agentCommand(program) {
         .option('--global', 'For Cursor, write/check ~/.cursor/mcp.json instead of repo-local .cursor/mcp.json')
         .option('--force-profile', 'Force refresh the repo governance profile')
         .option('--json', 'Output machine-readable JSON')
-        .action((agent, options) => {
+        .action(async (agent, options) => {
         const agentTarget = toActivationAgentTarget(agent);
         (0, activation_telemetry_1.trackActivationEvent)({
             eventType: 'agent_setup_started',
@@ -1396,7 +1396,7 @@ function agentCommand(program) {
                 emitJson(payload);
             else
                 renderSetup(payload);
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'agent_setup_completed',
                 commandFamily: 'agent:setup',
                 agentTarget,
@@ -1404,7 +1404,7 @@ function agentCommand(program) {
             });
         }
         catch (error) {
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'agent_setup_completed',
                 commandFamily: 'agent:setup',
                 agentTarget,

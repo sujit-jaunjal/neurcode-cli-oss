@@ -816,7 +816,7 @@ function brainCommand(program) {
             reuseFindings: artifact.reuseFindings.slice(0, 8),
         };
         if (options.json) {
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'brain_index_completed',
                 commandFamily: 'brain:index',
                 reasonCode: 'brain_index.completed',
@@ -865,7 +865,7 @@ function brainCommand(program) {
             console.log(chalk.dim('No duplicate exported symbol names found across non-test files.'));
         }
         (0, messages_1.printInfo)('Next', 'Run: neurcode brain inspect "<area or symbol>"');
-        (0, activation_telemetry_1.trackActivationEvent)({
+        await (0, activation_telemetry_1.trackActivationEventAndFlush)({
             eventType: 'brain_index_completed',
             commandFamily: 'brain:index',
             reasonCode: 'brain_index.completed',
@@ -915,7 +915,7 @@ function brainCommand(program) {
             (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result, jobId);
             refreshActivatedProfileAfterBrain(scope.cwd);
             printRepositoryGraphIndexResult(scope.cwd, result, options.json);
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'brain_index_completed',
                 commandFamily: 'brain:repo-index',
                 reasonCode: 'brain_index.completed',
@@ -925,7 +925,7 @@ function brainCommand(program) {
             if (jobId) {
                 (0, brain_lifecycle_1.markBrainFailed)(scope.cwd, error instanceof brain_1.RepositoryGraphLockedError ? 'index_locked' : 'index_failed', jobId);
             }
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'brain_index_completed',
                 commandFamily: 'brain:repo-index',
                 reasonCode: error instanceof brain_1.RepositoryGraphLockedError ? 'brain_index.locked' : 'brain_index.failed',

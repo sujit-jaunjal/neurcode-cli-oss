@@ -7,6 +7,7 @@ exports.setActivationTelemetryEnabled = setActivationTelemetryEnabled;
 exports.buildActivationTelemetryEvent = buildActivationTelemetryEvent;
 exports.maybeShowActivationTelemetryNotice = maybeShowActivationTelemetryNotice;
 exports.trackActivationEvent = trackActivationEvent;
+exports.trackActivationEventAndFlush = trackActivationEventAndFlush;
 exports.flushActivationTelemetry = flushActivationTelemetry;
 exports.getActivationTelemetryStatus = getActivationTelemetryStatus;
 const fs_1 = require("fs");
@@ -210,6 +211,17 @@ function trackActivationEvent(options) {
     catch {
         // Telemetry must never fail the user command.
     }
+}
+/**
+ * Record a completion milestone and wait for one bounded delivery attempt.
+ *
+ * The event is persisted before network I/O. A timeout or server failure leaves
+ * it in the durable queue, so command correctness never depends on telemetry
+ * availability while dashboards can update immediately when the API is healthy.
+ */
+async function trackActivationEventAndFlush(options) {
+    trackActivationEvent({ ...options, flush: false });
+    return flushActivationTelemetry();
 }
 async function flushActivationTelemetry() {
     if (envTelemetryDisabled())

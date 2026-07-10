@@ -572,7 +572,7 @@ function activateCommand(program) {
             else {
                 renderActivation(result, options.mcp === false);
             }
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'agent_setup_completed',
                 commandFamily: 'activate',
                 agentTarget,
@@ -583,7 +583,7 @@ function activateCommand(program) {
                 process.exitCode = 1;
         }
         catch (error) {
-            (0, activation_telemetry_1.trackActivationEvent)({
+            await (0, activation_telemetry_1.trackActivationEventAndFlush)({
                 eventType: 'agent_setup_completed',
                 commandFamily: 'activate',
                 agentTarget,
