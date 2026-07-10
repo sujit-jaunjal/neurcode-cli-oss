@@ -217,7 +217,11 @@ function resolveNeurcodeProjectRootWithTrace(startDir = process.cwd()) {
     }
     return finalizeTrace({
         startDir: resolvedStart,
-        projectRoot: resolvedStart,
+        // A new repository has no .neurcode/config.json yet. In that case the Git
+        // root is still the only safe project boundary. Falling back to the nested
+        // invocation directory used to create fragmented state under src/ or an
+        // IDE subfolder during first setup.
+        projectRoot: gitRoot || resolvedStart,
         gitRoot,
         overrideRequested,
         overrideResolved,

@@ -21,7 +21,7 @@ The lifecycle separates five identities that must not blur together:
 ## Core Runtime Workflow
 
 ```bash
-npx -y @neurcode-ai/cli@latest setup --agent claude
+npx -y @neurcode-ai/cli@latest setup --repo /path/to/repository --agent claude
 neurcode doctor --runtime
 neurcode status --json
 neurcode runtime cloud-status --json
@@ -33,9 +33,9 @@ neurcode demo rehearse
 Primary first-run and resume command:
 
 ```bash
-npx -y @neurcode-ai/cli@latest setup --agent <claude|codex|cursor|vscode|copilot|action>
-neurcode setup --agent codex --status
-neurcode setup --agent codex --status --json
+npx -y @neurcode-ai/cli@latest setup --repo <repository-path> --agent <claude|codex|cursor|vscode|copilot|action>
+neurcode setup --repo <repository-path> --agent codex --status
+neurcode setup --repo <repository-path> --agent codex --status --json
 ```
 
 `setup` detects completed stages and prints exactly one next action. The older
@@ -54,10 +54,16 @@ See also: `neurcode agent guard start <agent>` for supervised non-Claude workflo
 Start or resume account-backed setup for a real repository.
 
 ```bash
-npx -y @neurcode-ai/cli@latest setup --agent codex
-neurcode setup --agent codex --status
-neurcode setup --agent codex --status --json
+npx -y @neurcode-ai/cli@latest setup --repo <repository-path> --agent codex
+neurcode setup --repo <repository-path> --agent codex --status
+neurcode setup --repo <repository-path> --agent codex --status --json
 ```
+
+Authentication is machine-wide and may begin outside a repository. Brain,
+runtime, and agent setup are repository-scoped: pass `--repo` from an arbitrary
+terminal, or omit it only when the current directory is already inside Git.
+Explicit nested paths resolve to the Git root. An explicit non-Git directory is
+rejected, and setup never creates `.neurcode` in the home directory by fallback.
 
 The ordered stages are browser login, explicit personal or organization
 workspace, repository ownership, local source-free Brain, and agent

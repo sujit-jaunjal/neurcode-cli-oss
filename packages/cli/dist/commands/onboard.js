@@ -113,7 +113,7 @@ function agentSetupCommandFor(target) {
         case 'vscode': return 'npx -y @neurcode-ai/cli@latest activate copilot --dir .';
         case 'codex': return 'npx -y @neurcode-ai/cli@latest agent bootstrap codex';
         case 'action': return 'npx -y @neurcode-ai/cli@latest activate action --dir .';
-        case 'terminal': return 'neurcode agent setup codex   # or: claude | cursor | vscode';
+        case 'terminal': return 'neurcode setup --repo <repository-path> --agent codex   # or: claude | cursor | vscode';
     }
 }
 function buildOnboardWalkthrough(agent) {
