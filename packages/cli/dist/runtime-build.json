@@ -1,9 +1,9 @@
 {
   "schemaVersion": "neurcode.cli-build.v1",
-  "version": "0.20.25",
-  "gitCommit": "17235f75323076428ad163bbc2945be920ecda26",
-  "builtAt": "2026-07-10T17:28:10.979Z",
+  "version": "0.20.26",
+  "gitCommit": "f22429ad820f7bd6c0ffb49ebff6ae77aa91dda9",
+  "builtAt": "2026-07-10T20:19:17.645Z",
   "entryFile": "index.js",
   "entrySize": 104889,
-  "entryMtimeMs": 1783704490779.284
+  "entryMtimeMs": 1783714757457.4985
 }

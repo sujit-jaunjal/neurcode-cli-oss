@@ -26,10 +26,15 @@ prints exactly one next action. In an interactive terminal it can open browser
 login and invoke repository connection; `--status` and `--json` are read-only.
 
 ```bash
-neurcode setup --agent claude
-neurcode setup --status
-neurcode setup --json
+neurcode setup --repo /path/to/repository --agent claude
+neurcode setup --repo /path/to/repository --status
+neurcode setup --repo /path/to/repository --json
 ```
+
+Login may start from any terminal. Repository mutations never do: when the
+current directory is outside Git, pass `--repo <path>` or choose a path at the
+interactive prompt. Inside Git, the flag is optional and nested directories
+resolve to the repository root. Setup will not initialize your home directory.
 
 Browser login always requires an explicit workspace confirmation. Use
 `neurcode login --choose-workspace` when a repo-local workspace binding is stale
@@ -44,8 +49,9 @@ npx -y @neurcode-ai/cli@latest pilot start --fixture --agent codex
 Runs a throwaway local first-value proof before any login: a protected write is
 blocked, one exact path is approved, and the neighboring path stays blocked.
 The proof is source-free and does not modify a real repository. When you want a
-real repository in a personal or team dashboard, run `neurcode setup --agent
-<agent>` rather than assembling login and repository commands manually.
+real repository in a personal or team dashboard, run `neurcode setup --repo
+<repository-path> --agent <agent>` rather than assembling login and repository
+commands manually.
 
 Advanced evaluators may omit `--fixture` to run the local proof in the current
 repository; that still does not establish cloud ownership or evidence sync.

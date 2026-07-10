@@ -8,12 +8,18 @@
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.buildSetupPlan = buildSetupPlan;
+exports.resolveSetupRepositoryContext = resolveSetupRepositoryContext;
 exports.normalizeProfileAgent = normalizeProfileAgent;
 exports.validateSetupAuthentication = validateSetupAuthentication;
 exports.collectSetupPlan = collectSetupPlan;
 exports.setupCommand = setupCommand;
+const child_process_1 = require("child_process");
+const fs_1 = require("fs");
+const path_1 = require("path");
+const promises_1 = require("readline/promises");
 const brain_1 = require("@neurcode-ai/brain");
 const cli_runtime_1 = require("@neurcode-ai/cli-runtime");
+const contracts_1 = require("@neurcode-ai/contracts");
 const config_1 = require("../config");
 const state_1 = require("../utils/state");
 const project_root_1 = require("../utils/project-root");
@@ -60,13 +66,18 @@ function enforcementPostureFor(agent) {
             return 'Cooperative runtime checks and supervisor evidence; no host-level hard pre-write denial is claimed.';
     }
 }
-function firstValueProofFor(agent) {
-    return agent === 'action'
-        ? 'neurcode pilot start --fixture'
-        : `neurcode pilot start --agent ${agent}`;
-}
 /** Pure planner used by the CLI and focused next-step tests. */
 function buildSetupPlan(input) {
+    const repositoryContext = input.repositoryContext || {
+        status: input.snapshot.repositoryContextReady ? 'ready' : 'required',
+        kind: input.snapshot.repositoryContextReady ? 'git_repository' : 'none',
+        repoRoot: null,
+        label: null,
+        explicit: false,
+        reason: input.snapshot.repositoryContextReady
+            ? 'Repository context is available.'
+            : 'No Git repository is active in this terminal.',
+    };
     const brainComplete = input.snapshot.brainState === 'fresh'
         || input.snapshot.brainState === 'partial';
     const warnings = input.snapshot.brainState === 'partial'
@@ -75,6 +86,7 @@ function buildSetupPlan(input) {
     const stages = [
         { id: 'install', label: 'CLI available', complete: input.snapshot.installed },
         { id: 'login', label: 'Workspace credential', complete: input.snapshot.authState === 'authenticated' },
+        { id: 'repository_context', label: 'Repository selected', complete: input.snapshot.repositoryContextReady },
         { id: 'repository', label: 'Repository ownership', complete: input.snapshot.repositoryConnected },
         { id: 'brain', label: 'Repository Brain', complete: brainComplete },
         { id: 'agent', label: input.agent ? `${input.environment.label} integration` : 'Coding environment selected', complete: input.snapshot.agentConfigured },
@@ -104,6 +116,14 @@ function buildSetupPlan(input) {
                     command: 'neurcode login',
                     reason: 'Browser approval requires an explicit personal or organization workspace.',
                 };
+            break;
+        case 'repository_context':
+            nextAction = {
+                stage: 'repository_context',
+                label: 'Choose the repository to activate',
+                command: `neurcode setup --repo <repository-path>${input.agent ? ` --agent ${input.agent}` : ''}`,
+                reason: 'Login is machine-wide, but Brain and runtime setup must be bound to an explicit repository. Neurcode will not initialize your home directory.',
+            };
             break;
         case 'repository':
             nextAction = {
@@ -149,10 +169,14 @@ function buildSetupPlan(input) {
                 break;
             }
             nextAction = {
-                stage: 'first_value_proof',
-                label: 'Run the safe first-value proof',
-                command: firstValueProofFor(input.agent),
-                reason: 'Demonstrate block, exact-path approval, and neighboring-path containment without requiring an active session.',
+                stage: 'first_governed_session',
+                label: input.agent === 'action'
+                    ? 'Choose a local agent for the governed session'
+                    : 'Start one bounded governed task',
+                command: (0, contracts_1.activationSessionCommand)(input.agent),
+                reason: input.agent === 'action'
+                    ? 'GitHub Action is the post-change CI backstop. A local coding agent is required for the first in-flow governed session.'
+                    : 'Setup is ready. Start a real user-owned session in this repository; finish it after the bounded task and sync its source-free evidence.',
             };
     }
     return {
@@ -161,8 +185,76 @@ function buildSetupPlan(input) {
         environment: input.environment,
         enforcementPosture: enforcementPostureFor(input.agent),
         warnings,
+        repositoryContext,
         stages,
         nextAction,
+    };
+}
+function canonicalPath(value) {
+    try {
+        return (0, fs_1.realpathSync)(value);
+    }
+    catch {
+        return (0, path_1.resolve)(value);
+    }
+}
+function gitRootFor(directory) {
+    try {
+        const root = (0, child_process_1.execFileSync)('git', ['rev-parse', '--show-toplevel'], {
+            cwd: directory,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+        return root ? canonicalPath(root) : null;
+    }
+    catch {
+        return null;
+    }
+}
+/** Resolve a safe repository boundary without ever creating local state. */
+function resolveSetupRepositoryContext(input = {}) {
+    const cwd = canonicalPath(input.cwd || process.cwd());
+    const explicitValue = input.repositoryPath?.trim();
+    const candidate = explicitValue ? canonicalPath((0, path_1.resolve)(cwd, explicitValue)) : cwd;
+    if (!(0, fs_1.existsSync)(candidate)) {
+        throw new Error(`Repository path does not exist: ${candidate}`);
+    }
+    if (!(0, fs_1.statSync)(candidate).isDirectory()) {
+        throw new Error(`Repository path is not a directory: ${candidate}`);
+    }
+    const gitRoot = gitRootFor(candidate);
+    if (gitRoot) {
+        return {
+            status: 'ready',
+            kind: 'git_repository',
+            repoRoot: gitRoot,
+            label: (0, path_1.basename)(gitRoot),
+            explicit: Boolean(explicitValue),
+            reason: explicitValue
+                ? 'Explicit repository path resolved to its Git root.'
+                : 'Current terminal is inside a Git repository.',
+        };
+    }
+    if ((0, fs_1.existsSync)((0, path_1.resolve)(candidate, '.neurcode', 'config.json'))) {
+        return {
+            status: 'ready',
+            kind: 'linked_directory',
+            repoRoot: candidate,
+            label: (0, path_1.basename)(candidate),
+            explicit: Boolean(explicitValue),
+            reason: 'Existing Neurcode repository ownership was found in this directory.',
+        };
+    }
+    if (explicitValue) {
+        throw new Error(`No Git repository was found at ${candidate}. Choose a repository path or initialize Git before activation.`);
+    }
+    return {
+        status: 'required',
+        kind: 'none',
+        repoRoot: null,
+        label: null,
+        explicit: false,
+        reason: 'This terminal is not inside a Git repository. Login can continue, but repository setup requires --repo <path>.',
     };
 }
 function selectedAgent(requested, detected, profileAgent) {
@@ -232,7 +324,7 @@ function normalizeProfileAgent(value) {
         ? normalized
         : null;
 }
-async function fetchProfileAgent(apiKey) {
+async function fetchProfileAgent(apiKey, organizationId) {
     const config = (0, config_1.loadConfig)();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1200);
@@ -241,9 +333,8 @@ async function fetchProfileAgent(apiKey) {
             accept: 'application/json',
             authorization: `Bearer ${apiKey}`,
         };
-        const orgId = (0, state_1.getOrgId)();
-        if (orgId)
-            headers['x-org-id'] = orgId;
+        if (organizationId)
+            headers['x-org-id'] = organizationId;
         const response = await fetch(`${(config.apiUrl || config_1.DEFAULT_API_URL).replace(/\/$/, '')}/api/v1/account-onboarding/bootstrap`, { headers, signal: controller.signal });
         if (!response.ok)
             return null;
@@ -283,14 +374,28 @@ async function validateSetupAuthentication(input) {
         clearTimeout(timeout);
     }
 }
-async function collectSetupPlan(requestedAgent) {
-    const repoRoot = (0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd());
+async function collectSetupPlan(requestedAgent, repositoryPath) {
+    const repositoryContext = resolveSetupRepositoryContext({ repositoryPath });
+    const repoRoot = repositoryContext.repoRoot || process.cwd();
     const detected = (0, onboard_1.detectOnboardEnvironment)(repoRoot);
-    const config = (0, config_1.loadConfig)();
-    const organizationId = (0, state_1.getOrgId)();
-    const apiKey = organizationId
-        ? ((0, config_1.getApiKey)(organizationId) || null)
-        : (0, config_1.getAnyPersistedApiKey)();
+    let config = (0, config_1.loadConfig)();
+    const originalCwd = process.cwd();
+    let organizationId = null;
+    let projectId = null;
+    let brainState = 'missing';
+    let configured = false;
+    try {
+        if (repositoryContext.repoRoot)
+            process.chdir(repositoryContext.repoRoot);
+        config = (0, config_1.loadConfig)();
+        organizationId = (0, state_1.getOrgId)();
+        projectId = (0, state_1.getProjectId)();
+        brainState = repositoryContext.repoRoot ? await readBrainState((0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd())) : 'missing';
+    }
+    finally {
+        process.chdir(originalCwd);
+    }
+    const apiKey = organizationId ? ((0, config_1.getApiKey)(organizationId) || null) : (0, config_1.getAnyPersistedApiKey)();
     const authState = await validateSetupAuthentication({
         apiKey,
         apiUrl: config.apiUrl || config_1.DEFAULT_API_URL,
@@ -298,26 +403,69 @@ async function collectSetupPlan(requestedAgent) {
     });
     const profileAgent = requestedAgent || detected.target !== 'terminal' || authState !== 'authenticated' || !apiKey
         ? null
-        : await fetchProfileAgent(apiKey);
+        : await fetchProfileAgent(apiKey, organizationId);
     const agent = selectedAgent(requestedAgent, detected, profileAgent);
     const environment = requestedAgent
         ? { ...selectedEnvironment(agent, detected), source: 'explicit' }
         : profileAgent && agent === profileAgent && detected.target === 'terminal'
             ? { ...selectedEnvironment(agent, detected), source: 'profile' }
             : selectedEnvironment(agent, detected);
+    try {
+        if (repositoryContext.repoRoot)
+            process.chdir(repositoryContext.repoRoot);
+        configured = repositoryContext.repoRoot ? agentIsConfigured((0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd()), agent) : false;
+    }
+    finally {
+        process.chdir(originalCwd);
+    }
     const snapshot = {
         installed: true,
         authState,
-        repositoryConnected: Boolean((0, state_1.getOrgId)() && (0, state_1.getProjectId)()),
-        brainState: await readBrainState(repoRoot),
-        agentConfigured: agentIsConfigured(repoRoot, agent),
+        repositoryContextReady: repositoryContext.status === 'ready',
+        repositoryConnected: Boolean(organizationId && projectId),
+        brainState,
+        agentConfigured: configured,
     };
-    return buildSetupPlan({ snapshot, agent, environment });
+    return buildSetupPlan({ snapshot, agent, environment, repositoryContext });
+}
+async function promptForRepositoryPath() {
+    const terminal = (0, promises_1.createInterface)({ input: process.stdin, output: process.stdout });
+    try {
+        const answer = await terminal.question('Repository path (leave blank to stop here): ');
+        return answer.trim() || null;
+    }
+    finally {
+        terminal.close();
+    }
+}
+function agentSetupArgs(agent) {
+    switch (agent) {
+        case 'claude': return ['activate', 'claude', '--dir', '.'];
+        case 'cursor': return ['cursor', 'onboard', '--strict'];
+        case 'codex': return ['agent', 'bootstrap', 'codex'];
+        case 'copilot':
+        case 'vscode': return ['activate', 'copilot', '--dir', '.'];
+        case 'action': return ['activate', 'action', '--dir', '.'];
+    }
+}
+function runCurrentCli(repoRoot, args, label) {
+    const entry = process.argv[1];
+    if (!entry)
+        throw new Error(`Cannot run ${label}: CLI entrypoint is unavailable.`);
+    const result = (0, child_process_1.spawnSync)(process.execPath, [entry, ...args], {
+        cwd: repoRoot,
+        env: { ...process.env, NEURCODE_PROJECT_ROOT: repoRoot },
+        stdio: 'inherit',
+    });
+    if (result.status !== 0) {
+        throw new Error(`${label} failed with exit code ${result.status ?? 'unknown'}. Fix the reported issue and rerun neurcode setup.`);
+    }
 }
 function renderSetupPlan(plan, readOnly) {
     console.log('');
     console.log(chalk.bold('Neurcode setup'));
     console.log(chalk.dim(`Agent: ${plan.environment.label}`));
+    console.log(chalk.dim(`Repository: ${plan.repositoryContext.repoRoot || 'not selected'}`));
     console.log(chalk.dim(`Posture: ${plan.enforcementPosture}`));
     for (const warning of plan.warnings)
         console.log(chalk.yellow(`Warning: ${warning}`));
@@ -341,23 +489,58 @@ function setupCommand(program) {
         .command('setup')
         .description('Canonical first-run and resume flow: login, repo, Brain, and agent readiness')
         .option('--agent <agent>', `Target agent: ${onboard_1.ONBOARD_AGENTS.join(' | ')}`)
+        .option('--repo <path>', 'Repository path; required when setup starts outside a Git workspace')
         .option('--status', 'Inspect progress without starting interactive login or repository binding')
         .option('--json', 'Output machine-readable progress without making changes')
         .action(async (options) => {
         try {
-            let plan = await collectSetupPlan(options.agent);
+            let repositoryPath = options.repo;
+            let plan = await collectSetupPlan(options.agent, repositoryPath);
             const readOnly = options.status === true || options.json === true;
             const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY && !process.env.CI);
             if (!readOnly && interactive) {
                 const loginStage = plan.stages.find((stage) => stage.id === 'login');
                 if (!loginStage?.complete && plan.nextAction.command === 'neurcode login') {
                     await (0, login_1.loginCommand)();
-                    plan = await collectSetupPlan(options.agent);
+                    plan = await collectSetupPlan(options.agent, repositoryPath);
+                }
+                if (plan.stages.find((stage) => stage.id === 'login')?.complete && !plan.repositoryContext.repoRoot) {
+                    const selectedPath = await promptForRepositoryPath();
+                    if (selectedPath) {
+                        repositoryPath = selectedPath;
+                        plan = await collectSetupPlan(options.agent, repositoryPath);
+                    }
                 }
                 const repoStage = plan.stages.find((stage) => stage.id === 'repository');
-                if (plan.stages.find((stage) => stage.id === 'login')?.complete && !repoStage?.complete) {
-                    await (0, init_1.initCommand)();
-                    plan = await collectSetupPlan(options.agent);
+                if (plan.repositoryContext.repoRoot && plan.stages.find((stage) => stage.id === 'login')?.complete && !repoStage?.complete) {
+                    const originalCwd = process.cwd();
+                    try {
+                        process.chdir(plan.repositoryContext.repoRoot);
+                        await (0, init_1.initCommand)();
+                    }
+                    finally {
+                        process.chdir(originalCwd);
+                    }
+                    plan = await collectSetupPlan(options.agent, repositoryPath || plan.repositoryContext.repoRoot);
+                }
+                if (plan.repositoryContext.repoRoot && plan.stages.find((stage) => stage.id === 'repository')?.complete) {
+                    const repoRoot = plan.repositoryContext.repoRoot;
+                    const brainStage = plan.stages.find((stage) => stage.id === 'brain');
+                    if (!brainStage?.complete) {
+                        runCurrentCli(repoRoot, ['brain', 'index'], 'Repository Brain indexing');
+                        plan = await collectSetupPlan(options.agent, repositoryPath || repoRoot);
+                    }
+                    const agentStage = plan.stages.find((stage) => stage.id === 'agent');
+                    if (plan.agent && plan.stages.find((stage) => stage.id === 'brain')?.complete && !agentStage?.complete) {
+                        runCurrentCli(repoRoot, agentSetupArgs(plan.agent), `${plan.environment.label} setup`);
+                        await (0, activation_telemetry_1.trackActivationEventAndFlush)({
+                            eventType: 'agent_target_selected',
+                            commandFamily: 'setup',
+                            agentTarget: plan.agent,
+                            reasonCode: 'setup.agent_selected',
+                        });
+                        plan = await collectSetupPlan(options.agent, repositoryPath || repoRoot);
+                    }
                 }
                 // login/init completion events were durably queued by their commands;
                 // make one bounded delivery attempt before rendering the resumed state.

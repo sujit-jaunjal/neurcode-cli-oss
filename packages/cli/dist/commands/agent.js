@@ -1282,10 +1282,10 @@ function renderSupervisorInspection(inspection) {
 }
 function toActivationAgentTarget(agent) {
     const normalized = (0, agent_adapter_setup_1.normalizeAgentSetupTarget)(agent);
-    if (normalized === 'claude' || normalized === 'cursor' || normalized === 'codex' || normalized === 'vscode') {
+    if (normalized === 'claude' || normalized === 'cursor' || normalized === 'codex' || normalized === 'vscode' || normalized === 'copilot') {
         return normalized;
     }
-    if (normalized === 'generic-mcp' || normalized === 'copilot')
+    if (normalized === 'generic-mcp')
         return 'manual';
     return 'unknown';
 }

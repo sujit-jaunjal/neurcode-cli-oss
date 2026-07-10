@@ -514,9 +514,7 @@ function runtimeAdaptersForActivation(agent) {
     return ['github-action'];
 }
 function activationAgentTarget(agent) {
-    if (agent === 'claude' || agent === 'cursor' || agent === 'codex' || agent === 'vscode')
-        return agent;
-    return 'manual';
+    return agent;
 }
 function activateCommand(program) {
     program
