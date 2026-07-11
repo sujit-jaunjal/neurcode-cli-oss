@@ -88,6 +88,7 @@ const admission_1 = require("./commands/admission");
 const demo_1 = require("./commands/demo");
 const eval_1 = require("./commands/eval");
 const pilot_1 = require("./commands/pilot");
+const reality_1 = require("./commands/reality");
 const execution_bus_1 = require("./utils/execution-bus");
 const execution_actions_1 = require("./utils/execution-actions");
 const cli_startup_1 = require("./utils/cli-startup");
@@ -464,6 +465,7 @@ program
 (0, demo_1.demoCommand)(program);
 (0, eval_1.evalCommand)(program);
 (0, pilot_1.registerPilotCommands)(program);
+(0, reality_1.realityCommand)(program);
 program
     .command('status')
     .description('Show the active in-flow governance session for this repository')

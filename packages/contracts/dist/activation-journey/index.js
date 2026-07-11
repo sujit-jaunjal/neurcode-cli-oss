@@ -80,10 +80,10 @@ function nextActionFor(input) {
         return {
             stage: 'complete',
             surface: 'web',
-            label: 'Open Runtime Control Plane',
-            reason: 'The first governed evidence loop is complete. Continue with live sessions, policies, and approvals.',
+            label: 'Prove governance reality',
+            reason: 'The first governed evidence loop is complete. Exercise the remaining runtime scenarios and inspect what is proven versus not yet evaluated.',
             command: null,
-            href: 'runtime-control-plane',
+            href: 'governance-reality',
         };
     }
     if (stage === 'account_onboarded') {

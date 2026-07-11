@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.27] - 2026-07-11
+
+### Added
+
+- Added the canonical governance-reality assessment across contracts, CLI, API, and dashboard with nine evidence-derived runtime capabilities.
+- Added `neurcode reality`, JSON output, and strict automation mode for repository-local operational proof.
+- Added workspace- and repository-scoped dashboard recovery paths after first activation value.
+
+### Changed
+
+- Exact-path approval is now reported separately from containment; containment is proven only after a neighboring protected path is blocked in the same session.
+- Governance readiness copy explicitly distinguishes operational evidence from compliance certification and code-safety guarantees.
+
 ## [0.20.25] - 2026-07-10
 
 ### Added
