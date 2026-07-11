@@ -366,8 +366,8 @@ function markBrainIndexResult(repoRoot, result, jobId) {
             filesIndexed: result.graph.coverage.filesIndexed,
             totalFiles: result.graph.coverage.filesSeen,
             bytesScanned: previous.progress.bytesScanned,
-            nodes: result.graph.nodes?.length ?? 0,
-            edges: result.graph.edges?.length ?? 0,
+            nodes: result.stats.nodeCount ?? result.graph.nodes?.length ?? 0,
+            edges: result.stats.edgeCount ?? result.graph.edges?.length ?? 0,
             percent: result.graph.coverage.filesSeen
                 ? Math.round((result.graph.coverage.filesIndexed / result.graph.coverage.filesSeen) * 100)
                 : 100,

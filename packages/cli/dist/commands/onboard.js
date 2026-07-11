@@ -258,7 +258,7 @@ function buildOnboardWalkthrough(agent) {
             { id: 'view', title: 'View Runtime Evidence', command: viewEvidence },
         ];
     }
-    return { agent, label, guarantee, steps, dashboardUrl: 'https://app.neurcode.com' };
+    return { agent, label, guarantee, steps, dashboardUrl: 'https://neurcode.com' };
 }
 async function fetchActivationOnboardingState() {
     const apiKey = (0, config_1.getApiKey)((0, state_1.getOrgId)() || undefined) || (0, config_1.getApiKey)();
@@ -442,7 +442,7 @@ function onboardCommand(program) {
         console.log('');
         console.log(bold('  Next steps'));
         console.log(green('  Canonical resume: neurcode setup'));
-        console.log(dim('  Dashboard:       https://app.neurcode.com'));
+        console.log(dim('  Dashboard:       https://neurcode.com'));
         console.log(dim('  Setup checklist: /w/me/setup'));
         console.log(dim('  Tech eval:       /w/me/enterprise-eval'));
         console.log(dim('  Agent matrix:    /w/me/integrations'));

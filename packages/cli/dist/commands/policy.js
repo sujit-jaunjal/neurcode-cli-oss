@@ -133,7 +133,10 @@ async function evaluateStructuralPolicyPath(input) {
     let graph = (0, brain_1.readRepositoryGraph)(input.cwd);
     let freshness = await (0, brain_1.repositoryGraphStatus)(input.cwd);
     if (input.index !== false && (!graph || freshness.state !== 'fresh')) {
-        graph = (await (0, brain_1.indexRepositoryGraph)({ repoRoot: input.cwd })).graph;
+        const indexed = await (0, brain_1.indexRepositoryGraph)({ repoRoot: input.cwd, materializeGraph: false });
+        graph = indexed.graph.nodes.length > 0 ? indexed.graph : (0, brain_1.readRepositoryGraph)(input.cwd);
+        if (!graph)
+            throw new Error('Repository Graph V2 was persisted but could not be read.');
         freshness = graph.freshness;
     }
     else if (graph) {

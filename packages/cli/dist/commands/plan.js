@@ -1657,8 +1657,10 @@ async function planCommand(intent, options) {
         console.log(chalk.dim('🧠 Repository Graph V2: Building source-free planning context...'));
         let canonicalGraph = (0, brain_1.readRepositoryGraph)(cwd);
         try {
-            if (!canonicalGraph)
-                canonicalGraph = (await (0, brain_1.indexRepositoryGraph)({ repoRoot: cwd })).graph;
+            if (!canonicalGraph) {
+                const indexed = await (0, brain_1.indexRepositoryGraph)({ repoRoot: cwd, materializeGraph: false });
+                canonicalGraph = indexed.graph.nodes.length > 0 ? indexed.graph : (0, brain_1.readRepositoryGraph)(cwd);
+            }
         }
         catch (error) {
             const message = `Canonical repository context is unavailable: ${error instanceof Error ? error.message : String(error)}`;

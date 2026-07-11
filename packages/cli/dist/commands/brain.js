@@ -355,7 +355,7 @@ function printRepositoryGraphIndexResult(repoRoot, result, json) {
     console.log(chalk.dim(`Files parsed:      ${result.stats.filesParsed}`));
     console.log(chalk.dim(`Files reused:      ${result.stats.filesReused}`));
     console.log(chalk.dim(`Unsupported:       ${result.graph.coverage.unsupportedPercent}%`));
-    console.log(chalk.dim(`Nodes / edges:     ${result.graph.nodes.length} / ${result.graph.edges.length}`));
+    console.log(chalk.dim(`Nodes / edges:     ${result.stats.nodeCount ?? result.graph.nodes.length} / ${result.stats.edgeCount ?? result.graph.edges.length}`));
     console.log(chalk.dim(`Graph size:        ${formatBytes(result.stats.graphBytes)}`));
     console.log(chalk.dim(`Duration:          ${result.stats.durationMs}ms`));
     console.log(chalk.dim(`Peak RSS:          ${result.stats.peakMemoryMb} MB`));
@@ -776,6 +776,7 @@ function brainCommand(program) {
         const scope = getBrainScope();
         const canonical = await (0, brain_1.indexRepositoryGraph)({
             repoRoot: scope.cwd,
+            materializeGraph: false,
             limits: {
                 ...(Number.isFinite(options.maxFiles) ? { maxFiles: options.maxFiles } : {}),
                 ...(Number.isFinite(options.maxBytesPerFile) ? { maxBytesPerFile: options.maxBytesPerFile } : {}),
@@ -794,8 +795,8 @@ function brainCommand(program) {
                 schemaVersion: canonical.graph.schemaVersion,
                 freshness: canonical.graph.freshness,
                 coverage: canonical.graph.coverage,
-                nodeCount: canonical.graph.nodes.length,
-                edgeCount: canonical.graph.edges.length,
+                nodeCount: canonical.stats.nodeCount ?? canonical.graph.nodes.length,
+                edgeCount: canonical.stats.edgeCount ?? canonical.graph.edges.length,
             },
             compatibilityProjection: {
                 regenerated: false,
@@ -864,6 +865,7 @@ function brainCommand(program) {
             jobId = lifecycle.jobId ?? undefined;
             const result = await (0, brain_1.indexRepositoryGraph)({
                 repoRoot: scope.cwd,
+                materializeGraph: false,
                 changedPaths: splitChangedPathList(options.changed),
                 deletedPaths: splitChangedPathList(options.deleted),
                 renamedPaths: parseRenameList(options.rename),
@@ -912,6 +914,7 @@ function brainCommand(program) {
             jobId = lifecycle.jobId ?? undefined;
             const result = await (0, brain_1.indexRepositoryGraph)({
                 repoRoot: scope.cwd,
+                materializeGraph: false,
                 changedPaths: splitChangedPathList(options.changed),
                 deletedPaths: splitChangedPathList(options.deleted),
                 renamedPaths: parseRenameList(options.rename),
@@ -1138,6 +1141,7 @@ function brainCommand(program) {
             jobId = lifecycle.jobId ?? undefined;
             const result = await (0, brain_1.indexRepositoryGraph)({
                 repoRoot: scope.cwd,
+                materializeGraph: false,
                 forceRebuild: true,
                 onProgress: jobId ? (progress) => { (0, brain_lifecycle_1.recordBrainProgress)(scope.cwd, jobId, progress); } : undefined,
             });
@@ -1179,7 +1183,8 @@ function brainCommand(program) {
             let graph = (0, brain_1.readRepositoryGraph)(scope.cwd);
             const status = await (0, brain_1.repositoryGraphStatus)(scope.cwd);
             if (options.index !== false && (!graph || status.state !== 'fresh')) {
-                graph = (await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd })).graph;
+                const indexed = await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, materializeGraph: false });
+                graph = indexed.graph.nodes.length > 0 ? indexed.graph : (0, brain_1.readRepositoryGraph)(scope.cwd);
             }
             else if (graph) {
                 graph = { ...graph, freshness: status };
@@ -1337,8 +1342,11 @@ function brainCommand(program) {
         let rebuilt = false;
         let canonicalGraph = (0, brain_1.readRepositoryGraph)(scope.cwd);
         if (!canonicalGraph || options.rebuild) {
-            canonicalGraph = (await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, forceRebuild: options.rebuild === true })).graph;
+            const indexed = await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, forceRebuild: options.rebuild === true, materializeGraph: false });
+            canonicalGraph = indexed.graph.nodes.length > 0 ? indexed.graph : (0, brain_1.readRepositoryGraph)(scope.cwd);
         }
+        if (!canonicalGraph)
+            throw new Error('Repository Graph V2 was persisted but could not be read.');
         const canonicalFreshness = await (0, brain_1.repositoryGraphStatus)(scope.cwd);
         if (!artifact) {
             artifact = (0, local_repo_brain_1.buildLocalRepoBrain)(scope.cwd, { experimentalFingerprintReuse: options.experimentalFingerprintReuse });
@@ -1458,12 +1466,12 @@ function brainCommand(program) {
             process.exit(1);
         }
         if (options.rebuild) {
-            await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, forceRebuild: true });
+            await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, forceRebuild: true, materializeGraph: false });
             const rebuilt = (0, local_repo_brain_1.buildLocalRepoBrain)(scope.cwd);
             (0, local_repo_brain_1.writeLocalRepoBrain)(scope.cwd, rebuilt);
         }
         else if (options.index !== false && !(0, brain_1.readRepositoryGraph)(scope.cwd)) {
-            await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd });
+            await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, materializeGraph: false });
         }
         const report = (0, repo_brain_impact_1.buildRepoBrainImpactForRepo)(scope.cwd, paths, { autoBuild: options.index !== false });
         const graphProjection = (0, repo_graph_impact_1.computeGraphImpactProjection)({ repoRoot: scope.cwd, changedPaths: paths });

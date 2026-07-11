@@ -386,6 +386,12 @@ export interface RepositoryIndexRequest {
     }>;
     forceRebuild?: boolean;
     limits?: Partial<RepositoryGraphLimits>;
+    /**
+     * Keep the persisted graph authoritative without materializing every fact in
+     * this response. Defaults to true for backward compatibility. Large-repo CLI
+     * paths set this false and query the SQLite store as needed.
+     */
+    materializeGraph?: boolean;
     /** Local-only source-free progress callback. Never persisted in the graph. */
     onProgress?: (progress: RepositoryIndexProgress) => void;
 }
@@ -412,6 +418,12 @@ export interface RepositoryIndexResult {
         filesRenamed: number;
         peakMemoryMb: number;
         graphBytes: number;
+        /** Persisted counts remain authoritative when materializeGraph is false. */
+        nodeCount?: number;
+        edgeCount?: number;
+        /** Source-free phase timings for reproducible performance diagnosis. */
+        indexPhases?: Record<string, number>;
+        storagePath?: 'full_snapshot' | 'streaming_sqlite' | 'bounded_sqlite_incremental';
         filesAnalyzed?: number;
         filesSkipped?: number;
         filesUnsupported?: number;
