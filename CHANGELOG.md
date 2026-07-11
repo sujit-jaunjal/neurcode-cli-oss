@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1] - 2026-07-11
+
+### Added
+
+- Added a pinned five-repository, 100-scenario TypeScript/JavaScript governance corpus with an independently stored answer key, deterministic replay receipts, per-corpus confusion matrices, confidence intervals, and source-leak gates.
+- Added reproducible cold, unchanged, and one-file benchmark tooling with warmups, p50/p95 latency, OS peak RSS, corpus revision, runtime metadata, and deterministic fact fingerprints.
+
+### Changed
+
+- Clean SQLite graph refreshes now use the metadata/file indexing head and avoid materializing the full graph.
+- Dirty TypeScript refreshes build a dependency-resolving checker program from changed roots only.
+- Repeated call sites are stored as compact reconstructable reference groups, preserving every call-site ID and line while reducing duplicate node and edge materialization.
+- Repository Graph V2 fact schema is now `neurcode.repository-graph.v2.1`; older caches rebuild safely instead of mixing fact layouts.
+
+### Security
+
+- Missing Git evidence falls back to full content discovery, and stale Git heads cannot be treated as unchanged.
+- The canonical TypeScript checker no longer turns wall-clock timing variance into nondeterministic evidence.
+
 ## [0.20.27] - 2026-07-11
 
 ### Added

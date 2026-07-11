@@ -1,4 +1,4 @@
-export declare const REPOSITORY_GRAPH_SCHEMA_VERSION: "neurcode.repository-graph.v2";
+export declare const REPOSITORY_GRAPH_SCHEMA_VERSION: "neurcode.repository-graph.v2.1";
 export declare const PROPOSED_CHANGE_ENVELOPE_SCHEMA_VERSION: "neurcode.proposed-change.v2";
 export declare const COMPILED_STRUCTURAL_POLICY_SCHEMA_VERSION: "neurcode.compiled-structural-policy.v2";
 export declare const POLICY_EVALUATION_SCHEMA_VERSION: "neurcode.policy-evaluation.v2";

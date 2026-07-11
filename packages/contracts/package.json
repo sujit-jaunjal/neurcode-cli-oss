@@ -1,6 +1,6 @@
 {
   "name": "@neurcode-ai/contracts",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "Shared JSON contracts for Neurcode CLI, API, action, IDE, and MCP surfaces",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
