@@ -66,6 +66,7 @@ __exportStar(require("./first-value-proof"), exports);
 __exportStar(require("./pilot-setup"), exports);
 __exportStar(require("./manager-evidence"), exports);
 __exportStar(require("./governance-reality"), exports);
+__exportStar(require("./typescript-governance-quality-v1"), exports);
 __exportStar(require("./integrations-compatibility-v1"), exports);
 __exportStar(require("./runtime-risk-pack-v1"), exports);
 __exportStar(require("./runtime-policy-config"), exports);

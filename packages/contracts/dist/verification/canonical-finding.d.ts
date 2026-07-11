@@ -102,7 +102,7 @@ export interface GovernanceFinding {
  * drift-detected     - HARD FAILURE: same commit + diff + rules produced different output.
  *                      Checksum mismatch. Must be investigated before any governance trust.
  */
-export type ReplayReconstructionStatus = 'exact' | 'bounded-degradation' | 'drift-detected';
+export type ReplayReconstructionStatus = 'exact' | 'artifact-complete' | 'bounded-degradation' | 'drift-detected';
 /**
  * Phase 2: Typed drift reason taxonomy for replay integrity analysis.
  *
@@ -124,7 +124,7 @@ export interface GovernanceReplayIntegrity {
     graphMismatches: string[];
     semanticTruncationMismatches: string[];
     notes: string[];
-    /** Phase 2: Typed drift reasons — empty if status === 'exact'. */
+    /** Typed drift reasons — empty for exact reconstruction or artifact-only completeness. */
     driftReasons?: ReplayIntegrityDriftReason[];
 }
 export interface GovernanceVerificationEnvelope {

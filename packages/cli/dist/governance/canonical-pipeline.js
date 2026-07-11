@@ -802,8 +802,11 @@ function evaluateGovernanceReplayIntegrity(input) {
             && provenanceMismatches.length === 0
             && graphMismatches.length === 0
             && semanticTruncationMismatches.length === 0
-            ? 'exact'
+            ? (compareRuns ? 'exact' : 'artifact-complete')
             : 'bounded-degradation';
+    if (!compareRuns && status === 'artifact-complete') {
+        notes.push('Evidence artifacts are complete, but deterministic execution was not reconstructed; exact reconstruction is not claimed.');
+    }
     return {
         status,
         missingArtifacts,

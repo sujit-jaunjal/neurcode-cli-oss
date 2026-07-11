@@ -1,4 +1,7 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.topologyPackageRootsForPaths = exports.topologyHasPath = exports.topologyGlobsForIntent = exports.topologyFacts = exports.compileRepositoryTopology = exports.REPOSITORY_TOPOLOGY_SCHEMA_VERSION = exports.resolveRuntimeSafetyEnforcement = exports.resolvePolicyActionForFamily = exports.resolvePolicyActionForClassification = exports.RUNTIME_SAFETY_POLICY_ACTION_FIELDS = exports.RUNTIME_SAFETY_ENFORCEMENT_ACTIONS = exports.PLAN_CONTROL_MODES = exports.validateRuntimeSafetyPolicyProfile = exports.parseRuntimeSafetyPolicyProfile = exports.normalizePlanControlMode = exports.evaluatePlanControlMode = exports.evaluateNeighborContainment = exports.evaluateCredentialPreWrite = exports.describePlanControlMode = exports.classifyRuntimeSafetySurface = exports.classifyDependencyManifestChange = exports.buildRuntimeSafetySessionEvidence = exports.ENTERPRISE_RUNTIME_SAFETY_V1_POLICY = exports.ENTERPRISE_RUNTIME_SAFETY_V1_PROFILE_ID = exports.RUNTIME_SAFETY_KERNEL_SCHEMA_VERSION = exports.ownersForPath = exports.DEFAULT_RUNTIME_LOCAL_MODE = exports.DEFAULT_PLAN_CONTROL_MODE = exports.DEFAULT_PLAN_COHERENCE_MODE = exports.checkFileBoundary = exports.buildRepoGovernanceProfile = exports.mapRelationshipAuthorityToEvidenceTier = exports.classifyRelationshipAuthority = exports.validateRepoGlob = exports.validateRepoFilePath = exports.resolveCanonicalRepoRoot = exports.assertRepoGlob = exports.assertRepoFilePath = exports.validatePrivacySafeCloudPayload = exports.sanitizeRepoRelativePath = exports.sanitizeLocalPrivateText = exports.normalizeIntentContent = exports.isIntentSummaryV1 = exports.detectCredentialText = exports.canonicalIntentHash = exports.buildIntentSummary = exports.assertPrivacySafeCloudPayload = exports.INTENT_SUMMARY_SCHEMA_VERSION = exports.INTENT_PRIVACY_POLICY_VERSION = exports.RUNTIME_STATE_SCHEMA_VERSION = void 0;
 exports.buildAgentGuardPostureSummary = exports.AGENT_GUARD_POSTURE_SCHEMA_VERSION = exports.buildAgentInvocationSummary = exports.AGENT_INVOCATION_OBSERVABILITY_SCHEMA_VERSION = exports.writeAIChangeRecord = exports.verifyAIChangeRecordReceipt = exports.stableStringify = exports.stableHash = exports.canonicalAIChangeRecordHash = exports.buildAIChangeRecordReceipt = exports.buildAIChangeRecord = exports.assertSourceFreeAIChangeRecordPayload = exports.aiChangeRecordPath = exports.AI_CHANGE_RECORD_SIGNING_VERSION = exports.AI_CHANGE_RECORD_RECEIPT_SCHEMA_VERSION = exports.AI_CHANGE_RECORD_TYPE = exports.AI_CHANGE_RECORD_SCHEMA_VERSION = exports.sessionPath = exports.sessionsDir = exports.replaySession = exports.finishSession = exports.buildPlanNegotiationView = exports.unfreezePlan = exports.freezePlan = exports.derivePlanPhase = exports.buildPlanTimeline = exports.activeAgentPlanRevision = exports.evaluateSessionPlanCoherence = exports.classifyAgentPlanAmendment = exports.decideAgentPlanAmendment = exports.amendAgentPlan = exports.captureAgentPlan = exports.attachAgentPlan = exports.evaluatePlanCoherencePolicy = exports.evaluateIntentCoherence = exports.refreshArchitectureObligations = exports.waiveArchitectureObligation = exports.expireArchitectureObligationWaivers = exports.expireSessionApprovals = exports.activeApprovalPaths = exports.revokeSessionApproval = exports.approveSession = exports.appendEvent = exports.loadSession = exports.loadActiveSession = exports.removeSession = exports.clearActiveSession = exports.activateSession = exports.createSession = exports.topologySupportGlobs = void 0;
@@ -7,6 +10,7 @@ exports.extractPlannedFilePaths = extractPlannedFilePaths;
 exports.resolvePlanVerdict = resolvePlanVerdict;
 exports.buildPlanVerificationMessage = buildPlanVerificationMessage;
 exports.evaluatePlanVerification = evaluatePlanVerification;
+const micromatch_1 = __importDefault(require("micromatch"));
 var runtime_state_1 = require("./runtime-state");
 Object.defineProperty(exports, "RUNTIME_STATE_SCHEMA_VERSION", { enumerable: true, get: function () { return runtime_state_1.RUNTIME_STATE_SCHEMA_VERSION; } });
 var intent_privacy_1 = require("./intent-privacy");
@@ -415,21 +419,86 @@ function evaluatePlanVerification(input) {
         .map((file) => file.path)
         .filter(Boolean)));
     const changedSet = new Set(changedFilePaths);
-    const bloatFiles = changedFilePaths.filter((pathValue) => !plannedSet.has(pathValue));
+    const graphRelationships = input.scopeEvidence?.relationships ?? [];
+    const classifyPath = (pathValue) => {
+        if (plannedSet.has(pathValue)) {
+            return {
+                path: pathValue,
+                classification: 'planned',
+                authority: 'deterministic_exact',
+                reasonCodes: ['exact_plan_path'],
+                relatedPlannedPaths: [pathValue],
+                writeAuthorized: true,
+            };
+        }
+        const related = graphRelationships.filter((edge) => (edge.fromPath === pathValue && plannedSet.has(edge.toPath))
+            || (edge.toPath === pathValue && plannedSet.has(edge.fromPath)));
+        const relatedPlannedPaths = [...new Set(related.flatMap((edge) => [edge.fromPath, edge.toPath]).filter((path) => plannedSet.has(path)))].sort();
+        const authoritative = related.filter((edge) => edge.enforcementEligible && (edge.authority === 'deterministic_exact' || edge.authority === 'deterministic_structural'));
+        if (input.scopeEvidence?.coverageComplete && authoritative.length > 0) {
+            return {
+                path: pathValue,
+                classification: 'graph_required',
+                authority: authoritative.some((edge) => edge.authority === 'deterministic_exact')
+                    ? 'deterministic_exact'
+                    : 'deterministic_structural',
+                reasonCodes: [...new Set(authoritative.flatMap((edge) => [`graph_${edge.type}`, ...edge.reasonCodes]))].sort(),
+                relatedPlannedPaths,
+                writeAuthorized: false,
+            };
+        }
+        const supportGlobs = input.scopeEvidence?.legitimateSupportGlobs ?? [];
+        const generatedPaths = new Set((input.scopeEvidence?.generatedPaths ?? []).map(normalizeRepoPath));
+        if (generatedPaths.has(pathValue) || (supportGlobs.length > 0 && micromatch_1.default.isMatch(pathValue, supportGlobs))) {
+            return {
+                path: pathValue,
+                classification: 'legitimate_support',
+                authority: generatedPaths.has(pathValue) ? 'deterministic_structural' : 'bounded_inference',
+                reasonCodes: [generatedPaths.has(pathValue) ? 'generated_output_provenance' : 'configured_legitimate_support'],
+                relatedPlannedPaths,
+                writeAuthorized: false,
+            };
+        }
+        if (input.scopeEvidence && (!input.scopeEvidence.coverageComplete || related.some((edge) => edge.authority === 'not_evaluated'))) {
+            return {
+                path: pathValue,
+                classification: 'not_evaluated',
+                authority: 'not_evaluated',
+                reasonCodes: ['graph_scope_not_evaluated', ...new Set(related.flatMap((edge) => edge.reasonCodes))].sort(),
+                relatedPlannedPaths,
+                writeAuthorized: false,
+            };
+        }
+        return {
+            path: pathValue,
+            classification: 'unplanned',
+            authority: input.scopeEvidence ? 'deterministic_exact' : 'not_evaluated',
+            reasonCodes: [input.scopeEvidence ? 'no_graph_or_support_justification' : 'scope_evidence_unavailable'],
+            relatedPlannedPaths,
+            writeAuthorized: false,
+        };
+    };
+    const scopeClassifications = changedFilePaths.map(classifyPath);
+    const bloatFiles = scopeClassifications
+        .filter((record) => record.classification === 'unplanned')
+        .map((record) => record.path);
     const bloatCount = bloatFiles.length;
+    const notEvaluatedCount = scopeClassifications.filter((record) => record.classification === 'not_evaluated').length;
     const totalPlannedFiles = plannedSet.size;
     const plannedFilesModified = plannedFilePaths.filter((pathValue) => changedSet.has(pathValue)).length;
     const adherenceScore = totalPlannedFiles > 0
         ? Math.round((plannedFilesModified / totalPlannedFiles) * 100)
         : 0;
     const constraintViolations = detectConstraintViolations(input.intentConstraints, input.policyRules, input.extraConstraintRules, normalizedChangedFiles, input.fileContents);
-    const verdict = resolvePlanVerdict({
+    let verdict = resolvePlanVerdict({
         bloatCount,
         adherenceScore,
         totalPlannedFiles,
         plannedFilesModified,
         constraintViolations,
     });
+    if (notEvaluatedCount > 0 && verdict === 'PASS')
+        verdict = 'WARN';
     const totalAdded = input.diffStats
         ? input.diffStats.totalAdded
         : normalizedChangedFiles.reduce((sum, file) => sum + file.added, 0);
@@ -465,11 +534,17 @@ function evaluatePlanVerification(input) {
         bloatFiles,
         plannedFilesModified,
         totalPlannedFiles,
-        scopeGuardPassed: bloatCount === 0,
+        scopeGuardPassed: bloatCount === 0 && notEvaluatedCount === 0,
         constraintViolations,
         verdict,
         diffSummary,
         message,
+        scopeClassifications,
+        planPathPrecision: totalPlannedFiles > 0 ? plannedFilesModified / totalPlannedFiles : null,
+        executionAdherence: changedFilePaths.length > 0
+            ? scopeClassifications.filter((record) => record.classification !== 'unplanned' && record.classification !== 'not_evaluated').length / changedFilePaths.length
+            : null,
+        notEvaluatedCount,
     };
 }
 //# sourceMappingURL=index.js.map

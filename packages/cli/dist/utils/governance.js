@@ -48,10 +48,13 @@ function evaluateGovernance(input) {
     const contextPolicy = (0, policy_1.evaluateContextPolicyForChanges)(changedFiles, effectiveContextPolicy, runtimeContextCandidates.length > 0
         ? runtimeContextCandidates
         : input.contextCandidates || []);
-    const brainMap = (0, brain_1.buildBrainRepositoryMap)(input.projectRoot, {
-        changedFiles,
-        persist: true,
-    });
+    // Graph V2 is the only repository decision authority. The analysis package
+    // still consumes its V1-shaped map, so provide a read-only projection rather
+    // than independently scanning source into a second Brain.
+    const canonicalGraph = (0, brain_1.readRepositoryGraph)(input.projectRoot);
+    const brainMap = canonicalGraph
+        ? (0, brain_1.projectRepositoryGraphToBrainMap)(input.projectRoot, canonicalGraph)
+        : (0, brain_1.emptyBrainRepositoryMap)(input.projectRoot);
     const analysis = (0, analysis_1.summarizeGovernance)(effectiveTask, input.diffFiles, brainMap, planSpec);
     const driftIntelligence = (0, drift_intelligence_1.buildDriftIntelligence)(analysis.changeSet, runtimeContext);
     const updatedInvariantMemory = runtimeContext

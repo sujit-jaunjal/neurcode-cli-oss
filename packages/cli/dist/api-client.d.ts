@@ -1,4 +1,5 @@
 import { NeurcodeConfig } from './config';
+import type { RepositoryContextPackage } from '@neurcode-ai/contracts';
 export interface AnalyzeDiffRequest {
     diff: string;
     projectId?: string;
@@ -956,7 +957,7 @@ export declare class ApiClient {
         title: string;
         description: string;
         acceptanceCriteria?: string;
-    }, projectSummary?: string): Promise<GeneratePlanResponse>;
+    }, projectSummary?: string, repositoryContext?: RepositoryContextPackage): Promise<GeneratePlanResponse>;
     importExternalPlan(input: {
         provider?: string;
         projectId?: string;

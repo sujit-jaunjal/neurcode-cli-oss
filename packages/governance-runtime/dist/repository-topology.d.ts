@@ -18,6 +18,12 @@ export interface TopologyBrainFact {
     path: string;
     name?: string | null;
     relatedPath?: string | null;
+    parserId?: string | null;
+    parserVersion?: string | null;
+    parserDepth?: string;
+    authority?: 'deterministic_exact' | 'deterministic_structural' | 'bounded_inference' | 'advisory_heuristic' | 'not_evaluated' | 'unsupported';
+    enforcementEligible?: boolean;
+    reasonCodes?: string[];
 }
 export interface RepositoryTopologyFact {
     id: string;

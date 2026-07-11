@@ -1,3 +1,4 @@
+import type { RepositoryGraphSnapshot } from '@neurcode-ai/contracts';
 export declare const LOCAL_REPO_BRAIN_SCHEMA_VERSION: "neurcode.local-repo-brain.v1";
 export type LocalRepoBrainLanguage = 'typescript' | 'javascript' | 'python' | 'go' | 'java' | 'ruby' | 'rust' | 'markdown' | 'yaml' | 'json' | 'shell' | 'other';
 export type LocalRepoBrainSymbolKind = 'function' | 'class' | 'interface' | 'type' | 'const' | 'method';
@@ -194,6 +195,8 @@ export declare function analyzeLocalProposedSource(filePath: string, source: str
 };
 export declare function localRepoBrainPath(projectRoot: string): string;
 export declare function localRepoBrainMarkdownPath(projectRoot: string): string;
+/** Read-only LocalRepoBrain V1 compatibility projection from canonical Graph V2. */
+export declare function projectRepositoryGraphToLocalRepoBrain(projectRoot: string, graph: RepositoryGraphSnapshot): LocalRepoBrainArtifact;
 export declare function buildLocalRepoBrain(projectRoot: string, options?: BuildLocalRepoBrainOptions): LocalRepoBrainArtifact;
 export declare function writeLocalRepoBrain(projectRoot: string, artifact: LocalRepoBrainArtifact): {
     jsonPath: string;

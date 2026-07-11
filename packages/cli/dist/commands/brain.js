@@ -781,12 +781,6 @@ function brainCommand(program) {
                 ...(Number.isFinite(options.maxBytesPerFile) ? { maxBytesPerFile: options.maxBytesPerFile } : {}),
             },
         });
-        const artifact = (0, local_repo_brain_1.buildLocalRepoBrain)(scope.cwd, {
-            maxFiles: options.maxFiles,
-            maxBytesPerFile: options.maxBytesPerFile,
-            experimentalFingerprintReuse: options.experimentalFingerprintReuse,
-        });
-        const paths = (0, local_repo_brain_1.writeLocalRepoBrain)(scope.cwd, artifact);
         const payload = {
             repoRoot: scope.cwd,
             repositoryIntelligenceModel: {
@@ -804,16 +798,11 @@ function brainCommand(program) {
                 edgeCount: canonical.graph.edges.length,
             },
             compatibilityProjection: {
-                artifactHash: artifact.artifactHash,
-                summary: artifact.summary,
+                regenerated: false,
+                decisionAuthority: false,
+                reason: 'Legacy LocalRepoBrain is not rebuilt by canonical indexing. Existing artifacts remain read-only compatibility data.',
             },
-            jsonPath: paths.jsonPath,
-            markdownPath: paths.markdownPath,
-            artifactHash: artifact.artifactHash,
-            privacy: artifact.privacy,
-            summary: artifact.summary,
-            topHotspots: artifact.hotspots.slice(0, 8),
-            reuseFindings: artifact.reuseFindings.slice(0, 8),
+            privacy: canonical.graph.privacy,
         };
         if (options.json) {
             await (0, activation_telemetry_1.trackActivationEventAndFlush)({
@@ -830,40 +819,11 @@ function brainCommand(program) {
         console.log(chalk.dim(`Posture:          ${canonical.graph.freshness.posture ?? canonical.graph.freshness.state}`));
         console.log(chalk.dim(`Analyzed/skipped: ${canonical.graph.coverage.filesAnalyzed}/${canonical.graph.coverage.filesSkipped}`));
         console.log(chalk.dim(`Recovery:         neurcode brain repo-recover`));
-        (0, messages_1.printSection)('Artifact', '🧠');
-        console.log(chalk.yellow('Legacy Brain is a compatibility projection; its counts are not canonical lifecycle health.'));
-        console.log(chalk.dim(`Repo Root:     ${scope.cwd}`));
-        console.log(chalk.dim(`JSON:          ${paths.jsonPath}`));
-        console.log(chalk.dim(`Summary:       ${paths.markdownPath}`));
-        console.log(chalk.dim(`Artifact Hash: ${artifact.artifactHash}`));
-        (0, messages_1.printSection)('Summary', '📊');
-        console.log(chalk.dim(`Files indexed:       ${artifact.summary.filesIndexed}`));
-        console.log(chalk.dim(`Declarations indexed:${artifact.summary.symbolsIndexed}`));
-        console.log(chalk.dim(`Import edges:        ${artifact.summary.importEdges}`));
-        console.log(chalk.dim(`Modules:             ${artifact.summary.modules}`));
-        console.log(chalk.dim(`Sensitive files:     ${artifact.summary.sensitiveFiles}`));
-        if (artifact.summary.ownerBoundaryStatus === 'not_found') {
-            console.log(chalk.dim(`Owner boundaries:    none (no CODEOWNERS found)`));
-        }
-        else {
-            console.log(chalk.dim(`Owner boundaries:    ${artifact.summary.ownerBoundaries}`));
-        }
-        console.log(chalk.dim(`Reuse advisories:    ${artifact.summary.reuseFindings}`));
-        console.log(chalk.dim(`Generated skipped:   ${artifact.summary.generatedFilesSkipped}`));
+        (0, messages_1.printSection)('Compatibility boundary', '🧠');
+        console.log(chalk.yellow('Legacy LocalRepoBrain was not rebuilt and has no decision authority.'));
+        console.log(chalk.dim('Existing legacy artifacts remain readable for compatibility-only commands.'));
         (0, messages_1.printSection)('Privacy', '🔒');
         console.log(chalk.dim('No source code, raw diffs, raw prompts, or chat transcripts are stored.'));
-        console.log(chalk.dim(`Stored fields: ${artifact.privacy.storedFields.join(', ')}`));
-        if (artifact.reuseFindings.length > 0) {
-            (0, messages_1.printSection)('Top Reuse Advisories (same-name exports)', '♻️');
-            artifact.reuseFindings.slice(0, 6).forEach((finding, index) => {
-                console.log(chalk.white(`  ${index + 1}. ${finding.symbolName || finding.kind}: ${finding.confidence} confidence`));
-                console.log(chalk.dim(`     ${finding.files.slice(0, 4).join(', ')}`));
-            });
-        }
-        else {
-            (0, messages_1.printSection)('Reuse Advisories', '♻️');
-            console.log(chalk.dim('No duplicate exported symbol names found across non-test files.'));
-        }
         (0, messages_1.printInfo)('Next', 'Run: neurcode brain inspect "<area or symbol>"');
         await (0, activation_telemetry_1.trackActivationEventAndFlush)({
             eventType: 'brain_index_completed',
@@ -1172,11 +1132,22 @@ function brainCommand(program) {
         .option('--json', 'Output stable machine-readable JSON')
         .action(async (options) => {
         const scope = getBrainScope();
+        let jobId;
         try {
-            const result = await (0, brain_1.indexRepositoryGraph)({ repoRoot: scope.cwd, forceRebuild: true });
+            const lifecycle = await (0, brain_lifecycle_1.beginBrainIndex)(scope.cwd, { source: 'manual', requestedLimits: {} });
+            jobId = lifecycle.jobId ?? undefined;
+            const result = await (0, brain_1.indexRepositoryGraph)({
+                repoRoot: scope.cwd,
+                forceRebuild: true,
+                onProgress: jobId ? (progress) => { (0, brain_lifecycle_1.recordBrainProgress)(scope.cwd, jobId, progress); } : undefined,
+            });
+            (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result, jobId);
+            refreshActivatedProfileAfterBrain(scope.cwd);
             printRepositoryGraphIndexResult(scope.cwd, result, options.json);
         }
         catch (error) {
+            if (jobId)
+                (0, brain_lifecycle_1.markBrainFailed)(scope.cwd, 'index_failed', jobId);
             repositoryGraphError(error, options.json);
         }
     });

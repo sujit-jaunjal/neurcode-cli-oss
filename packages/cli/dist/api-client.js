@@ -804,7 +804,7 @@ class ApiClient {
         });
         return response.files;
     }
-    async generatePlan(intent, files, projectId, ticketMetadata, projectSummary) {
+    async generatePlan(intent, files, projectId, ticketMetadata, projectSummary, repositoryContext) {
         const url = `${this.apiUrl}/api/v1/plan`;
         const headers = {
             'Content-Type': 'application/json'
@@ -818,6 +818,7 @@ class ApiClient {
                 projectId,
                 ticketMetadata,
                 projectSummary,
+                repositoryContext,
             })
         });
     }

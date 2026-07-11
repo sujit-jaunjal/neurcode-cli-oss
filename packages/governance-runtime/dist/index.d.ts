@@ -1,3 +1,4 @@
+import type { PlanScopeClassificationRecord, RepositoryContextRelationshipFact } from '@neurcode-ai/contracts';
 export type PlanVerdict = 'PASS' | 'FAIL' | 'WARN';
 export { RUNTIME_STATE_SCHEMA_VERSION, type RuntimeEnforcementState, type RuntimeStateAssessment, type RuntimeStateEvidence, } from './runtime-state';
 export { INTENT_PRIVACY_POLICY_VERSION, INTENT_SUMMARY_SCHEMA_VERSION, assertPrivacySafeCloudPayload, buildIntentSummary, canonicalIntentHash, detectCredentialText, isIntentSummaryV1, normalizeIntentContent, sanitizeLocalPrivateText, sanitizeRepoRelativePath, validatePrivacySafeCloudPayload, type IntentActorType, type CredentialDetection, type IntentProvenanceClassification, type IntentProvenanceSource, type IntentRedactionReasonCode, type IntentScopeMode, type IntentSummaryV1, type LocalPrivateText, type PrivacyValidationIssue, } from './intent-privacy';
@@ -54,6 +55,12 @@ export interface PlanVerificationInput {
     policyRules?: string[];
     extraConstraintRules?: DeterministicConstraintRule[];
     fileContents?: Record<string, string>;
+    scopeEvidence?: {
+        coverageComplete: boolean;
+        relationships: RepositoryContextRelationshipFact[];
+        legitimateSupportGlobs?: string[];
+        generatedPaths?: string[];
+    };
 }
 export interface PlanDiffSummary {
     added: number;
@@ -81,6 +88,10 @@ export interface PlanVerificationResult {
     verdict: PlanVerdict;
     diffSummary: PlanDiffSummary;
     message: string;
+    scopeClassifications: PlanScopeClassificationRecord[];
+    planPathPrecision: number | null;
+    executionAdherence: number | null;
+    notEvaluatedCount: number;
 }
 export declare function extractPlannedFilePaths(planFiles: PlanFileScopeItem[]): string[];
 export declare function resolvePlanVerdict(input: {

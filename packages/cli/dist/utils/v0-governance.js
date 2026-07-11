@@ -360,6 +360,7 @@ function readTopologyBrainFacts(repoRoot) {
         return null;
     const facts = [];
     const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+    const graphCoverageComplete = graph.coverageAuthority?.coverageComplete === true;
     for (const node of graph.nodes) {
         if (!node.path)
             continue;
@@ -368,6 +369,12 @@ function readTopologyBrainFacts(repoRoot) {
                 kind: node.kind,
                 path: node.path,
                 name: node.name,
+                parserId: node.provenance.parserId,
+                parserVersion: node.provenance.parserVersion,
+                parserDepth: node.provenance.parserDepth,
+                authority: graphCoverageComplete ? 'deterministic_structural' : 'not_evaluated',
+                enforcementEligible: graphCoverageComplete,
+                reasonCodes: graphCoverageComplete ? ['canonical_graph_node'] : ['not_evaluated_due_to_coverage'],
             });
         }
     }
@@ -385,11 +392,16 @@ function readTopologyBrainFacts(repoRoot) {
             kind,
             path: from.path,
             relatedPath: to.path,
+            parserId: edge.provenance,
+            parserDepth: nodesById.get(edge.fromId)?.provenance.parserDepth ?? 'metadata_only',
+            authority: edge.relationshipAuthorityClass ?? 'not_evaluated',
+            enforcementEligible: edge.enforcementEligible === true,
+            reasonCodes: [...(edge.authorityReasonCodes ?? [])],
         });
     }
     return {
         freshness: graph.freshness.state,
-        facts: facts.slice(0, 20_000),
+        facts,
     };
 }
 function prefixCodeownersContent(content, baseDir) {

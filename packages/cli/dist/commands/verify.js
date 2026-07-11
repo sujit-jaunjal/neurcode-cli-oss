@@ -68,6 +68,7 @@ const ignore_1 = require("../utils/ignore");
 const runtime_state_1 = require("../utils/runtime-state");
 const project_root_1 = require("../utils/project-root");
 const brain_context_1 = require("../utils/brain-context");
+const brain_1 = require("@neurcode-ai/brain");
 const scope_telemetry_1 = require("../utils/scope-telemetry");
 const plan_sync_1 = require("../utils/plan-sync");
 const intent_engine_1 = require("../intent-engine");
@@ -4462,6 +4463,14 @@ async function verifyCommand(options) {
                         // Best effort only; fallback can still run on diff-only context.
                     }
                 }
+                const verificationGraph = (0, brain_1.readRepositoryGraph)(projectRoot);
+                const verificationContext = verificationGraph
+                    ? (0, brain_1.buildRepositoryContextPackage)({
+                        graph: verificationGraph,
+                        intent: intentConstraintsForVerification || planFilesForVerification.join(' '),
+                        maxFiles: 100,
+                    })
+                    : null;
                 const localEvaluation = (0, governance_runtime_1.evaluatePlanVerification)({
                     planFiles: planFilesForVerification.map((path) => ({
                         path,
@@ -4473,6 +4482,11 @@ async function verifyCommand(options) {
                     policyRules: deterministicPolicyRules,
                     extraConstraintRules: hydratedCompiledPolicyRules.length > 0 ? hydratedCompiledPolicyRules : undefined,
                     fileContents: localFileContents,
+                    scopeEvidence: verificationContext ? {
+                        coverageComplete: verificationContext.repository.coverageComplete,
+                        relationships: verificationContext.relationships,
+                        generatedPaths: verificationContext.files.filter((file) => file.generated).map((file) => file.path),
+                    } : undefined,
                 });
                 return {
                     verificationId: `local-fallback-${Date.now()}`,

@@ -7,6 +7,7 @@ exports.resolvePythonModulePath = resolvePythonModulePath;
 exports.analyzeLocalProposedSource = analyzeLocalProposedSource;
 exports.localRepoBrainPath = localRepoBrainPath;
 exports.localRepoBrainMarkdownPath = localRepoBrainMarkdownPath;
+exports.projectRepositoryGraphToLocalRepoBrain = projectRepositoryGraphToLocalRepoBrain;
 exports.buildLocalRepoBrain = buildLocalRepoBrain;
 exports.writeLocalRepoBrain = writeLocalRepoBrain;
 exports.readLocalRepoBrain = readLocalRepoBrain;
@@ -20,6 +21,7 @@ const node_child_process_1 = require("node:child_process");
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const team_memory_path_hygiene_1 = require("./team-memory-path-hygiene");
+const brain_1 = require("@neurcode-ai/brain");
 exports.LOCAL_REPO_BRAIN_SCHEMA_VERSION = 'neurcode.local-repo-brain.v1';
 const IGNORE_DIRS = new Set([
     '.git',
@@ -597,7 +599,114 @@ function localRepoBrainPath(projectRoot) {
 function localRepoBrainMarkdownPath(projectRoot) {
     return (0, node_path_1.join)(projectRoot, '.neurcode', 'repo-brain', 'summary.md');
 }
+/** Read-only LocalRepoBrain V1 compatibility projection from canonical Graph V2. */
+function projectRepositoryGraphToLocalRepoBrain(projectRoot, graph) {
+    const generatedAt = graph.updatedAt;
+    const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+    const importResolution = new Map();
+    for (const edge of graph.edges.filter((edge) => edge.type === 'imports')) {
+        const from = nodesById.get(edge.fromId);
+        const to = nodesById.get(edge.toId);
+        if (from?.kind === 'import' && to?.path)
+            importResolution.set(from.id, to.path);
+    }
+    const imports = graph.nodes
+        .filter((node) => node.kind === 'import' && typeof node.attributes.sourcePath === 'string')
+        .map((node) => ({
+        fromFile: String(node.attributes.sourcePath),
+        target: String(node.attributes.target ?? ''),
+        targetKind: String(node.attributes.target ?? '').startsWith('.') ? 'relative' : 'package',
+        resolvedFile: importResolution.get(node.id) ?? null,
+        line: Number(node.attributes.line ?? 0),
+        language: (node.language === 'typescript' || node.language === 'javascript' || node.language === 'python'
+            ? node.language : 'other'),
+    }));
+    const symbols = graph.nodes
+        .filter((node) => node.kind === 'symbol' && node.path && node.name)
+        .filter((node) => ['function', 'class', 'interface', 'type', 'const', 'method'].includes(String(node.attributes.symbolKind)))
+        .map((node) => ({
+        name: node.name,
+        kind: String(node.attributes.symbolKind),
+        file: node.path,
+        line: Number(node.attributes.line ?? 0),
+        exported: node.attributes.exported === true,
+        local: node.attributes.local !== false,
+        normalizedSignature: null,
+        normalizedSignatureHash: null,
+        signatureHash: String(node.attributes.signatureHash ?? node.contentHash ?? ''),
+        tokenFingerprintHash: typeof node.attributes.structuralFingerprint === 'string' ? node.attributes.structuralFingerprint : null,
+        arity: typeof node.attributes.arity === 'number' ? node.attributes.arity : null,
+        language: (node.language === 'typescript' || node.language === 'javascript' || node.language === 'python'
+            ? node.language : 'other'),
+    }));
+    const symbolCounts = new Map();
+    const importCounts = new Map();
+    symbols.forEach((symbol) => symbolCounts.set(symbol.file, (symbolCounts.get(symbol.file) ?? 0) + 1));
+    imports.forEach((edge) => importCounts.set(edge.fromFile, (importCounts.get(edge.fromFile) ?? 0) + 1));
+    const files = graph.nodes
+        .filter((node) => (node.kind === 'file' || node.kind === 'test') && node.path)
+        .map((node) => {
+        const state = graph.fileStates?.[node.path];
+        return {
+            path: node.path,
+            module: typeof node.attributes.module === 'string' ? node.attributes.module : moduleKey(node.path),
+            language: (node.language === 'typescript' || node.language === 'javascript' || node.language === 'python'
+                ? node.language : 'other'),
+            bytes: state?.sizeBytes ?? Number(node.attributes.sizeBytes ?? 0),
+            lineCount: 0,
+            fileHash: node.contentHash ?? graph.fileHashes[node.path] ?? '',
+            mtimeMs: state?.mtimeMs ?? 0,
+            indexedAt: node.provenance.indexedAt,
+            symbolCount: symbolCounts.get(node.path) ?? 0,
+            importCount: importCounts.get(node.path) ?? 0,
+            sensitiveKinds: sensitiveKindsFor(node.path),
+            generated: node.attributes.generated === true,
+        };
+    });
+    const modules = buildModules(files);
+    const { boundaries: ownerBoundaries, status: ownerBoundaryStatus } = parseCodeowners(projectRoot);
+    const freshness = {
+        generatedAt,
+        gitHead: graph.freshness.gitHead,
+        gitDirty: graph.freshness.workingTreeHash ? true : null,
+        workingTreeStatus: graph.freshness.workingTreeHash ? 'dirty' : 'unknown',
+        freshnessBasis: 'git-head-and-working-tree',
+    };
+    const core = {
+        schemaVersion: exports.LOCAL_REPO_BRAIN_SCHEMA_VERSION,
+        repoRootHash: hash(projectRoot),
+        freshness,
+        privacy: {
+            sourceUploaded: false, sourceStored: false, diffStored: false,
+            promptStored: false, modelUsed: false,
+            storedFields: ['Repository Graph V2 compatibility projection'],
+        },
+        summary: {
+            filesIndexed: files.length, filesSkipped: graph.coverage.filesSkipped ?? 0,
+            bytesIndexed: files.reduce((sum, file) => sum + file.bytes, 0), symbolsIndexed: symbols.length,
+            importEdges: imports.length, modules: modules.length,
+            sensitiveFiles: files.filter((file) => file.sensitiveKinds.length > 0).length,
+            ownerBoundaries: ownerBoundaries.length, ownerBoundaryStatus, reuseFindings: 0,
+            generatedFilesSkipped: graph.coverage.filesGenerated,
+        },
+        files: files.sort((a, b) => a.path.localeCompare(b.path)),
+        symbols: symbols.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.name.localeCompare(b.name)),
+        imports: imports.sort((a, b) => a.fromFile.localeCompare(b.fromFile) || a.line - b.line),
+        modules,
+        ownerBoundaries,
+        reuseFindings: [],
+        hotspots: buildHotspots(files, imports),
+        limitations: [
+            'Compatibility projection only; Repository Graph V2 is the sole decision authority.',
+            'Fields unavailable in Graph V2 remain empty rather than being independently re-scanned.',
+        ],
+    };
+    return { ...core, generatedAt, artifactHash: hash(artifactHashInput(core)) };
+}
 function buildLocalRepoBrain(projectRoot, options = {}) {
+    const canonicalGraph = (0, brain_1.readRepositoryGraph)(projectRoot);
+    if (canonicalGraph)
+        return projectRepositoryGraphToLocalRepoBrain(projectRoot, canonicalGraph);
     const generatedAt = options.generatedAt || new Date().toISOString();
     const freshness = buildFreshness(projectRoot, generatedAt);
     const maxFiles = Math.max(1, Math.min(50000, options.maxFiles || 8000));

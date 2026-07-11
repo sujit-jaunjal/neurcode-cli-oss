@@ -629,13 +629,13 @@ function compileRepositoryTopology(input) {
             from: normalizePath(brainFact.path),
             to: normalizePath(brainFact.relatedPath),
             evidenceType: 'brain-graph',
-            confidence: input.brain?.freshness === 'fresh' ? 'high' : 'medium',
+            confidence: brainFact.authority === 'deterministic_exact' ? 'high' : input.brain?.freshness === 'fresh' ? 'high' : 'medium',
             sourceLanguage: repositoryLanguageKeyForPath(brainFact.path),
-            parserId: 'brain-graph',
-            parserDepth: 'metadata_only',
-            inferredFromNaming: brainFact.kind !== 'test',
-            directEvidence: brainFact.kind === 'test' && input.brain?.freshness === 'fresh',
-            relationshipProvenance: 'brain-graph',
+            parserId: brainFact.parserId ?? 'repository-graph-v2',
+            parserDepth: brainFact.parserDepth ?? 'metadata_only',
+            inferredFromNaming: brainFact.authority === 'advisory_heuristic' || brainFact.authority === 'bounded_inference',
+            directEvidence: brainFact.enforcementEligible === true,
+            relationshipProvenance: brainFact.parserId ?? 'repository-graph-v2',
             source: brainFact,
         });
     }
@@ -654,8 +654,7 @@ function compileRepositoryTopology(input) {
     }))
         .sort((left, right) => left.kind.localeCompare(right.kind)
         || left.path.localeCompare(right.path)
-        || String(left.name ?? '').localeCompare(String(right.name ?? '')))
-        .slice(0, 20_000);
+        || String(left.name ?? '').localeCompare(String(right.name ?? '')));
     const canonical = {
         schemaVersion: exports.REPOSITORY_TOPOLOGY_SCHEMA_VERSION,
         trackedFileCount: paths.length,
@@ -835,21 +834,25 @@ function topologyGlobsForIntent(topology, input) {
         const name = fact.name?.toLowerCase() ?? '';
         if (!name || !terms.some((term) => term === name || name.includes(term)))
             continue;
-        const confidence = topology.brain.freshness === 'fresh' ? 'high' : 'medium';
+        const confidence = fact.authority === 'deterministic_exact'
+            ? 'high'
+            : topology.brain.freshness === 'fresh' ? 'high' : 'medium';
+        const deterministic = fact.enforcementEligible === true
+            && (fact.authority === 'deterministic_exact' || fact.authority === 'deterministic_structural');
         result.set(fact.path, {
             glob: fact.path,
             factId: `brain_${stableHash(fact, 20)}`,
             confidence,
-            authority: 'deterministic',
-            reason: `Repo Brain ${fact.kind} fact matched symbol ${fact.name}; graph freshness is ${topology.brain.freshness ?? 'unknown'}.`,
+            authority: deterministic ? 'deterministic' : 'advisory',
+            reason: `Repository Graph V2 ${fact.kind} fact matched symbol ${fact.name}; authority is ${fact.authority ?? 'not_evaluated'}.`,
         });
         if (fact.relatedPath) {
             result.set(fact.relatedPath, {
                 glob: fact.relatedPath,
                 factId: `brain_related_${stableHash(fact, 20)}`,
                 confidence,
-                authority: 'deterministic',
-                reason: `Repo Brain relationship connects ${fact.path} to ${fact.relatedPath}.`,
+                authority: deterministic ? 'deterministic' : 'advisory',
+                reason: `Repository Graph V2 relationship connects ${fact.path} to ${fact.relatedPath}; authority is ${fact.authority ?? 'not_evaluated'}.`,
             });
         }
     }

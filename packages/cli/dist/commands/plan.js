@@ -56,6 +56,7 @@ const policy_packs_1 = require("../utils/policy-packs");
 const policy_compiler_1 = require("../utils/policy-compiler");
 const artifact_signature_1 = require("../utils/artifact-signature");
 const plan_symbols_1 = require("../utils/plan-symbols");
+const brain_1 = require("@neurcode-ai/brain");
 // Import chalk with fallback for plain strings if not available
 let chalk;
 try {
@@ -1343,22 +1344,6 @@ async function planCommand(intent, options) {
         // - influence plan generation
         // - participate in the cache key (avoid stale cached plans after context edits)
         const staticContext = (0, neurcode_context_1.loadStaticNeurcodeContext)(cwd, orgId && finalProjectIdForGuard ? { orgId, projectId: finalProjectIdForGuard } : undefined);
-        // Incremental Brain refresh: keep context in sync with human progress even when watch is not running.
-        if (orgId && finalProjectIdForGuard) {
-            try {
-                const refresh = (0, brain_context_1.refreshBrainContextFromWorkspace)(cwd, brainScope, {
-                    workingTreeHash: gitFingerprint?.kind === 'git' ? gitFingerprint.workingTreeHash : undefined,
-                    maxFiles: 80,
-                    recordEvent: false,
-                });
-                if (refresh.refreshed && (refresh.indexed > 0 || refresh.removed > 0)) {
-                    console.log(chalk.dim(`🧠 Brain refresh: indexed ${refresh.indexed}, removed ${refresh.removed}, considered ${refresh.considered}`));
-                }
-            }
-            catch {
-                // Brain refresh should never block plan generation.
-            }
-        }
         // If we couldn't use the git-based fast path (non-git projects), try a filesystem-based cache hit
         // after we have the file tree fingerprint.
         if (shouldUseCache && orgId && finalProjectIdForGuard && !gitFingerprint) {
@@ -1453,23 +1438,6 @@ async function planCommand(intent, options) {
         if (isReadOnlyAnalysis) {
             console.log(chalk.dim('🔎 Read-only analysis mode enabled (no-code intent detected)'));
             enhancedIntent = applyReadOnlyDirective(enhancedIntent);
-        }
-        // Retrieval augmentation: include a repo-grounded live context pack (file summaries + recent progress events).
-        if (orgId && finalProjectIdForGuard) {
-            try {
-                const pack = (0, brain_context_1.buildBrainContextPack)(cwd, brainScope, normalizedIntent, {
-                    maxFiles: 8,
-                    maxEvents: 6,
-                    maxBytes: 10 * 1024,
-                });
-                if (pack.text) {
-                    enhancedIntent = `${enhancedIntent}\n\n${pack.text}`;
-                    console.log(chalk.dim(`🧠 Brain context: ${pack.selectedFiles} relevant file summary(s), ${pack.recentEvents} recent event(s) from ${pack.totalIndexedFiles} indexed file(s)`));
-                }
-            }
-            catch {
-                // Brain context pack should never block plan generation.
-            }
         }
         // Step 3: Load or create asset map for context injection (toolbox summary)
         let assetMapForCoverage = null;
@@ -1683,57 +1651,47 @@ async function planCommand(intent, options) {
                 console.warn(chalk.yellow(`⚠️  Could not load project knowledge: ${error instanceof Error ? error.message : 'Unknown error'}`));
             }
         }
-        // Step C: Pass 1 - The Semantic Scout (select relevant files)
-        console.log(chalk.dim('🔍 Semantic Scout: Selecting relevant files...'));
-        let selectedFiles = [];
-        let usedFallbackSelection = false;
+        // Step C: deterministic Graph V2 retrieval. Planning never silently falls
+        // back to the first scanned paths or asks a model to infer relevance from
+        // filenames alone.
+        console.log(chalk.dim('🧠 Repository Graph V2: Building source-free planning context...'));
+        let canonicalGraph = (0, brain_1.readRepositoryGraph)(cwd);
         try {
-            selectedFiles = await client.selectFiles(enhancedIntent, fileTree, projectSummary);
-            // Handle empty selection (fallback to top 10 files)
-            if (selectedFiles.length === 0) {
-                console.log(chalk.yellow('⚠️  No files selected by Semantic Scout, using fallback (top 10 files)'));
-                selectedFiles = fileTree.slice(0, 10);
-                usedFallbackSelection = true;
-            }
-            console.log(chalk.green(`✅ Semantic Scout selected ${selectedFiles.length} file(s) from ${fileTree.length} total`));
-            if (process.env.DEBUG) {
-                console.log(chalk.dim(`Selected files: ${selectedFiles.join(', ')}`));
-            }
+            if (!canonicalGraph)
+                canonicalGraph = (await (0, brain_1.indexRepositoryGraph)({ repoRoot: cwd })).graph;
         }
         catch (error) {
-            // Fallback: use top 10 files if selection fails
-            console.warn(chalk.yellow(`⚠️  File selection failed: ${error instanceof Error ? error.message : 'Unknown error'}`));
-            console.log(chalk.yellow('   Using fallback: top 10 files from tree'));
-            selectedFiles = fileTree.slice(0, 10);
-            usedFallbackSelection = true;
-        }
-        // Step D: Content Load - Verify selected files exist and are readable
-        const validFiles = [];
-        for (const filePath of selectedFiles) {
-            const fullPath = (0, path_1.join)(cwd, filePath);
-            try {
-                if ((0, fs_1.existsSync)(fullPath)) {
-                    // Verify file is readable
-                    (0, fs_1.readFileSync)(fullPath, 'utf-8');
-                    validFiles.push(filePath);
-                }
-                else {
-                    if (process.env.DEBUG) {
-                        console.warn(chalk.yellow(`⚠️  Selected file does not exist: ${filePath}`));
-                    }
-                }
+            const message = `Canonical repository context is unavailable: ${error instanceof Error ? error.message : String(error)}`;
+            if (options.json) {
+                emitPlanJson({ success: false, cached: false, mode: intentMode, planId: null, sessionId: null, projectId: finalProjectIdForGuard || null, timestamp: new Date().toISOString(), message });
             }
-            catch (error) {
-                if (process.env.DEBUG) {
-                    console.warn(chalk.yellow(`⚠️  Cannot read selected file ${filePath}: ${error instanceof Error ? error.message : 'Unknown error'}`));
-                }
+            console.error(chalk.red(`❌ ${message}`));
+            process.exit(2);
+        }
+        if (!canonicalGraph) {
+            console.error(chalk.red('❌ Repository Graph V2 could not be constructed. Planning is not evaluated.'));
+            process.exit(2);
+        }
+        const repositoryContext = (0, brain_1.buildRepositoryContextPackage)({
+            graph: canonicalGraph,
+            intent: enhancedIntent,
+            maxFiles: Math.min(parsePositiveInt(process.env.NEURCODE_PLAN_CONTEXT_MAX_FILES) ?? 40, 200),
+        });
+        if (repositoryContext.status !== 'ready' || repositoryContext.files.length === 0) {
+            const message = repositoryContext.status === 'bounded_discovery_required'
+                ? 'Graph context is insufficient for a grounded plan. Run bounded discovery or name a path/symbol before retrying.'
+                : 'Planning is not evaluated because canonical graph coverage/context is insufficient.';
+            if (options.json) {
+                emitPlanJson({ success: false, cached: false, mode: intentMode, planId: null, sessionId: null, projectId: finalProjectIdForGuard || null, timestamp: new Date().toISOString(), message });
             }
+            console.error(chalk.yellow(`⚠️  ${message}`));
+            process.exit(2);
         }
-        // Ensure we have at least some files
-        let filesToUse = validFiles.length > 0 ? validFiles : fileTree.slice(0, 10);
-        if (validFiles.length < selectedFiles.length) {
-            console.log(chalk.yellow(`⚠️  ${selectedFiles.length - validFiles.length} selected file(s) could not be read, using ${filesToUse.length} valid file(s)`));
-        }
+        const selectedFiles = repositoryContext.files.map((file) => file.path);
+        const validFiles = selectedFiles;
+        let filesToUse = selectedFiles;
+        const usedFallbackSelection = false;
+        console.log(chalk.green(`✅ Grounded context: ${selectedFiles.length} file(s), ${repositoryContext.symbols.length} symbol(s), ${repositoryContext.relationships.length} relationship(s)`));
         if (isReadOnlyAnalysis && filesToUse.length > 8) {
             filesToUse = filesToUse.slice(0, 8);
             console.log(chalk.dim(`🔎 Analysis mode: narrowed to ${filesToUse.length} top file(s)`));
@@ -1772,14 +1730,24 @@ async function planCommand(intent, options) {
         }
         // Step E: Pass 2 - The Architect (generate plan with selected files)
         console.log(chalk.dim('🤖 Generating plan with selected files...\n'));
-        const response = await client.generatePlan(enhancedIntent, filesToUse, finalProjectId, ticketMetadata, projectSummary);
+        const response = await client.generatePlan(enhancedIntent, filesToUse, finalProjectId, ticketMetadata, projectSummary, repositoryContext);
+        const planGrounding = (0, brain_1.validatePlanAgainstRepositoryContext)(response.plan.files.filter((file) => file.action !== 'BLOCK').map((file) => ({ path: file.path, action: file.action })), repositoryContext);
+        if (!planGrounding.valid) {
+            const message = planGrounding.notEvaluated
+                ? 'Generated plan could not be evaluated against canonical repository context.'
+                : `Generated plan contains ungrounded paths: ${planGrounding.rejectedPaths.join(', ')}`;
+            if (options.json) {
+                emitPlanJson({ success: false, cached: false, mode: intentMode, planId: null, sessionId: null, projectId: finalProjectIdForGuard || null, timestamp: new Date().toISOString(), message });
+            }
+            console.error(chalk.red(`❌ ${message}`));
+            process.exit(2);
+        }
         if (orgId && finalProjectIdForGuard) {
             try {
-                const refreshed = (0, brain_context_1.refreshBrainContextForFiles)(cwd, brainScope, filesToUse);
                 (0, brain_context_1.recordBrainProgressEvent)(cwd, brainScope, {
                     type: 'plan',
                     planId: response.planId || undefined,
-                    note: `selected=${filesToUse.length};indexed=${refreshed.indexed};removed=${refreshed.removed};complexity=${response.plan.estimatedComplexity || 'unknown'}`,
+                    note: `canonical_graph_context=${repositoryContext.packageId};selected=${filesToUse.length};complexity=${response.plan.estimatedComplexity || 'unknown'}`,
                 });
             }
             catch {
