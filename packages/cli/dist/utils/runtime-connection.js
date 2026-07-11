@@ -12,6 +12,7 @@ const fs_1 = require("fs");
 const path_1 = require("path");
 const gitignore_1 = require("./gitignore");
 const cli_entry_1 = require("./cli-entry");
+const brain_1 = require("@neurcode-ai/brain");
 const CONNECTION_FILE = 'connection.json';
 function connectionDir(repoRoot) {
     return (0, path_1.join)(repoRoot, '.neurcode');
@@ -71,6 +72,7 @@ function collectRuntimeRepoMetadata(repoRoot, profileFreshness) {
         profileHash: typeof profile?.profileHash === 'string' ? profile.profileHash : undefined,
         topologyHash: typeof profile?.topology?.hash === 'string' ? profile.topology.hash : undefined,
         ...(profileFreshness ? { profileFreshness: runtimeSafeProfileFreshness(profileFreshness) } : {}),
+        progressiveAuthority: (0, brain_1.readProgressiveAuthority)(repoRoot),
         source: 'local',
     };
 }

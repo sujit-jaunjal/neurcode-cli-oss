@@ -40,6 +40,28 @@ function classifyRelationshipAuthority(input) {
             reasonCodes: ['language_structurally_unsupported'],
         };
     }
+    if (input.parserId === 'typescript-program-checker') {
+        if (input.semanticSliceCoverage !== true) {
+            return {
+                class: 'not_evaluated',
+                enforcementEligible: false,
+                reasonCodes: ['semantic_claim_outside_proven_slice'],
+            };
+        }
+        const unresolved = input.resolutionMode === 'ambiguous' || input.resolutionMode === 'unresolved';
+        if (input.directEvidence === true && !input.ambiguity && !unresolved) {
+            return {
+                class: 'deterministic_exact',
+                enforcementEligible: true,
+                reasonCodes: ['typescript_checker_plan_slice_exact'],
+            };
+        }
+        return {
+            class: 'not_evaluated',
+            enforcementEligible: false,
+            reasonCodes: ['typescript_checker_slice_evidence_incomplete'],
+        };
+    }
     if (isDegradedPython(input)) {
         if (kind === 'import' || kind === 'export' || kind === 'declaration') {
             return {

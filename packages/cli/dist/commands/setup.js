@@ -78,17 +78,20 @@ function buildSetupPlan(input) {
             ? 'Repository context is available.'
             : 'No Git repository is active in this terminal.',
     };
-    const brainComplete = input.snapshot.brainState === 'fresh'
-        || input.snapshot.brainState === 'partial';
-    const warnings = input.snapshot.brainState === 'partial'
-        ? ['Repository Brain is partial. Setup can continue, but coverage limits remain visible in Brain status.']
-        : [];
+    const brainComplete = [
+        'governance_ready', 'semantic_slice_ready', 'background_enrichment', 'fully_enriched',
+    ].includes(input.snapshot.brainState);
+    const warnings = brainComplete && input.snapshot.brainState !== 'fully_enriched'
+        ? ['Structural governance is ready. Full semantic enrichment is not implied; plan-driven semantic coverage is reported separately.']
+        : input.snapshot.brainState === 'partial'
+            ? ['Structural indexing is partial and cannot prove absence outside its coverage.']
+            : [];
     const stages = [
         { id: 'install', label: 'CLI available', complete: input.snapshot.installed },
         { id: 'login', label: 'Workspace credential', complete: input.snapshot.authState === 'authenticated' },
         { id: 'repository_context', label: 'Repository selected', complete: input.snapshot.repositoryContextReady },
         { id: 'repository', label: 'Repository ownership', complete: input.snapshot.repositoryConnected },
-        { id: 'brain', label: 'Repository Brain', complete: brainComplete },
+        { id: 'brain', label: 'Structural governance readiness', complete: brainComplete },
         { id: 'agent', label: input.agent ? `${input.environment.label} integration` : 'Coding environment selected', complete: input.snapshot.agentConfigured },
     ];
     const firstIncomplete = stages.find((stage) => !stage.complete);
@@ -285,16 +288,14 @@ function selectedEnvironment(agent, detected) {
     return { target: agent, label: label[agent], source: detected.source };
 }
 async function readBrainState(repoRoot) {
-    try {
-        const status = await (0, brain_1.repositoryGraphStatus)(repoRoot);
-        if (status.state === 'fresh' || status.state === 'partial' || status.state === 'stale') {
-            return status.state;
-        }
-        return 'missing';
-    }
-    catch {
-        return 'missing';
-    }
+    const freshness = await (0, brain_1.repositoryGraphStatus)(repoRoot);
+    if (freshness.state === 'stale')
+        return 'stale';
+    if (freshness.state === 'corrupt')
+        return 'failed';
+    if (freshness.state === 'missing')
+        return 'not_started';
+    return (0, brain_1.readProgressiveAuthority)(repoRoot).state;
 }
 function agentIsConfigured(repoRoot, agent) {
     if (!agent)
@@ -382,7 +383,7 @@ async function collectSetupPlan(requestedAgent, repositoryPath) {
     const originalCwd = process.cwd();
     let organizationId = null;
     let projectId = null;
-    let brainState = 'missing';
+    let brainState = 'not_started';
     let configured = false;
     try {
         if (repositoryContext.repoRoot)
@@ -390,7 +391,7 @@ async function collectSetupPlan(requestedAgent, repositoryPath) {
         config = (0, config_1.loadConfig)();
         organizationId = (0, state_1.getOrgId)();
         projectId = (0, state_1.getProjectId)();
-        brainState = repositoryContext.repoRoot ? await readBrainState((0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd())) : 'missing';
+        brainState = repositoryContext.repoRoot ? await readBrainState((0, project_root_1.resolveNeurcodeProjectRoot)(process.cwd())) : 'not_started';
     }
     finally {
         process.chdir(originalCwd);

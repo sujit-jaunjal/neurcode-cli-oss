@@ -1,4 +1,5 @@
 import type { ProfileFreshnessSignal } from './v0-governance';
+import type { ProgressiveAuthorityEvidence } from '@neurcode-ai/contracts';
 export interface RuntimeConnection {
     schemaVersion: 1;
     apiUrl: string;
@@ -32,6 +33,7 @@ export interface RuntimeRepoMetadata {
     profileHash?: string;
     topologyHash?: string;
     profileFreshness?: ProfileFreshnessSignal;
+    progressiveAuthority: ProgressiveAuthorityEvidence;
     source: 'local';
 }
 export declare function runtimeConnectionPath(repoRoot: string): string;

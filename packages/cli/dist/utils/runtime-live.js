@@ -7,6 +7,7 @@ exports.queueRuntimeLiveApprovalAppliedAck = queueRuntimeLiveApprovalAppliedAck;
 exports.applyPendingRuntimeLiveActions = applyPendingRuntimeLiveActions;
 exports.applyPendingRuntimeLiveApprovals = applyPendingRuntimeLiveApprovals;
 const governance_runtime_1 = require("@neurcode-ai/governance-runtime");
+const brain_1 = require("@neurcode-ai/brain");
 const config_1 = require("../config");
 const runtime_connection_1 = require("./runtime-connection");
 const runtime_outbox_1 = require("./runtime-outbox");
@@ -176,6 +177,35 @@ async function runtimeFetch(repoRoot, path, init, timeoutMs = 1500) {
 }
 async function publishRuntimeLiveStatus(repoRoot, session, options = {}) {
     try {
+        const graphFreshness = await (0, brain_1.repositoryGraphStatus)(repoRoot);
+        if (graphFreshness.state === 'stale' || graphFreshness.state === 'corrupt' || graphFreshness.state === 'missing') {
+            const current = (0, brain_1.readProgressiveAuthority)(repoRoot);
+            (0, brain_1.writeProgressiveAuthority)(repoRoot, {
+                ...current,
+                state: graphFreshness.state === 'corrupt' ? 'failed' : graphFreshness.state === 'missing' ? 'unavailable' : 'stale',
+                stalenessReason: graphFreshness.reasonCodes[0] || `repository_graph_${graphFreshness.state}`,
+                authorityCeiling: graphFreshness.state === 'stale' ? 'credential_and_explicit_path' : 'unavailable',
+                relevantPlanCoverage: null,
+                semanticSliceId: null,
+                generatedAt: new Date().toISOString(),
+                reasonCodes: graphFreshness.reasonCodes,
+            });
+        }
+        const plan = session.contract.agentPlan;
+        if (plan && (plan.expectedFiles.length > 0 || plan.expectedGlobs.length > 0)) {
+            try {
+                (0, brain_1.buildPlanSemanticSlice)(repoRoot, {
+                    paths: plan.expectedFiles,
+                    globs: plan.expectedGlobs,
+                    symbols: session.contract.intentContract?.scopeAuthority.expectedSymbols ?? [],
+                });
+            }
+            catch {
+                // Semantic authority is optional for first governance value. The Brain
+                // persists a fail-closed state and the runtime upload reports it; local
+                // path/credential governance remains available at its explicit ceiling.
+            }
+        }
         // Cloud projection (payload construction + privacy validation) is a NON-AUTHORITATIVE
         // reconcile step. It must never throw out of this status-returning function: a
         // projection failure here previously propagated to callers (e.g. `session-hook approve`)

@@ -504,6 +504,7 @@ function assertRuntimeCloudPayloadShape(eventType, payload) {
             'profileHash',
             'topologyHash',
             'profileFreshness',
+            'progressiveAuthority',
             'runtimeAuthority',
             'topology',
             'brain',
@@ -530,6 +531,15 @@ function assertRuntimeCloudPayloadShape(eventType, payload) {
                 'recoveryCommand',
                 'unresolvedHumanDecisions',
             ], 'payload.repo.profileFreshness');
+        }
+        if (repo.progressiveAuthority !== undefined) {
+            assertAllowedKeys(repo.progressiveAuthority, [
+                'schemaVersion', 'state', 'repositoryFingerprint', 'graphSchemaVersion', 'cacheSchemaVersion',
+                'graphGeneration', 'indexedFiles', 'eligibleFiles', 'structuralCoverage', 'semanticCoverage',
+                'relevantPlanCoverage', 'semanticSliceId', 'planFingerprint', 'unsupportedAreas',
+                'stalenessReason', 'authorityCeiling', 'measuredTimingMs', 'measuredAggregateMemoryMb',
+                'provenance', 'generatedAt', 'reasonCodes',
+            ], 'payload.repo.progressiveAuthority');
         }
         if (repo.runtimeAuthority !== undefined) {
             assertAllowedKeys(repo.runtimeAuthority, [

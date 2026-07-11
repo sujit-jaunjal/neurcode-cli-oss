@@ -9,6 +9,8 @@ export interface RelationshipAuthorityInput {
     pathInCoverage?: boolean;
     ambiguity?: boolean;
     directEvidence?: boolean;
+    /** Exact claim path and target are inside the current, non-stale semantic slice. */
+    semanticSliceCoverage?: boolean;
     relationshipKind?: 'import' | 'export' | 'declaration' | 'reference' | 'call' | 'test' | 'tested_by' | 'consumer' | string;
     inferredFromNaming?: boolean;
 }

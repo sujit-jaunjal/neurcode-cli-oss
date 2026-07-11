@@ -6,9 +6,10 @@
  * longer need to guess whether login, init, onboard, or activate comes first.
  */
 import type { Command } from 'commander';
+import { type ProgressiveAuthorityState } from '@neurcode-ai/contracts';
 import { type OnboardAgent, type OnboardEnvironment } from './onboard';
 export type SetupStageId = 'install' | 'login' | 'repository_context' | 'repository' | 'brain' | 'agent';
-export type SetupBrainState = 'missing' | 'fresh' | 'partial' | 'stale';
+export type SetupBrainState = ProgressiveAuthorityState;
 export type SetupAuthState = 'authenticated' | 'missing' | 'invalid' | 'unknown';
 export interface SetupSnapshot {
     installed: boolean;

@@ -16,6 +16,7 @@ export * from './pilot-setup';
 export * from './manager-evidence';
 export * from './governance-reality';
 export * from './typescript-governance-quality-v1';
+export * from './progressive-authority';
 export * from './integrations-compatibility-v1';
 export * from './runtime-risk-pack-v1';
 export * from './runtime-policy-config';

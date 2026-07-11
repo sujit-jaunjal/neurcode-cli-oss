@@ -342,6 +342,7 @@ function printRepositoryGraphIndexResult(repoRoot, result, json) {
         coverage: result.graph.coverage,
         stats: result.stats,
         privacy: result.graph.privacy,
+        progressiveAuthority: (0, brain_1.readProgressiveAuthority)(repoRoot),
     };
     if (json) {
         console.log(JSON.stringify(payload, null, 2));
@@ -351,6 +352,9 @@ function printRepositoryGraphIndexResult(repoRoot, result, json) {
     console.log(chalk.dim(`Mode:              ${result.stats.mode}`));
     console.log(chalk.dim(`Generation:        ${result.graph.generation}`));
     console.log(chalk.dim(`Freshness:         ${result.graph.freshness.state}`));
+    console.log(chalk.dim(`Governance state:  ${payload.progressiveAuthority.state}`));
+    console.log(chalk.dim(`Authority ceiling: ${payload.progressiveAuthority.authorityCeiling}`));
+    console.log(chalk.dim(`Semantic coverage: ${(payload.progressiveAuthority.semanticCoverage * 100).toFixed(1)}% (deferred until a plan requires it)`));
     console.log(chalk.dim(`Files indexed:     ${result.graph.coverage.filesIndexed}`));
     console.log(chalk.dim(`Files parsed:      ${result.stats.filesParsed}`));
     console.log(chalk.dim(`Files reused:      ${result.stats.filesReused}`));
@@ -662,11 +666,13 @@ function brainCommand(program) {
             cursor: 'cooperative_advisory_mcp_checks',
             codex: 'cooperative_advisory_mcp_checks',
         };
+        const progressiveAuthority = (0, brain_1.readProgressiveAuthority)(scope.cwd);
         const payload = {
             repoRoot: scope.cwd,
             // Unified honest scale status (Scale V4 / D3a): the single source of
             // truth for store backend, coverage authority, caps, and timings.
             scaleStatus,
+            progressiveAuthority,
             brainState: graph ? (freshness?.state ?? 'unknown') : 'not_indexed',
             storage: {
                 mode: storeMode,
@@ -712,6 +718,10 @@ function brainCommand(program) {
         await (0, messages_1.printSuccessBanner)('Repository Brain Readiness');
         console.log(chalk.dim(`Repo: ${scope.cwd}`));
         console.log(chalk.white(`State: ${payload.brainState}`));
+        console.log(chalk.white(`Progressive authority: ${progressiveAuthority.state} · ceiling ${progressiveAuthority.authorityCeiling}`));
+        console.log(chalk.dim(`Structural ${(progressiveAuthority.structuralCoverage * 100).toFixed(1)}% · `
+            + `plan semantics ${progressiveAuthority.relevantPlanCoverage == null ? 'not requested' : `${(progressiveAuthority.relevantPlanCoverage * 100).toFixed(1)}%`} · `
+            + `full enrichment ${(progressiveAuthority.semanticCoverage * 100).toFixed(1)}%`));
         console.log(chalk.white(`Storage: ${payload.storage.backend} (${graphMeta.bytes != null ? formatBytes(graphMeta.bytes) : 'n/a'})`));
         if (payload.storage.recommendation) {
             (0, messages_1.printInfo)('Scale recommendation', payload.storage.recommendation);
@@ -762,7 +772,7 @@ function brainCommand(program) {
     // -- brain index ------------------------------------------------------------
     brain
         .command('index')
-        .description('Build a source-free local repository brain from paths, symbols, imports, owners, and hashes')
+        .description('Build complete source-free structural governance readiness; semantic checker work is plan-driven')
         .option('--max-files <n>', 'Maximum files to scan (default: 8000)', (v) => parseInt(v, 10))
         .option('--max-bytes-per-file <n>', 'Maximum bytes per file (default: 350000)', (v) => parseInt(v, 10))
         .option('--experimental-fingerprint-reuse', 'Include experimental signature-fingerprint reuse detection (noisy on large repos)')
@@ -992,6 +1002,127 @@ function brainCommand(program) {
         catch (error) {
             repositoryGraphError(error, options.json);
         }
+    });
+    brain
+        .command('semantic-slice')
+        .description('Construct or reuse a checker-backed semantic slice for the explicit plan closure')
+        .option('--file <paths...>', 'Explicit planned repository-relative files')
+        .option('--glob <globs...>', 'Explicit planned repository-relative globs')
+        .option('--symbol <symbols...>', 'Explicit planned symbols')
+        .option('--force', 'Rebuild rather than reuse an identical content-addressed slice')
+        .option('--json', 'Output stable source-free JSON')
+        .action((options) => {
+        const scope = getBrainScope();
+        try {
+            if (!(options.file?.length || options.glob?.length || options.symbol?.length)) {
+                throw new Error('At least one --file, --glob, or --symbol plan seed is required.');
+            }
+            const coverage = (0, brain_1.buildPlanSemanticSlice)(scope.cwd, {
+                paths: options.file,
+                globs: options.glob,
+                symbols: options.symbol,
+            }, { force: options.force });
+            const payload = { ok: coverage.status === 'ready', coverage, authority: (0, brain_1.readProgressiveAuthority)(scope.cwd) };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else {
+                console.log(chalk.bold('\n🧠 Plan semantic slice\n'));
+                console.log(chalk.dim(`Status / scope:       ${coverage.status} / ${coverage.scope}`));
+                console.log(chalk.dim(`Coverage boundary:    ${coverage.coveredPaths.length} covered; ${coverage.uncoveredPaths.length} uncovered`));
+                console.log(chalk.dim(`Relevant-plan proof:  ${(coverage.relevantPlanCoverage * 100).toFixed(1)}%`));
+                console.log(chalk.dim(`Authority:            ${coverage.authority}`));
+                console.log(chalk.dim(`Repository semantics: ${(coverage.repositorySemanticCoverage * 100).toFixed(1)}% (not full enrichment)`));
+                console.log(chalk.cyan(coverage.authority === 'deterministic_within_slice'
+                    ? 'Next: continue the governed plan; semantic conclusions are deterministic only inside this exact slice.'
+                    : 'Next: correct uncovered plan seeds or treat semantic conclusions as advisory/unknown.'));
+            }
+        }
+        catch (error) {
+            repositoryGraphError(error, options.json);
+        }
+    });
+    brain
+        .command('enrich')
+        .description('Optionally run, inspect, or cancel full repository semantic enrichment')
+        .option('--background', 'Run as a low-priority detached process; never blocks structural readiness')
+        .option('--foreground', 'Run in the current process')
+        .option('--status', 'Inspect background/full-enrichment state')
+        .option('--cancel', 'Cancel only the exact owned background process')
+        .option('--max-rss <mb>', 'Refuse to start above this process RSS budget', (value) => parseInt(value, 10), 768)
+        .option('--json', 'Output stable source-free JSON')
+        .action((options) => {
+        const scope = getBrainScope();
+        const lock = (0, path_1.join)(scope.cwd, '.neurcode', 'brain', 'full-enrichment-v1.3.lock');
+        const owner = (0, brain_1.readOwnedProcessIdentity)(lock);
+        const ownerState = owner ? (0, brain_1.inspectOwnedProcess)(owner.pid, owner.processStartFingerprint) : 'dead';
+        if (options.status) {
+            let authority = (0, brain_1.readProgressiveAuthority)(scope.cwd);
+            if (owner && ownerState !== 'alive_same' && ['background_enrichment', 'semantic_slice_pending'].includes(authority.state)) {
+                authority = (0, brain_1.writeProgressiveAuthority)(scope.cwd, {
+                    ...authority,
+                    state: authority.structuralCoverage === 1 ? 'governance_ready' : 'partial',
+                    authorityCeiling: authority.structuralCoverage === 1 ? 'complete_structural' : 'credential_and_explicit_path',
+                    stalenessReason: 'background_enrichment_interrupted',
+                    generatedAt: new Date().toISOString(),
+                    reasonCodes: ['background_enrichment_interrupted', 'explicit_path_governance_preserved'],
+                });
+                (0, brain_1.reclaimAbandonedOwnedFile)(lock);
+            }
+            const payload = { ok: true, process: owner ? { state: ownerState, jobId: owner.jobId } : { state: 'not_running', jobId: null }, authority };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else
+                console.log(chalk.dim(`Full enrichment: ${ownerState === 'alive_same' ? 'running' : (0, brain_1.readProgressiveAuthority)(scope.cwd).state} · ${(0, brain_1.readProgressiveAuthority)(scope.cwd).authorityCeiling}`));
+            return;
+        }
+        if (options.cancel) {
+            if (!owner || ownerState !== 'alive_same')
+                throw new Error('No exact owned enrichment process is running; nothing was killed.');
+            process.kill(owner.processGroupId ? -owner.processGroupId : owner.pid, 'SIGTERM');
+            const payload = { ok: true, cancelled: true, jobId: owner.jobId };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else
+                console.log(chalk.yellow('Full semantic enrichment cancellation requested. Structural governance remains available.'));
+            return;
+        }
+        if (options.background && !options.foreground) {
+            if (ownerState === 'alive_same')
+                throw new Error('Full semantic enrichment is already running.');
+            (0, brain_1.reclaimAbandonedOwnedFile)(lock);
+            const entry = process.argv[1];
+            if (!entry)
+                throw new Error('CLI entrypoint unavailable for background enrichment.');
+            const child = (0, child_process_1.spawn)(process.execPath, [entry, 'brain', 'enrich', '--foreground', '--max-rss', String(options.maxRss ?? 768), '--json'], {
+                cwd: scope.cwd,
+                env: { ...process.env, NEURCODE_PROJECT_ROOT: scope.cwd },
+                detached: true,
+                stdio: 'ignore',
+            });
+            if (!child.pid)
+                throw new Error('Background enrichment process did not start.');
+            child.unref();
+            const identity = (0, brain_1.createOwnedProcessIdentity)({ pid: child.pid, processGroupId: child.pid });
+            if (!(0, brain_1.acquireOwnedFile)(lock, identity)) {
+                try {
+                    process.kill(-child.pid, 'SIGTERM');
+                }
+                catch { /* child already ended */ }
+                throw new Error('Could not claim the background enrichment lock.');
+            }
+            const payload = { ok: true, started: true, jobId: identity.jobId };
+            if (options.json)
+                console.log(JSON.stringify(payload, null, 2));
+            else
+                console.log(chalk.green('Optional full semantic enrichment started in the background. Governance-ready status is unchanged.'));
+            return;
+        }
+        const coverage = (0, brain_1.buildFullSemanticEnrichment)(scope.cwd, { maxProcessRssMb: options.maxRss });
+        const payload = { ok: coverage.status === 'ready', coverage, authority: (0, brain_1.readProgressiveAuthority)(scope.cwd) };
+        if (options.json)
+            console.log(JSON.stringify(payload, null, 2));
+        else
+            console.log(chalk.green(`Full semantic enrichment ${coverage.status}; repository semantic coverage ${(coverage.repositorySemanticCoverage * 100).toFixed(1)}%.`));
     });
     brain
         .command('lifecycle')
