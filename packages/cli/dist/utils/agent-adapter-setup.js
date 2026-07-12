@@ -12,6 +12,7 @@ exports.writeAgentInstructions = writeAgentInstructions;
 const node_fs_1 = require("node:fs");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
+const jsonc_parser_1 = require("jsonc-parser");
 const v0_governance_1 = require("./v0-governance");
 const mcp_server_pin_1 = require("./mcp-server-pin");
 exports.AGENT_ADAPTER_SETUP_SCHEMA_VERSION = 'neurcode.agent-adapter-setup.v1';
@@ -337,6 +338,18 @@ function buildAgentInstructionArtifact(input) {
 function readText(path) {
     return (0, node_fs_1.existsSync)(path) ? (0, node_fs_1.readFileSync)(path, 'utf8') : '';
 }
+function parseJsoncObject(path) {
+    const errors = [];
+    const parsed = (0, jsonc_parser_1.parse)((0, node_fs_1.readFileSync)(path, 'utf8'), errors, {
+        allowTrailingComma: true,
+        disallowComments: false,
+    });
+    if (errors.length > 0 || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        const reason = errors.length > 0 ? (0, jsonc_parser_1.printParseErrorCode)(errors[0].error) : 'Root must be an object';
+        throw new Error(`Could not parse ${path}: ${reason}`);
+    }
+    return parsed;
+}
 function hasNeurcodeInstructions(path) {
     return readText(path).includes('neurcode-agent-runtime-v1');
 }
@@ -365,7 +378,7 @@ function isVscodeRecommended(path) {
     if (!(0, node_fs_1.existsSync)(path))
         return false;
     try {
-        const parsed = JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
+        const parsed = parseJsoncObject(path);
         return Array.isArray(parsed.recommendations)
             && parsed.recommendations.some((item) => item === VSCODE_EXTENSION_ID);
     }
@@ -541,19 +554,25 @@ function writeVscodeRecommendations(path) {
     }
     ensureParent(path);
     let parsed = {};
+    let existing = '';
     if ((0, node_fs_1.existsSync)(path)) {
-        try {
-            parsed = JSON.parse((0, node_fs_1.readFileSync)(path, 'utf8'));
-        }
-        catch (error) {
-            throw new Error(`Could not parse ${path}: ${error instanceof Error ? error.message : String(error)}`);
-        }
+        existing = (0, node_fs_1.readFileSync)(path, 'utf8');
+        parsed = parseJsoncObject(path);
     }
     const recommendations = Array.isArray(parsed.recommendations)
         ? parsed.recommendations.filter((item) => typeof item === 'string')
         : [];
-    parsed.recommendations = Array.from(new Set([...recommendations, VSCODE_EXTENSION_ID]));
-    (0, node_fs_1.writeFileSync)(path, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+    const nextRecommendations = Array.from(new Set([...recommendations, VSCODE_EXTENSION_ID]));
+    if (existing) {
+        const edits = (0, jsonc_parser_1.modify)(existing, ['recommendations'], nextRecommendations, {
+            formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
+        });
+        const next = (0, jsonc_parser_1.applyEdits)(existing, edits);
+        (0, node_fs_1.writeFileSync)(path, next.endsWith('\n') ? next : `${next}\n`, 'utf8');
+    }
+    else {
+        (0, node_fs_1.writeFileSync)(path, `${JSON.stringify({ recommendations: nextRecommendations }, null, 2)}\n`, 'utf8');
+    }
     return {
         status: 'written',
         configPath: path,
