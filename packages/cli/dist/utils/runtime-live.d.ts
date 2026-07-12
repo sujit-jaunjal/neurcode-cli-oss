@@ -14,6 +14,7 @@ export interface RuntimeLiveApproval {
 }
 export declare function publishRuntimeLiveStatus(repoRoot: string, session: GovernanceSession, options?: {
     profileFreshness?: ProfileFreshnessSignal;
+    flushTimeoutMs?: number;
 }): Promise<{
     ok: boolean;
     queued?: boolean;

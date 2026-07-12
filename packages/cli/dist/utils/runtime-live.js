@@ -222,7 +222,7 @@ async function publishRuntimeLiveStatus(repoRoot, session, options = {}) {
         (0, runtime_outbox_1.enqueueRuntimeSessionSnapshot)(repoRoot, session.sessionId, body);
         const flushed = await flushRuntimeLiveOutbox(repoRoot, {
             maxEvents: 2,
-            timeoutMs: 500,
+            timeoutMs: options.flushTimeoutMs ?? 500,
         });
         return {
             ok: flushed.failed === 0 && !flushed.skipped && flushed.status.health !== 'degraded',

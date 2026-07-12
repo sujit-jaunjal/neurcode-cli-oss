@@ -2360,7 +2360,12 @@ async function handleFinish(cmdCwd) {
         else {
             diagnostic(`admission artifact skipped: ${admission.error}`);
         }
-        await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, finished);
+        // A finished session is the canonical dashboard lifecycle snapshot and can
+        // be materially larger than an individual pre-write update. Give it a
+        // bounded delivery window so normal API latency does not leave the control
+        // plane looking active after local completion; the durable outbox remains
+        // the fallback if this window is exceeded.
+        await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, finished, { flushTimeoutMs: 5_000 });
         try {
             const sync = (0, runtime_connection_1.triggerRuntimeAutoSync)(repoRoot);
             if (sync.started) {
