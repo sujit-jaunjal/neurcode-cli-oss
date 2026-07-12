@@ -342,7 +342,26 @@ function buildRuntimeSyncImpactSummary(repoRoot, session) {
     }
 }
 function projectImpactSummaryForCloud(value) {
-    const projected = compactForBulkEvidence(value, 'session.impactSummary', AGGRESSIVE_BULK_COMPACTION_LIMITS);
+    const compacted = compactForBulkEvidence(value, 'session.impactSummary', AGGRESSIVE_BULK_COMPACTION_LIMITS);
+    // `testsEvaluation` contains local discovery diagnostics. The API may derive
+    // a bounded evaluation posture after ingestion, but clients are deliberately
+    // not allowed to assert this field at either advisory depth. Remove it at the
+    // projection boundary so a valid source-free session is never rejected by
+    // the stricter server ingress contract.
+    const stripClientOnlyImpactFields = (input) => {
+        if (Array.isArray(input))
+            return input.map(stripClientOnlyImpactFields);
+        if (!input || typeof input !== 'object')
+            return input;
+        const output = {};
+        for (const [key, child] of Object.entries(input)) {
+            if (key === 'testsEvaluation')
+                continue;
+            output[key] = stripClientOnlyImpactFields(child);
+        }
+        return output;
+    };
+    const projected = stripClientOnlyImpactFields(compacted);
     return (0, governance_runtime_1.validatePrivacySafeCloudPayload)({
         sessions: [{ impactSummary: projected }],
     }).ok
