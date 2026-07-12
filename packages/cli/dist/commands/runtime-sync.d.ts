@@ -11,6 +11,7 @@ interface RuntimeSyncOptions {
     dir?: string;
     json?: boolean;
 }
+export declare function projectImpactSummaryForCloud(value: unknown): unknown | null;
 export declare function buildRuntimeEvidenceUploadBatches(repoRoot: string, records: LocalGovernanceSessionRecord[]): RuntimeEvidenceUploadRequest[];
 export declare function runtimeSyncCommand(options?: RuntimeSyncOptions): Promise<void>;
 export declare function syncCommand(program: Command): void;

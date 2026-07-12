@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.projectImpactSummaryForCloud = projectImpactSummaryForCloud;
 exports.buildRuntimeEvidenceUploadBatches = buildRuntimeEvidenceUploadBatches;
 exports.runtimeSyncCommand = runtimeSyncCommand;
 exports.syncCommand = syncCommand;
@@ -132,18 +133,12 @@ function compactForBulkEvidence(value, path = 'session', limits = DEFAULT_BULK_C
             ? limits.maxEventItems
             : limits.maxArrayItems;
         const items = value.length > maxItems ? value.slice(-maxItems) : value;
-        const compacted = items.map((item, index) => compactForBulkEvidence(item, `${path}[${index}]`, limits));
-        if (value.length <= maxItems)
-            return compacted;
-        return [
-            {
-                truncated: true,
-                omittedItems: value.length - maxItems,
-                retainedItems: maxItems,
-                retention: path.endsWith('.events') ? 'last_events' : 'last_items',
-            },
-            ...compacted,
-        ];
+        // Cloud session arrays have typed item schemas (paths are strings, events and
+        // selections are records). A synthetic truncation marker corrupts those schemas
+        // and makes otherwise source-free evidence impossible to upload. Compaction is
+        // already declared in uploadMetadata.bulkEvidence, so preserve each array's item
+        // type and retain only the bounded tail.
+        return items.map((item, index) => compactForBulkEvidence(item, `${path}[${index}]`, limits));
     }
     if (!value || typeof value !== 'object')
         return value;
@@ -303,18 +298,7 @@ function summarizeOversizedSessionForBulk(session) {
         finishedAt: session.finishedAt,
         replayHash: session.replayHash,
         contract: compactForBulkEvidence(session.contract || {}, 'session.contract', AGGRESSIVE_BULK_COMPACTION_LIMITS),
-        events: events.length > retainedEvents.length
-            ? [
-                {
-                    truncated: true,
-                    omittedItems: events.length - retainedEvents.length,
-                    retainedItems: retainedEvents.length,
-                    retention: 'last_events',
-                    reason: 'single_session_payload_budget',
-                },
-                ...retainedEvents,
-            ]
-            : retainedEvents,
+        events: retainedEvents,
         uploadMetadata: {
             ...(session.uploadMetadata && typeof session.uploadMetadata === 'object' ? session.uploadMetadata : {}),
             bulkEvidence: {
@@ -356,6 +340,14 @@ function buildRuntimeSyncImpactSummary(repoRoot, session) {
     catch {
         return null;
     }
+}
+function projectImpactSummaryForCloud(value) {
+    const projected = compactForBulkEvidence(value, 'session.impactSummary', AGGRESSIVE_BULK_COMPACTION_LIMITS);
+    return (0, governance_runtime_1.validatePrivacySafeCloudPayload)({
+        sessions: [{ impactSummary: projected }],
+    }).ok
+        ? projected
+        : null;
 }
 function buildCompactUploadSession(repoRoot, record) {
     const sanitized = (0, runtime_privacy_1.buildCloudSafeRuntimeSession)(record.session);
@@ -425,8 +417,13 @@ function buildCompactUploadSession(repoRoot, record) {
     }
     catch { /* never break upload path */ }
     const impactSummary = buildRuntimeSyncImpactSummary(repoRoot, record.session);
-    if (impactSummary)
-        compacted.impactSummary = impactSummary;
+    const cloudImpactSummary = impactSummary
+        ? projectImpactSummaryForCloud(impactSummary)
+        : null;
+    // Impact intelligence is optional supporting context. If it cannot fit the
+    // bounded cloud contract, omit it rather than blocking the core signed record.
+    if (cloudImpactSummary)
+        compacted.impactSummary = cloudImpactSummary;
     const finalMetadata = compacted.uploadMetadata;
     if (finalMetadata?.bulkEvidence) {
         finalMetadata.bulkEvidence.bytesAfter = byteSize(compacted);
@@ -518,7 +515,21 @@ function buildRuntimeEvidenceUploadBatches(repoRoot, records) {
     const batches = [];
     let current = [];
     for (const session of compactSessions) {
-        const candidate = buildUploadPayloadFromSessions(repoRoot, [...current, session]);
+        let candidate;
+        try {
+            candidate = buildUploadPayloadFromSessions(repoRoot, [...current, session]);
+        }
+        catch (error) {
+            // Aggregate privacy limits can be reached before the HTTP byte budget.
+            // Prove the incoming session is independently valid, then close the
+            // already-valid batch and continue with a fresh one.
+            const single = buildUploadPayloadFromSessions(repoRoot, [session]);
+            if (current.length === 0)
+                throw error;
+            batches.push(buildUploadPayloadFromSessions(repoRoot, current));
+            current = single.sessions;
+            continue;
+        }
         if (current.length > 0 && byteSize(candidate) > BULK_UPLOAD_TARGET_BYTES) {
             batches.push(buildUploadPayloadFromSessions(repoRoot, current));
             current = [session];

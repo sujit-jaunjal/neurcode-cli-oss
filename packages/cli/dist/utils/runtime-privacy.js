@@ -38,6 +38,10 @@ function safePaths(value, maxItems = 100) {
         return sanitized.path ? [sanitized.path] : [];
     }))).sort((left, right) => left.localeCompare(right)).slice(0, maxItems);
 }
+function safeGlobPaths(value, maxItems = 100) {
+    return safePaths(value, maxItems)
+        .filter((path) => path.includes('*') || path.includes('?'));
+}
 function timestamp(value) {
     if (typeof value !== 'string' || !Number.isFinite(Date.parse(value)))
         return null;
@@ -376,7 +380,10 @@ function scopeAuthoritySummary(session) {
     return {
         confidence: intent.confidence,
         expectedFiles: safePaths(authority.expectedFiles, 100),
-        expectedGlobs: safePaths(authority.expectedGlobs, 100),
+        // Repository-Brain package facts can identify a directory root while labelling
+        // it as a glob. A bare directory is not an exact file or a bounded glob, so omit
+        // it from the cloud contract instead of weakening the path privacy gate.
+        expectedGlobs: safeGlobPaths(authority.expectedGlobs, 100),
         expectedSymbols: stringArray(authority.expectedSymbols, 100),
         likelyTests: safePaths(authority.likelyTests, 100),
         affectedPackages: safePaths(authority.affectedPackages, 100),
