@@ -595,4 +595,5 @@ function parseCliCompatJsonPayload(value, label = 'compat') {
         compatibility: parseRuntimeCompatibilityDescriptor(record.compatibility, label),
     };
 }
+__exportStar(require("./typescript-governance-quality-v14"), exports);
 //# sourceMappingURL=index.js.map
