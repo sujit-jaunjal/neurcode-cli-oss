@@ -337,6 +337,7 @@ function assertRuntimeSessionShape(value) {
         'intentSummary',
         'contract',
         'events',
+        'repoIntelligence',
         'livePayload',
         'privacy',
     ], 'payload.session');
