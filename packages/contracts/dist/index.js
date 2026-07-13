@@ -596,4 +596,5 @@ function parseCliCompatJsonPayload(value, label = 'compat') {
     };
 }
 __exportStar(require("./typescript-governance-quality-v14"), exports);
+__exportStar(require("./typescript-governance-quality-v15"), exports);
 //# sourceMappingURL=index.js.map

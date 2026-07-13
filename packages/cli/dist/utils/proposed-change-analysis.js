@@ -71,8 +71,11 @@ function localSymbol(symbol) {
         language: contractLanguage(symbol.language),
     };
 }
-function boundaryForPath(graph, path) {
-    const file = graph?.nodes.find((node) => node.kind === 'file' && node.path === path);
+function boundaryForPath(graph, path, boundedStore, repoRoot) {
+    const file = graph?.nodes.find((node) => node.kind === 'file' && node.path === path)
+        ?? (boundedStore && repoRoot
+            ? boundedStore.queryNodes(repoRoot, { kind: 'file', path, limit: 2 })[0]
+            : undefined);
     const packageKey = typeof file?.attributes.package === 'string'
         ? file.attributes.package
         : graph?.nodes
@@ -128,8 +131,8 @@ function resolveRepositoryImport(input) {
         };
     }
     const resolvedFile = matches[0];
-    const sourceBoundary = boundaryForPath(input.graph, fact.fromFile);
-    const targetBoundary = boundaryForPath(input.graph, resolvedFile);
+    const sourceBoundary = boundaryForPath(input.graph, fact.fromFile, input.boundedStore, input.repoRoot);
+    const targetBoundary = boundaryForPath(input.graph, resolvedFile, input.boundedStore, input.repoRoot);
     return {
         ...fact,
         resolvedFile,
@@ -150,9 +153,16 @@ function resolveCalls(input) {
         const matchingImports = input.imports.filter((fact) => fact.resolution === 'resolved_repository'
             && fact.resolvedFile
             && fact.importedNames.includes(call.calledName));
-        const candidates = matchingImports.flatMap((fact) => input.graph?.nodes.filter((node) => node.kind === 'symbol'
-            && node.path === fact.resolvedFile
-            && node.name === call.calledName) ?? []);
+        const candidates = matchingImports.flatMap((fact) => {
+            if (input.graph) {
+                return input.graph.nodes.filter((node) => node.kind === 'symbol'
+                    && node.path === fact.resolvedFile
+                    && node.name === call.calledName);
+            }
+            return input.boundedStore?.queryNodes(input.repoRoot, {
+                kind: 'symbol', name: call.calledName, limit: 100,
+            }).filter((node) => node.path === fact.resolvedFile) ?? [];
+        });
         if (candidates.length === 1) {
             return {
                 ...call,
@@ -216,12 +226,13 @@ function completeness(input) {
         .filter((fact) => !['local_symbol', 'imported_symbol', 'repository_symbol'].includes(fact.resolution))
         .map((fact) => fact.resolutionReason ?? `call_${fact.resolution}`);
     const ast = input.parserDepth === 'ast' || input.parserDepth === 'syntax_tree';
+    const callAndReferenceComplete = ast && input.callAndReferenceExtractionComplete;
     const facts = [
         status('path', 'complete'),
         status('symbol', !input.contentPresent ? 'unavailable' : ast ? 'complete' : 'partial', !input.contentPresent ? [unavailableReason] : ast ? [] : parserReasons),
         status('import', !input.contentPresent ? 'unavailable' : !ast || importIncomplete.length > 0 ? 'partial' : 'complete', !input.contentPresent ? [unavailableReason] : [...(!ast ? parserReasons : []), ...importIncomplete]),
-        status('reference', !input.contentPresent ? 'unavailable' : !ast || callIncomplete.length > 0 ? 'partial' : 'complete', !input.contentPresent ? [unavailableReason] : [...(!ast ? parserReasons : []), ...callIncomplete]),
-        status('call', !input.contentPresent ? 'unavailable' : !ast || callIncomplete.length > 0 ? 'partial' : 'complete', !input.contentPresent ? [unavailableReason] : [...(!ast ? parserReasons : []), ...callIncomplete]),
+        status('reference', !input.contentPresent ? 'unavailable' : !callAndReferenceComplete || callIncomplete.length > 0 ? 'partial' : 'complete', !input.contentPresent ? [unavailableReason] : [...(!callAndReferenceComplete ? parserReasons : []), ...callIncomplete]),
+        status('call', !input.contentPresent ? 'unavailable' : !callAndReferenceComplete || callIncomplete.length > 0 ? 'partial' : 'complete', !input.contentPresent ? [unavailableReason] : [...(!callAndReferenceComplete ? parserReasons : []), ...callIncomplete]),
         status('package', !input.contentPresent ? 'unavailable' : !ast || importIncomplete.length > 0 ? 'partial' : 'complete', !input.contentPresent ? [unavailableReason] : [...(!ast ? parserReasons : []), ...importIncomplete]),
         status('service', !input.contentPresent ? 'unavailable' : !ast || importIncomplete.length > 0 ? 'partial' : 'complete', !input.contentPresent ? [unavailableReason] : [...(!ast ? parserReasons : []), ...importIncomplete]),
         status('ownership', 'unavailable', ['repository_graph_fact']),
@@ -344,11 +355,18 @@ function analyzeProposedChange(input) {
         provenance: 'local-proposed-change-extractor',
     }));
     const symbols = canonicalFacts?.symbols ?? fallbackSymbols;
-    const graph = (0, brain_1.readRepositoryGraph)(input.repoRoot);
-    const imports = (canonicalFacts?.imports ?? fallbackImports).map((fact) => resolveRepositoryImport({ repoRoot: input.repoRoot, graph, fact }));
+    const contentPresent = Boolean(input.proposedSource);
+    const graph = input.boundedPreWrite ? null : (0, brain_1.readRepositoryGraph)(input.repoRoot);
+    // A path-only check has no imports, calls, references, or symbol content to
+    // resolve. Avoid opening the large Graph database merely to decorate its
+    // non-authoritative boundary projection; policy authority still comes from
+    // the session contract and the separate sensitive-path query.
+    const boundedStore = input.boundedPreWrite && contentPresent
+        ? new brain_1.SqliteRepositoryGraphStore()
+        : null;
+    const imports = (canonicalFacts?.imports ?? fallbackImports).map((fact) => resolveRepositoryImport({ repoRoot: input.repoRoot, graph, fact, boundedStore }));
     const exports = canonicalFacts?.exports ?? fallbackExports;
     const relationships = canonicalFacts?.relationships ?? fallbackRelationships;
-    const contentPresent = Boolean(input.proposedSource);
     if (![
         'claude-code-hooks', 'copilot-hooks', 'generic-mcp', 'codex-mcp',
         'cursor-mcp', 'vscode-extension', 'github-action', 'neurcode-cli',
@@ -358,7 +376,12 @@ function analyzeProposedChange(input) {
     const effectiveHost = (0, contracts_1.deriveTrustedHostPosture)(input.adapterId, input.timing);
     const capability = effectiveHost.capability;
     const language = canonicalFacts?.language ?? contractLanguage(analyzed?.language ?? 'other');
-    const remote = gitValue(input.repoRoot, ['config', '--get', 'remote.origin.url']);
+    const boundedMetadata = input.boundedPreWrite
+        ? (0, brain_1.readRepositoryGraphMetadata)(input.repoRoot)
+        : null;
+    const remote = input.boundedPreWrite
+        ? null
+        : gitValue(input.repoRoot, ['config', '--get', 'remote.origin.url']);
     const extractionErrors = canonical && !canonicalFacts
         ? canonical.supported
             ? [...canonical.errors, 'canonical_analyzer_failed_degraded_fallback']
@@ -366,7 +389,9 @@ function analyzeProposedChange(input) {
         : [];
     const rawCalls = canonicalFacts?.calls ?? [];
     const resolved = resolveCalls({
+        repoRoot: input.repoRoot,
         graph,
+        boundedStore,
         symbols,
         imports,
         calls: rawCalls,
@@ -374,7 +399,7 @@ function analyzeProposedChange(input) {
     const limitations = canonical?.limitations ?? (analyzed
         ? ['Degraded regex extraction does not provide deterministic call/reference completeness.']
         : ['No supported proposed-content parser was available.']);
-    const targetBoundary = boundaryForPath(graph, input.filePath);
+    const targetBoundary = boundaryForPath(graph, input.filePath, boundedStore, input.repoRoot);
     const boundaries = [{
             id: `boundary:${shortHash(input.filePath)}`,
             filePath: input.filePath,
@@ -389,6 +414,7 @@ function analyzeProposedChange(input) {
         calls: resolved.calls,
         limitations,
         extractionErrors,
+        callAndReferenceExtractionComplete: !limitations.some((limitation) => (/call and reference edges are not emitted/i.test(limitation))),
         operation,
     });
     return {
@@ -398,7 +424,8 @@ function analyzeProposedChange(input) {
                 repoId: `repo:${shortHash(input.repoRoot)}`,
                 rootHash: hash(input.repoRoot),
                 remoteHash: remote ? hash(remote) : null,
-                headSha: gitValue(input.repoRoot, ['rev-parse', 'HEAD']),
+                headSha: boundedMetadata?.freshness.gitHead
+                    ?? (input.boundedPreWrite ? null : gitValue(input.repoRoot, ['rev-parse', 'HEAD'])),
             },
             target: {
                 path: input.filePath,

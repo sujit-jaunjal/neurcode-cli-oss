@@ -61,7 +61,7 @@ async function atomicRuntimeBootstrap(repoRootInput, input) {
     const adapters = adaptersForAgent(input.agent);
     const beforeManifest = (0, cli_runtime_1.readActivatedRuntimeManifest)(repoRoot);
     throwIfTestBootstrapFail('manifest_write');
-    const activation = await (0, runtime_authority_1.recordActivatedRuntime)(repoRoot, adapters);
+    const activation = await (0, runtime_authority_1.recordActivatedRuntime)(repoRoot, adapters, { scheduleBrain: false });
     if (activation.changed) {
         repaired.push('runtime-manifest', 'runtime-wiring');
         reasonCodes.push('runtime_manifest_refreshed');

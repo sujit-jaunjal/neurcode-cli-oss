@@ -210,6 +210,8 @@ export declare function evaluateRepoSymbolDuplicatePolicy(input: {
     proposedSource: string | null;
     proposedSymbols?: LocalRepoBrainSymbolFact[];
     policyMode?: RepoSymbolDuplicateMode;
+    /** Query bounded Graph rows instead of parsing the legacy repository-wide Brain JSON. */
+    boundedPreWrite?: boolean;
 }): RepoSymbolPolicyEvaluation;
 export interface RepoBrainFileFacts {
     filePath: string;

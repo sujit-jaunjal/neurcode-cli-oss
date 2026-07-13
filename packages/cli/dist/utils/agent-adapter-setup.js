@@ -559,12 +559,22 @@ function writeVscodeRecommendations(path) {
         existing = (0, node_fs_1.readFileSync)(path, 'utf8');
         parsed = parseJsoncObject(path);
     }
-    const recommendations = Array.isArray(parsed.recommendations)
-        ? parsed.recommendations.filter((item) => typeof item === 'string')
+    const existingRecommendations = Array.isArray(parsed.recommendations)
+        ? parsed.recommendations
+        : null;
+    const hasRecommendations = existingRecommendations !== null;
+    const recommendations = existingRecommendations
+        ? existingRecommendations.filter((item) => typeof item === 'string')
         : [];
     const nextRecommendations = Array.from(new Set([...recommendations, VSCODE_EXTENSION_ID]));
     if (existing) {
-        const edits = (0, jsonc_parser_1.modify)(existing, ['recommendations'], nextRecommendations, {
+        // Append into an existing JSONC array instead of replacing the array.
+        // Replacing it is syntactically safe but erases comments that users often
+        // use to group extension recommendations.
+        const edits = (0, jsonc_parser_1.modify)(existing, hasRecommendations
+            ? ['recommendations', recommendations.length]
+            : ['recommendations'], hasRecommendations ? VSCODE_EXTENSION_ID : nextRecommendations, {
+            isArrayInsertion: hasRecommendations,
             formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
         });
         const next = (0, jsonc_parser_1.applyEdits)(existing, edits);

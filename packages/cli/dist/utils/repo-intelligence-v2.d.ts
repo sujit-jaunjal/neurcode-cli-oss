@@ -11,6 +11,8 @@ export declare function evaluateLocalRepoIntelligenceV2(input: {
     change: ProposedChangeEnvelope;
     policyPath?: string;
     includeAdvisory?: boolean;
+    /** Pre-write mode never deserializes a repository-wide graph. */
+    boundedPreWrite?: boolean;
     generatedAt?: string;
     approvedPaths?: string[];
     approvalGrants?: Array<{
@@ -18,7 +20,15 @@ export declare function evaluateLocalRepoIntelligenceV2(input: {
         approvedBy?: string | null;
         expiresAt?: string | null;
         revokedAt?: string | null;
+        sessionId?: string;
+        profileHash?: string;
+        planRevision?: number | null;
+        brainGeneration?: number | null;
     }>;
+    sessionId?: string;
+    profileHash?: string;
+    planRevision?: number | null;
+    brainGeneration?: number | null;
     approvals?: Array<{
         path: string;
         owners: string[];

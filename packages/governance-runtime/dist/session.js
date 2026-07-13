@@ -431,6 +431,16 @@ function createSession(projectRoot, profile, goal, options = {}) {
     const localReasons = new Set(localGoal.reasonCodes);
     const localIntentContract = sanitizeLocalPrivateValue(intentContract, localReasons);
     const localArchitectureObligations = sanitizeLocalPrivateValue(architectureObligations, localReasons);
+    const repositoryTopology = (0, repository_topology_1.projectRepositoryTopologyForSession)(profile.repositoryTopology, [
+        ...allowedGlobs,
+        ...localIntentContract.scopeAuthority.expectedFiles,
+        ...localIntentContract.scopeAuthority.provenRequiredFiles,
+        ...localIntentContract.scopeAuthority.advisoryCandidates,
+        // Keep bounded topology for protected surfaces available so an accepted
+        // plan can be evaluated after session start without copying the full graph.
+        ...profile.approvalRequiredPaths,
+        ...profile.sensitiveBoundaries.map((boundary) => boundary.glob),
+    ]);
     const session = {
         schemaVersion: 1,
         sessionId,
@@ -457,7 +467,8 @@ function createSession(projectRoot, profile, goal, options = {}) {
             architectureObligationPolicy,
             architectureObligationWaivers: [],
             ...(architectureGraph ? { architectureGraph } : {}),
-            repositoryTopology: profile.repositoryTopology,
+            ...(repositoryTopology ? { repositoryTopology } : {}),
+            ...(profile.brainGeneration ? { brainGeneration: profile.brainGeneration } : {}),
         },
         events: [
             {
@@ -582,10 +593,10 @@ function refreshArchitectureObligations(projectRoot, sessionId, now = new Date()
     });
 }
 /**
- * Append an explicit approval for a path/glob to the active (or named) session.
+ * Append an explicit exact-path approval to the active (or named) session.
  *
- * Safety invariant: this does NOT expand approval beyond the given path/glob.
- * Approving "src/billing/charge.py" does not approve "src/billing/**".
+ * Safety invariant: this does not accept globs or expand approval beyond the
+ * normalized exact path.
  * The boundary check in checkFileBoundary enforces this by matching approvedPaths
  * against the exact filePath.
  */
@@ -593,12 +604,10 @@ function refreshArchitectureObligations(projectRoot, sessionId, now = new Date()
  * Normalise an approval path to be repo-relative.
  *
  * Rules (in order):
- *  1. Absolute globs under projectRoot — strip the repo prefix, keep the glob suffix.
- *  2. Absolute globs NOT under projectRoot — rejected.
- *  3. Relative globs — used as-is (strip leading / or ./).
- *  4. Absolute exact paths under projectRoot — make repo-relative via path.relative().
- *  5. Absolute exact paths NOT under projectRoot — rejected.
- *  6. Relative exact paths — used as-is.
+ *  1. Glob-shaped values are rejected.
+ *  2. Absolute exact paths under projectRoot become repo-relative.
+ *  3. Absolute exact paths outside projectRoot are rejected.
+ *  4. Relative exact paths are normalized through shared path authority.
  */
 function normaliseApprovalPath(projectRoot, raw) {
     const trimmed = raw.trim();
@@ -607,9 +616,12 @@ function normaliseApprovalPath(projectRoot, raw) {
     if ((0, intent_privacy_1.detectCredentialText)(trimmed, 10_000).detected) {
         throw new Error('approvedPath rejected (credential_shaped_path).');
     }
+    if (trimmed.includes('*') || trimmed.includes('?')) {
+        throw new Error('approvedPath rejected (exact_path_required).');
+    }
     const safeApprovalPath = (candidate) => {
         const normalized = candidate.replace(/\\/g, '/');
-        const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(normalized, { allowGlobs: true });
+        const sanitized = (0, intent_privacy_1.sanitizeRepoRelativePath)(normalized, { allowGlobs: false });
         if (!sanitized.path) {
             const reason = sanitized.reasonCodes[0] || 'unsafe_path';
             throw new Error(`approvedPath rejected (${reason}).`);
@@ -989,6 +1001,10 @@ function approveSession(projectRoot, approvedPath, reason, sessionId) {
             approvedBy: localApprovedBy.value || 'unknown_local_actor',
             assurance: options.assurance ?? 'unknown',
             requestId: localRequestId.value || null,
+            sessionId: session.sessionId,
+            profileHash: session.profileHash,
+            planRevision: session.contract.agentPlanRevision ?? (session.contract.agentPlan ? 1 : null),
+            brainGeneration: session.contract.brainGeneration?.generation ?? null,
         };
         const grants = approvalGrants(session.contract).filter((existing) => existing.path !== normalised);
         grants.push(grant);

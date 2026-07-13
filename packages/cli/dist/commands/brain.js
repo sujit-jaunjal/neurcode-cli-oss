@@ -852,6 +852,8 @@ function brainCommand(program) {
         .option('--max-files <n>', 'Maximum files to inspect', (value) => parseInt(value, 10))
         .option('--max-total-bytes <n>', 'Maximum total bytes to inspect', (value) => parseInt(value, 10))
         .option('--max-bytes-per-file <n>', 'Maximum bytes per file', (value) => parseInt(value, 10))
+        .option('--max-nodes <n>', 'Maximum source-free structural nodes', (value) => parseInt(value, 10))
+        .option('--max-edges <n>', 'Maximum source-free structural edges', (value) => parseInt(value, 10))
         .option('--json', 'Output stable machine-readable JSON')
         .action(async (options) => {
         (0, activation_telemetry_1.trackActivationEvent)({
@@ -866,6 +868,8 @@ function brainCommand(program) {
                 ...(Number.isFinite(options.maxFiles) ? { maxFiles: options.maxFiles } : {}),
                 ...(Number.isFinite(options.maxTotalBytes) ? { maxTotalBytes: options.maxTotalBytes } : {}),
                 ...(Number.isFinite(options.maxBytesPerFile) ? { maxBytesPerFile: options.maxBytesPerFile } : {}),
+                ...(Number.isFinite(options.maxNodes) ? { maxNodes: options.maxNodes } : {}),
+                ...(Number.isFinite(options.maxEdges) ? { maxEdges: options.maxEdges } : {}),
             };
             const lifecycle = await (0, brain_lifecycle_1.beginBrainIndex)(scope.cwd, {
                 source: process.env.NEURCODE_BRAIN_INDEX_SOURCE === 'auto' ? 'auto' : 'manual',
@@ -1263,17 +1267,30 @@ function brainCommand(program) {
     brain
         .command('repo-rebuild')
         .description('Rebuild Repository Graph V2 from local repository state')
+        .option('--max-files <n>', 'Maximum files to inspect', (value) => parseInt(value, 10))
+        .option('--max-total-bytes <n>', 'Maximum total bytes to inspect', (value) => parseInt(value, 10))
+        .option('--max-bytes-per-file <n>', 'Maximum bytes per file', (value) => parseInt(value, 10))
+        .option('--max-nodes <n>', 'Maximum source-free structural nodes', (value) => parseInt(value, 10))
+        .option('--max-edges <n>', 'Maximum source-free structural edges', (value) => parseInt(value, 10))
         .option('--json', 'Output stable machine-readable JSON')
         .action(async (options) => {
         const scope = getBrainScope();
         let jobId;
         try {
-            const lifecycle = await (0, brain_lifecycle_1.beginBrainIndex)(scope.cwd, { source: 'manual', requestedLimits: {} });
+            const limits = {
+                ...(Number.isFinite(options.maxFiles) ? { maxFiles: options.maxFiles } : {}),
+                ...(Number.isFinite(options.maxTotalBytes) ? { maxTotalBytes: options.maxTotalBytes } : {}),
+                ...(Number.isFinite(options.maxBytesPerFile) ? { maxBytesPerFile: options.maxBytesPerFile } : {}),
+                ...(Number.isFinite(options.maxNodes) ? { maxNodes: options.maxNodes } : {}),
+                ...(Number.isFinite(options.maxEdges) ? { maxEdges: options.maxEdges } : {}),
+            };
+            const lifecycle = await (0, brain_lifecycle_1.beginBrainIndex)(scope.cwd, { source: 'manual', requestedLimits: limits });
             jobId = lifecycle.jobId ?? undefined;
             const result = await (0, brain_1.indexRepositoryGraph)({
                 repoRoot: scope.cwd,
                 materializeGraph: false,
                 forceRebuild: true,
+                limits,
                 onProgress: jobId ? (progress) => { (0, brain_lifecycle_1.recordBrainProgress)(scope.cwd, jobId, progress); } : undefined,
             });
             (0, brain_lifecycle_1.markBrainIndexResult)(scope.cwd, result, jobId);

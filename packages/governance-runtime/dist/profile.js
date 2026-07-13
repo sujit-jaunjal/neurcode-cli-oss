@@ -243,12 +243,12 @@ function deriveSensitiveBoundaries(paths) {
             const tag = tagForSegment(seg);
             if (!tag)
                 continue;
-            // Anchor to the directory containing the triggering segment.
-            // If the triggering segment is the filename (last), use its parent directory.
+            // Directory evidence protects the directory. Filename evidence protects
+            // only that exact file; broadening `server/crypto.ts` to `server/**`
+            // incorrectly turned unrelated server code into an approval boundary.
             const isFilename = i === segments.length - 1 && seg.includes('.');
-            const dirEnd = isFilename ? i : i + 1;
-            const dir = segments.slice(0, dirEnd).join('/');
-            const dirGlob = dir ? dir + '/**' : isFilename ? p : '**';
+            const dir = segments.slice(0, i + 1).join('/');
+            const dirGlob = isFilename ? p : dir ? dir + '/**' : '**';
             if (!seen.has(dirGlob))
                 seen.set(dirGlob, tag);
             break; // stop at the first (shallowest) match per path
@@ -326,7 +326,15 @@ function computeReadiness(stack, ownership, sensitive, paths) {
     return { status, score: Math.min(100, score), reasons };
 }
 // ── Profile hash ──────────────────────────────────────────────────────────────
-function computeProfileHash(paths, sensitive, ownership, runtimeConfig, architectureHash) {
+function computeProfileHash(paths, sensitive, ownership, runtimeConfig, architectureHash, brainGeneration) {
+    const immutableBrainGeneration = brainGeneration ? {
+        graphId: brainGeneration.graphId,
+        generation: brainGeneration.generation,
+        repositoryFingerprint: brainGeneration.repositoryFingerprint,
+        eligibleFiles: brainGeneration.eligibleFiles,
+        indexedFiles: brainGeneration.indexedFiles,
+        structuralCoverage: brainGeneration.structuralCoverage,
+    } : null;
     const canonical = JSON.stringify({
         paths: [...paths].sort(),
         sensitive: sensitive.map((s) => `${s.glob}:${s.tag}`).sort(),
@@ -335,6 +343,7 @@ function computeProfileHash(paths, sensitive, ownership, runtimeConfig, architec
         // Only present when a dependency graph was derived, so legacy
         // (no-imports) profiles keep a byte-identical canonical form + hash.
         ...(architectureHash ? { architecture: architectureHash } : {}),
+        ...(immutableBrainGeneration ? { brainGeneration: immutableBrainGeneration } : {}),
     });
     return (0, node_crypto_1.createHash)('sha256').update(canonical).digest('hex').slice(0, 24);
 }
@@ -428,7 +437,12 @@ function runtimeConfigDigest(config) {
         return null;
     return (0, node_crypto_1.createHash)('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 24);
 }
-function computeTopology(paths, codeownersContent, manifestContent, runtimeConfig, architectureHash) {
+function computeTopology(paths, codeownersContent, manifestContent, runtimeConfig, architectureHash, brainGeneration) {
+    const immutableBrainGeneration = brainGeneration ? {
+        graphId: brainGeneration.graphId,
+        generation: brainGeneration.generation,
+        repositoryFingerprint: brainGeneration.repositoryFingerprint,
+    } : null;
     const canonical = JSON.stringify({
         paths: [...paths].sort(),
         codeownersContent: codeownersContent ?? null,
@@ -437,6 +451,7 @@ function computeTopology(paths, codeownersContent, manifestContent, runtimeConfi
         // Conditional so legacy (no-imports) profiles keep the same topology hash;
         // when imports are supplied, changing the dependency graph invalidates it.
         ...(architectureHash ? { architecture: architectureHash } : {}),
+        ...(immutableBrainGeneration ? { brainGeneration: immutableBrainGeneration } : {}),
     });
     return {
         hash: (0, node_crypto_1.createHash)('sha256').update(canonical).digest('hex').slice(0, 24),
@@ -482,16 +497,23 @@ function buildRepoGovernanceProfile(input) {
         })
         : undefined;
     const architectureHash = architecture?.architectureHash ?? null;
-    const profileHash = computeProfileHash(paths, sensitiveBoundaries, ownershipBoundaries, runtimeConfig, architectureHash);
-    const topology = computeTopology(paths, codeownersContent, manifestContent, runtimeConfig, architectureHash);
+    const profileHash = computeProfileHash(paths, sensitiveBoundaries, ownershipBoundaries, runtimeConfig, architectureHash, input.brainGeneration);
+    const topology = computeTopology(paths, codeownersContent, manifestContent, runtimeConfig, architectureHash, input.brainGeneration);
     const fallbackManifestPath = paths.find((pathValue) => /(^|\/)(package\.json|pyproject\.toml|setup\.py|setup\.cfg|go\.mod|Cargo\.toml|pom\.xml|build\.gradle(?:\.kts)?|Gemfile|composer\.json|Package\.swift|pnpm-workspace\.yaml|lerna\.json|nx\.json|turbo\.json|rush\.json|workspace\.json)$/.test(pathValue));
     const topologyManifests = input.manifests && input.manifests.length > 0
         ? input.manifests
         : fallbackManifestPath
             ? [{ path: fallbackManifestPath, content: manifestContent }]
             : [];
-    const repositoryTopology = (0, repository_topology_1.compileRepositoryTopology)({
-        paths,
+    const topologyPaths = input.brainGeneration
+        ? Array.from(new Set([
+            ...paths.map((pathValue) => pathValue.split('/')[0]).filter(Boolean),
+            ...topologyManifests.map((manifest) => manifest.path),
+            ...approvalRequiredPaths.map((glob) => glob.replace(/\/\*\*$/, '').replace(/\/\*$/, '')),
+        ])).sort()
+        : paths;
+    const completeRepositoryTopology = (0, repository_topology_1.compileRepositoryTopology)({
+        paths: topologyPaths,
         manifests: topologyManifests,
         codeownersContent,
         protectedGlobs: [
@@ -502,15 +524,44 @@ function buildRepoGovernanceProfile(input) {
         brain: input.brain,
         compiledAt: new Date().toISOString(),
     });
-    topology.hash = architectureHash
-        ? (0, node_crypto_1.createHash)('sha256')
-            .update(JSON.stringify({
-            repositoryTopology: repositoryTopology.artifactHash,
-            architecture: architectureHash,
-        }))
-            .digest('hex')
-            .slice(0, 24)
-        : repositoryTopology.artifactHash;
+    const repositoryTopology = input.brainGeneration
+        ? {
+            ...completeRepositoryTopology,
+            artifactHash: (0, node_crypto_1.createHash)('sha256').update(JSON.stringify({
+                projection: completeRepositoryTopology.artifactHash,
+                graphId: input.brainGeneration.graphId,
+                generation: input.brainGeneration.generation,
+                trackedPathHash: (0, node_crypto_1.createHash)('sha256').update(JSON.stringify(paths)).digest('hex').slice(0, 24),
+            })).digest('hex').slice(0, 24),
+            trackedFileCount: paths.length,
+            trackedPathHash: (0, node_crypto_1.createHash)('sha256').update(JSON.stringify(paths)).digest('hex').slice(0, 24),
+            limitations: [...completeRepositoryTopology.limitations,
+                'Profile topology is a bounded projection; complete structural coverage remains in the immutable Brain generation reference.'],
+            projection: {
+                bounded: true,
+                sourceArtifactHash: `${input.brainGeneration.graphId}:${input.brainGeneration.generation}`,
+                selectedFacts: completeRepositoryTopology.facts.length,
+                totalFacts: null,
+                selectedRelationships: completeRepositoryTopology.relationships.length,
+                totalRelationships: null,
+                reason: 'profile_generation_reference',
+            },
+        }
+        : completeRepositoryTopology;
+    topology.hash = (0, node_crypto_1.createHash)('sha256')
+        .update(JSON.stringify({
+        repositoryTopology: repositoryTopology.artifactHash,
+        ...(architectureHash ? { architecture: architectureHash } : {}),
+        ...(input.brainGeneration ? {
+            brainGeneration: {
+                graphId: input.brainGeneration.graphId,
+                generation: input.brainGeneration.generation,
+                repositoryFingerprint: input.brainGeneration.repositoryFingerprint,
+            },
+        } : {}),
+    }))
+        .digest('hex')
+        .slice(0, 24);
     topology.trackedFileCount = repositoryTopology.trackedFileCount;
     const agentCompat = stack.confidence >= 0.5
         ? 'supported'
@@ -522,6 +573,7 @@ function buildRepoGovernanceProfile(input) {
         repo: { name: repoName, source },
         topology,
         repositoryTopology,
+        ...(input.brainGeneration ? { brainGeneration: input.brainGeneration } : {}),
         runtimeConfig,
         stack: {
             primaryLanguage: stack.primaryLanguage,
@@ -540,7 +592,7 @@ function buildRepoGovernanceProfile(input) {
     };
 }
 function checkFileBoundary(input) {
-    const { filePath, allowedGlobs, ownershipRules, sensitiveGlobs, approvalRequiredGlobs, approvedPaths = [], approvalGrants = [], checkedAt, scopeMode = 'inferred', localMode = 'strict', } = input;
+    const { filePath, allowedGlobs, ownershipRules, sensitiveGlobs, approvalRequiredGlobs, approvedPaths = [], approvalGrants = [], sessionId, profileHash, planRevision = null, brainGeneration = null, checkedAt, scopeMode = 'inferred', localMode = 'strict', } = input;
     // ── Scope check ──────────────────────────────────────────────────────────────
     const inScope = allowedGlobs.length === 0
         ? true
@@ -563,13 +615,26 @@ function checkFileBoundary(input) {
             return false;
         if (grant.revokedAt)
             return false;
+        if (sessionId && grant.sessionId !== sessionId)
+            return false;
+        if (profileHash && grant.profileHash !== profileHash)
+            return false;
+        if (grant.planRevision !== planRevision)
+            return false;
+        if (grant.brainGeneration !== brainGeneration)
+            return false;
         if (!grant.expiresAt)
             return true;
         const expiresAtMs = Date.parse(grant.expiresAt);
         return Number.isFinite(expiresAtMs) && expiresAtMs > effectiveCheckedAtMs;
     })
         .map((grant) => grant.path);
-    const candidateApprovedPaths = approvalGrants.length > 0 ? activeGrantPaths : approvedPaths;
+    const hasBoundApprovalContext = Boolean(sessionId || profileHash || planRevision !== null || brainGeneration !== null);
+    // Legacy path-only approvals remain readable for legacy callers, but can never
+    // satisfy a V1.5 check carrying replay-containment context.
+    const candidateApprovedPaths = approvalGrants.length > 0
+        ? activeGrantPaths
+        : hasBoundApprovalContext ? [] : approvedPaths;
     const expiredGrant = approvalGrants.find((grant) => {
         if (!grant || typeof grant.path !== 'string' || !grant.path.trim() || !grant.expiresAt || grant.revokedAt) {
             return false;
@@ -577,16 +642,12 @@ function checkFileBoundary(input) {
         const expiresAtMs = Date.parse(grant.expiresAt);
         if (!Number.isFinite(expiresAtMs) || expiresAtMs > effectiveCheckedAtMs)
             return false;
-        return (matchesGlob(filePath, grant.path) ||
-            filePath.startsWith(grant.path.replace('/**', '').replace('/*', '') + '/') ||
-            filePath === grant.path.replace('/**', '').replace('/*', ''));
+        return filePath === grant.path;
     });
     // hasExplicitApproval is computed independently of isApprovalRequired so that
     // session approve can also unblock sensitive-but-not-approval-required paths.
     const hasExplicitApproval = candidateApprovedPaths.length > 0 &&
-        candidateApprovedPaths.some((ap) => matchesGlob(filePath, ap) ||
-            filePath.startsWith(ap.replace('/**', '').replace('/*', '') + '/') ||
-            filePath === ap.replace('/**', '').replace('/*', ''));
+        candidateApprovedPaths.some((ap) => filePath === ap);
     const isApproved = isApprovalRequired && hasExplicitApproval;
     if (isApprovalRequired && !isApproved) {
         const ownerNote = owners.length ? ` (owned by ${owners.join(', ')})` : '';
@@ -608,7 +669,7 @@ function checkFileBoundary(input) {
                 approvalRequired: true,
                 owners,
                 // Suggest the exact file path as the tightest possible approval scope.
-                // The human can approve a broader glob (e.g. src/billing/**) if they choose to.
+                // V1.5 approvals are exact-path only.
                 suggestedApprovalPath: filePath,
             },
         };

@@ -16,5 +16,7 @@ export declare function analyzeProposedChange(input: {
     proposedChange?: unknown;
     operation?: ProposedChangeEnvelope['target']['operation'];
     previousPath?: string | null;
+    /** Never deserialize a repository-wide graph on the governed pre-write path. */
+    boundedPreWrite?: boolean;
 }): ProposedChangeAnalysis;
 //# sourceMappingURL=proposed-change-analysis.d.ts.map

@@ -4,7 +4,7 @@
  * One session per .neurcode/sessions/<id>.json.
  * No daemon required; CLI commands and hooks read/write directly.
  */
-import { type OwnershipBoundary, type PlanCoherenceMode, type PlanControlMode, type RepoSymbolDuplicateMode, type RepoGovernanceProfile, type RuntimeBlockType, type RuntimeLocalMode } from './profile';
+import { type OwnershipBoundary, type PlanCoherenceMode, type PlanControlMode, type RepoBrainGenerationReference, type RepoSymbolDuplicateMode, type RepoGovernanceProfile, type RuntimeBlockType, type RuntimeLocalMode } from './profile';
 import { type PlanControlModeDescription, type RuntimeSafetyPhase } from './runtime-safety-kernel';
 import { type AgentPlan, type AgentPlanSource, type PlanCoherenceResult } from './agent-plan';
 import { type ArchitectureObligation, type ArchitectureObligationPolicy, type ArchitectureObligationWaiver, type ArchitectureObligationWaiverSource } from './architecture-obligations';
@@ -126,6 +126,11 @@ export interface ApprovalGrant {
     revokedAt?: string | null;
     revokedBy?: string | null;
     revocationReason?: string | null;
+    /** Exact authority context. New grants cannot be replayed across sessions or evidence revisions. */
+    sessionId?: string;
+    profileHash?: string;
+    planRevision?: number | null;
+    brainGeneration?: number | null;
 }
 export interface SessionContract {
     goal: string;
@@ -209,6 +214,8 @@ export interface SessionContract {
     architectureGraph?: RepoArchitectureGraph;
     /** Source-free repository topology authority captured at session start. */
     repositoryTopology?: RepositoryTopologyArtifact;
+    /** Immutable Brain generation bound to the session and approval ledger. */
+    brainGeneration?: RepoBrainGenerationReference;
 }
 export type AgentPlanRevisionKind = 'captured' | 'amended';
 export type AgentPlanAmendmentActor = 'agent' | 'human' | 'system';

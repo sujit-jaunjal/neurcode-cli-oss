@@ -59,8 +59,10 @@ const profile_drift_recovery_1 = require("../utils/profile-drift-recovery");
 const session_start_transaction_1 = require("../utils/session-start-transaction");
 const runtime_state_1 = require("../utils/runtime-state");
 const runtime_safety_check_1 = require("../utils/runtime-safety-check");
+const bounded_prewrite_authority_1 = require("../utils/bounded-prewrite-authority");
 const v0_governance_2 = require("../utils/v0-governance");
 const activation_telemetry_1 = require("../utils/activation-telemetry");
+const sensitive_path_evidence_1 = require("../utils/sensitive-path-evidence");
 // ── Helpers ───────────────────────────────────────────────────────────────────
 /** Read the full hook JSON from stdin, or return {} on any error. */
 function readHookInput() {
@@ -758,6 +760,10 @@ function latestUnresolvedActionableBlock(session) {
             approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
             approvedPaths: session.contract.approvedPaths,
             approvalGrants: session.contract.approvalGrants,
+            sessionId: session.sessionId,
+            profileHash: session.profileHash,
+            planRevision: session.contract.agentPlanRevision ?? (session.contract.agentPlan ? 1 : null),
+            brainGeneration: session.contract.brainGeneration?.generation ?? null,
             scopeMode: session.contract.scopeMode,
             localMode: runtimeMode(session),
         });
@@ -810,7 +816,7 @@ async function recordBashCheck(repoRoot, session, args) {
     if (refreshed)
         await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed);
 }
-async function handleBashCheck(repoRoot, session, command) {
+async function handleBashCheck(repoRoot, session, command, startedAtMs = Date.now()) {
     const analysis = (0, bash_command_analysis_1.analyzeBashCommand)(command);
     if (analysis.operatorDiagnostic) {
         diagnostic(`Bash ${analysis.operation} classified as operator diagnostic; not recorded as governed edit evidence`);
@@ -823,14 +829,15 @@ async function handleBashCheck(repoRoot, session, command) {
     }
     if (analysis.targetPaths.length === 0) {
         diagnostic(`Bash ${analysis.operation} target extraction was inconclusive; not recorded as governed edit evidence`);
-        process.stdout.write(JSON.stringify({
-            hookSpecificOutput: {
-                hookEventName: 'PreToolUse',
-                permissionDecision: 'allow',
-                reason: `⚠️ Neurcode: Bash ${analysis.operation} target extraction was inconclusive; allowed without governed edit evidence.`,
-            },
-        }) + '\n');
-        process.exit(0);
+        const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+            repoRoot,
+            session,
+            rawDecision: 'unknown',
+            structuralProtected: false,
+            exactApprovalCurrentContext: false,
+            startedAtMs,
+        });
+        denyPreToolUse(`⏸ Neurcode: Bash ${analysis.operation} may write, but its canonical target path could not be established. Failing closed unknown.`, { reason: 'bash_write_target_unavailable', boundedPreWrite });
         return;
     }
     const targetPaths = analysis.targetPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot));
@@ -844,6 +851,10 @@ async function handleBashCheck(repoRoot, session, command) {
             approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
             approvedPaths: session.contract.approvedPaths,
             approvalGrants: session.contract.approvalGrants,
+            sessionId: session.sessionId,
+            profileHash: session.profileHash,
+            planRevision: session.contract.agentPlanRevision ?? (session.contract.agentPlan ? 1 : null),
+            brainGeneration: session.contract.brainGeneration?.generation ?? null,
             scopeMode: session.contract.scopeMode,
             localMode: runtimeMode(session),
         }),
@@ -874,7 +885,17 @@ async function handleBashCheck(repoRoot, session, command) {
     if (blocking) {
         const message = `⏸ Neurcode: Bash ${analysis.operation} targets ${blocking.filePath}. ` +
             blocking.result.message.replace(/^⏸ Neurcode:\s*/, '');
+        const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+            repoRoot,
+            session,
+            rawDecision: 'block',
+            deterministicStructuralBlock: !blocking.result.isApprovalRequired,
+            structuralProtected: blocking.result.isApprovalRequired,
+            exactApprovalCurrentContext: false,
+            startedAtMs,
+        });
         denyPreToolUse(message, {
+            boundedPreWrite,
             ...(blocking.result.approvalContext ? { approvalContext: blocking.result.approvalContext } : {}),
             ...(blocking.result.blockType
                 ? {
@@ -892,14 +913,33 @@ async function handleBashCheck(repoRoot, session, command) {
     }
     const warning = results.find(({ result }) => result.verdict === 'warn');
     if (warning) {
+        const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+            repoRoot, session, rawDecision: 'advisory', structuralProtected: false,
+            exactApprovalCurrentContext: false, startedAtMs,
+        });
         process.stdout.write(JSON.stringify({
             hookSpecificOutput: {
                 hookEventName: 'PreToolUse',
                 permissionDecision: 'allow',
                 reason: `⚠️ Neurcode: Bash ${analysis.operation} is allowed with warning for ${warning.filePath}.`,
+                boundedPreWrite,
             },
         }) + '\n');
+        process.exit(0);
+        return;
     }
+    const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+        repoRoot, session, rawDecision: 'allow', structuralProtected: false,
+        exactApprovalCurrentContext: false, startedAtMs,
+    });
+    process.stdout.write(JSON.stringify({
+        hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: boundedPreWrite.permissionDecision,
+            reason: 'Neurcode bounded pre-write evidence permits these canonical Bash targets.',
+            boundedPreWrite,
+        },
+    }) + '\n');
     process.exit(0);
 }
 function parseDurationMs(value) {
@@ -1287,6 +1327,7 @@ function reconcileTrustedAdapterPosture(declared, launched) {
 }
 /** PreToolUse — check a pending Edit/Write/MultiEdit before it lands. */
 async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
+    const preWriteStartedAt = Date.now();
     const hookInput = readHookInput();
     const effectiveCwd = cwdFromHookInput(hookInput, cmdCwd);
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(effectiveCwd);
@@ -1295,6 +1336,17 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
     }
     catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const authoritySession = resolveSessionForHook(repoRoot, sessionIdFromHookInput(hookInput)).session;
+        const boundedPreWrite = authoritySession
+            ? (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+                repoRoot,
+                session: authoritySession,
+                rawDecision: 'unknown',
+                structuralProtected: false,
+                exactApprovalCurrentContext: false,
+                startedAtMs: preWriteStartedAt,
+            })
+            : undefined;
         // P5 (Local-First Aha V1): this guard used to deny EVERY tool call on a
         // stale/missing runtime manifest — including the recovery command printed
         // in its own message — wedging the agent until a human found an unhooked
@@ -1324,6 +1376,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
             }
         }
         denyPreToolUse(message, {
+            ...(boundedPreWrite ? { boundedPreWrite } : {}),
             blockContext: blockContext({
                 blockType: 'profile_or_runtime_health_block',
                 message,
@@ -1403,9 +1456,19 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
     }
     let session = activeSession;
     try {
-        const hasPriorBlock = session.events.some((event) => event.type === 'check_block');
-        if (hasPriorBlock) {
-            const pending = await (0, runtime_live_1.applyPendingRuntimeLiveApprovals)(repoRoot, session.sessionId);
+        // Only a currently unresolved actionable block can have a relevant hosted
+        // approval or scope decision. Historical/no-path blocks must not add a
+        // network budget to every later pre-write call.
+        const hasPendingOperatorAction = Boolean(latestUnresolvedActionableBlock(session));
+        if (hasPendingOperatorAction) {
+            // Hosted approvals are useful but transport is not authority and may not
+            // consume the pre-write deadline. Fetch in parallel under a small bounded
+            // budget; acknowledgements remain durable in the outbox for finish/replay.
+            const pending = await (0, runtime_live_1.applyPendingRuntimeLiveApprovals)(repoRoot, session.sessionId, {
+                fetchTimeoutMs: 300,
+                flushBefore: false,
+                flushAfter: false,
+            });
             if (pending.applied > 0 || pending.revoked > 0 || pending.scopeAmended > 0 || pending.scopeDenied > 0) {
                 const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
                 if (refreshed)
@@ -1451,7 +1514,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
         const planned = maybeCaptureAgentPlan(repoRoot, session, hookInput);
         if (planned) {
             session = planned;
-            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session);
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, session, { flush: false });
         }
     }
     catch {
@@ -1465,13 +1528,18 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
             toolInput['cmd'] ||
             hookInput['command'] ||
             '';
-        await handleBashCheck(repoRoot, session, command);
+        await handleBashCheck(repoRoot, session, command, preWriteStartedAt);
         return;
     }
     const rawPaths = hookFilePathCandidates(hookInput);
     if (rawPaths.length > 1) {
         const message = `⏸ Neurcode: this ${toolName || 'tool'} call attempts to edit multiple files at once ` +
             `(${rawPaths.length} paths). Split the edit into one file per tool call so each path can be governed before write.`;
+        const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+            repoRoot, session, rawDecision: 'block', deterministicStructuralBlock: true,
+            structuralProtected: false, exactApprovalCurrentContext: false,
+            startedAtMs: preWriteStartedAt,
+        });
         try {
             (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
                 type: 'check_block',
@@ -1489,11 +1557,12 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                     reason: 'multi_file_tool_call_requires_split',
                     paths: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)),
                     toolName,
+                    boundedPreWrite,
                 },
             });
             const refreshed = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
             if (refreshed)
-                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed);
+                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed, { flush: false });
         }
         catch {
             // Recording failure must not weaken the deny.
@@ -1507,12 +1576,20 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
             }),
             reason: 'multi_file_tool_call_requires_split',
             paths: rawPaths.map((path) => normalizeHookFilePathForRepo(path, repoRoot)),
+            boundedPreWrite,
         });
     }
     const rawPath = rawPaths[0] || '';
     if (!rawPath) {
-        diagnostic('PreToolUse: no file path in hook input — edit allowed (cannot check)');
-        process.exit(0);
+        const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+            repoRoot,
+            session,
+            rawDecision: 'unknown',
+            structuralProtected: false,
+            exactApprovalCurrentContext: false,
+            startedAtMs: preWriteStartedAt,
+        });
+        denyPreToolUse('⏸ Neurcode: the governed pre-write call did not identify one canonical repository path, so the decision is fail-closed unknown.', { reason: 'prewrite_path_unavailable', boundedPreWrite });
         return;
     }
     // Normalise to a path relative to the repo root. Use realpath-aware
@@ -1525,6 +1602,11 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
     catch (error) {
         const message = `⏸ Neurcode: edit path failed repository path authority. ` +
             `${error instanceof Error ? error.message : String(error)}`;
+        const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+            repoRoot, session, rawDecision: 'block', deterministicStructuralBlock: true,
+            structuralProtected: false, exactApprovalCurrentContext: false,
+            startedAtMs: preWriteStartedAt,
+        });
         denyPreToolUse(message, {
             blockContext: blockContext({
                 blockType: 'scope_violation_or_task_expansion',
@@ -1533,6 +1615,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                 runtimeMode: runtimeMode(session),
             }),
             reason: 'path_authority_rejected',
+            boundedPreWrite,
         });
         return;
     }
@@ -1575,6 +1658,10 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                 `${signal.currentProfileHash.slice(0, 12)}. Submit the implementation prompt again for automatic recovery. ` +
                 `If unresolved operator state blocks recovery, run exactly: \`${profile_drift_recovery_1.PROFILE_DRIFT_RECOVERY_COMMAND}\`; ` +
                 '`--force` abandons that unresolved state.';
+            const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+                repoRoot, session, rawDecision: 'unknown', structuralProtected: false,
+                exactApprovalCurrentContext: false, startedAtMs: preWriteStartedAt,
+            });
             try {
                 (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
                     type: 'check_block',
@@ -1584,6 +1671,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                     message,
                     detail: {
                         profileFreshness,
+                        boundedPreWrite,
                         blockContext: blockContext({
                             blockType: 'profile_or_runtime_health_block',
                             filePath,
@@ -1594,7 +1682,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                 });
                 const refreshedSession = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
                 if (refreshedSession) {
-                    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession, { profileFreshness });
+                    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession, { profileFreshness, flush: false });
                 }
             }
             catch {
@@ -1602,6 +1690,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
             }
             denyPreToolUse(message, {
                 profileFreshness,
+                boundedPreWrite,
                 blockContext: blockContext({
                     blockType: 'profile_or_runtime_health_block',
                     filePath,
@@ -1627,6 +1716,10 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
         const message = `⏸ Neurcode: could not verify the repository governance profile before checking ${filePath}. ` +
             `Run \`neurcode profile\` or \`neurcode activate claude\`, then retry. ` +
             `Cause: ${err instanceof Error ? err.message : String(err)}`;
+        const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+            repoRoot, session, rawDecision: 'unknown', structuralProtected: false,
+            exactApprovalCurrentContext: false, startedAtMs: preWriteStartedAt,
+        });
         try {
             (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
                 type: 'check_block',
@@ -1641,6 +1734,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                         message,
                         runtimeMode: runtimeMode(session),
                     }),
+                    boundedPreWrite,
                     profileFreshness: {
                         status: 'unreadable',
                         refreshed: false,
@@ -1658,12 +1752,13 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
             });
             const refreshedSession = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
             if (refreshedSession)
-                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession);
+                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession, { flush: false });
         }
         catch {
             // Recording failure must not weaken the deny.
         }
         denyPreToolUse(message, {
+            boundedPreWrite,
             blockContext: blockContext({
                 blockType: 'profile_or_runtime_health_block',
                 filePath,
@@ -1700,6 +1795,15 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
             const blockType = runtimeSafety.enforcement.action === 'approval_required'
                 ? 'approval_required_boundary'
                 : 'structural_policy_violation';
+            const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+                repoRoot,
+                session,
+                rawDecision: 'block',
+                deterministicStructuralBlock: runtimeSafety.enforcement.action === 'block',
+                structuralProtected: runtimeSafety.enforcement.action === 'approval_required',
+                exactApprovalCurrentContext: false,
+                startedAtMs: preWriteStartedAt,
+            });
             try {
                 (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
                     type: 'check_block',
@@ -1718,6 +1822,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                             dependencyChangeKinds: runtimeSafety.dependency?.evidence.changeKinds ?? [],
                             sourceUploaded: false,
                         },
+                        boundedPreWrite,
                         blockContext: blockContext({
                             blockType,
                             filePath,
@@ -1728,12 +1833,13 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                 });
                 const refreshedSession = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
                 if (refreshedSession)
-                    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession);
+                    await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession, { flush: false });
             }
             catch {
                 // Recording failure must not weaken the deny.
             }
             denyPreToolUse(message, {
+                boundedPreWrite,
                 blockContext: blockContext({
                     blockType,
                     filePath,
@@ -1776,6 +1882,10 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
         const message = '⏸ Neurcode: runtime safety could not evaluate this write, so the edit is blocked fail-closed. ' +
             'Run `neurcode doctor` or `neurcode runtime repair`, then retry.';
         const blockType = 'structural_policy_violation';
+        const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+            repoRoot, session, rawDecision: 'unknown', structuralProtected: false,
+            exactApprovalCurrentContext: false, startedAtMs: preWriteStartedAt,
+        });
         try {
             (0, governance_runtime_1.appendEvent)(repoRoot, session.sessionId, {
                 type: 'check_block',
@@ -1792,6 +1902,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                         reasonCodes: ['runtime_safety.evaluation_failed'],
                         sourceUploaded: false,
                     },
+                    boundedPreWrite,
                     blockContext: blockContext({
                         blockType,
                         filePath,
@@ -1802,12 +1913,13 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
             });
             const refreshedSession = (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
             if (refreshedSession)
-                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession);
+                await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshedSession, { flush: false });
         }
         catch {
             // Recording failure must not weaken the deny.
         }
         denyPreToolUse(message, {
+            boundedPreWrite,
             blockContext: blockContext({
                 blockType,
                 filePath,
@@ -1822,22 +1934,55 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
     }
     // ── Run the boundary + intent-coherence checks ───────────────────────────
     let result;
+    const sensitivePathEvidence = (0, sensitive_path_evidence_1.classifySensitivePathFromBrain)(repoRoot, filePath);
+    const plannedPaths = session.contract.agentPlan?.expectedFiles ?? [];
+    const sensitiveIntent = (0, sensitive_path_evidence_1.requestsSensitiveChange)(session.contract.goal);
+    const sameDirectoryPlannedPaths = plannedPaths.filter((path) => (0, path_1.dirname)(path) === (0, path_1.dirname)(filePath));
+    const plannedSensitivePaths = sensitiveIntent && !plannedPaths.includes(filePath)
+        ? sameDirectoryPlannedPaths
+        : [];
+    const sensitiveTaskProtected = (0, sensitive_path_evidence_1.shouldProtectSensitiveTaskPath)({
+        filePath,
+        plannedPaths,
+        sensitiveIntent,
+        directEvidenceProtected: sensitivePathEvidence.protected,
+        plannedSensitivePaths,
+    });
+    const sensitiveGlobs = sensitiveTaskProtected
+        ? [...new Set([...session.contract.sensitiveGlobs, filePath])]
+        : session.contract.sensitiveGlobs;
+    const approvalRequiredGlobs = sensitiveTaskProtected
+        ? [...new Set([...session.contract.approvalRequiredGlobs, filePath])]
+        : session.contract.approvalRequiredGlobs;
     try {
         result = (0, governance_runtime_1.checkFileBoundary)({
             filePath,
             allowedGlobs: session.contract.allowedGlobs,
             ownershipRules: session.contract.ownershipRules,
-            sensitiveGlobs: session.contract.sensitiveGlobs,
-            approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
+            sensitiveGlobs,
+            approvalRequiredGlobs,
             approvedPaths: session.contract.approvedPaths,
             approvalGrants: session.contract.approvalGrants,
+            sessionId: session.sessionId,
+            profileHash: session.profileHash,
+            planRevision: session.contract.agentPlanRevision ?? (session.contract.agentPlan ? 1 : null),
+            brainGeneration: session.contract.brainGeneration?.generation ?? null,
             scopeMode: session.contract.scopeMode,
             localMode: runtimeMode(session),
         });
     }
     catch (err) {
-        diagnostic(`check failed: ${err instanceof Error ? err.message : String(err)} — edit allowed`);
-        process.exit(0);
+        diagnostic(`check failed closed: ${err instanceof Error ? err.message : String(err)}`);
+        result = {
+            verdict: 'block',
+            inScope: false,
+            isSensitive: false,
+            isApprovalRequired: false,
+            owners: [],
+            message: '⏸ Neurcode: deterministic boundary evaluation failed; the pre-write decision is fail-closed unknown.',
+            options: ['narrow', 'replan'],
+            blockType: 'profile_or_runtime_health_block',
+        };
     }
     if (result.verdict === 'block' && result.isApprovalRequired && isPlanDeclaredTarget(session, filePath)) {
         const ownerNote = result.owners.length ? ` (owned by ${result.owners.join(', ')})` : '';
@@ -1955,6 +2100,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
         sessionId: session.sessionId,
         planRevision: (0, governance_runtime_1.activeAgentPlanRevision)(session.contract),
         proposedChange: hookInput['proposed_change'] ?? hookInput['proposedChange'],
+        boundedPreWrite: true,
     });
     let repoSymbolPolicy = (0, local_repo_brain_1.evaluateRepoSymbolDuplicatePolicy)({
         projectRoot: repoRoot,
@@ -1962,6 +2108,7 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
         proposedSource: proposedSource.source,
         proposedSymbols: proposedChange.localSymbols,
         policyMode: repoSymbolDuplicateMode(session),
+        boundedPreWrite: true,
     });
     repoSymbolPolicy = {
         ...repoSymbolPolicy,
@@ -1975,6 +2122,12 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
         change: proposedChange.envelope,
         approvedPaths: session.contract.approvedPaths,
         approvalGrants: session.contract.approvalGrants,
+        sessionId: session.sessionId,
+        profileHash: session.profileHash,
+        planRevision: session.contract.agentPlanRevision ?? (session.contract.agentPlan ? 1 : null),
+        brainGeneration: session.contract.brainGeneration?.generation ?? null,
+        boundedPreWrite: true,
+        includeAdvisory: false,
     });
     if (result.verdict !== 'block' && repoSymbolPolicy.verdict === 'block') {
         result = {
@@ -2018,6 +2171,37 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
             blockType: 'structural_policy_violation',
             message: `⚠️ Neurcode: ${first?.explanation ?? 'A deterministic structural policy warned on this change.'} ${first?.remediation ?? ''}`.trim(),
             options: ['continue', 'replan'],
+        };
+    }
+    const structuralPolicyUnavailable = repoIntelligence.policyConfigured
+        && repoIntelligence.evaluation.verdict === 'not_evaluated';
+    const boundedPreWrite = (0, bounded_prewrite_authority_1.evaluateBoundedPreWriteAuthority)({
+        repoRoot,
+        session,
+        // A deterministic boundary denial remains authoritative even when an
+        // optional structural policy projection is unavailable. Missing policy
+        // evidence can reduce an allow, but cannot erase an observed block.
+        rawDecision: result.verdict === 'block'
+            ? 'block'
+            : structuralPolicyUnavailable
+                ? 'unknown'
+                : result.verdict === 'warn' ? 'advisory' : 'allow',
+        deterministicStructuralBlock: result.verdict === 'block'
+            && !result.isApprovalRequired
+            && result.blockType !== 'profile_or_runtime_health_block',
+        structuralProtected: result.isApprovalRequired,
+        exactApprovalCurrentContext: result.isApprovalRequired && result.verdict !== 'block',
+        startedAtMs: preWriteStartedAt,
+    });
+    if (boundedPreWrite.permissionDecision === 'deny' && result.verdict !== 'block') {
+        result = {
+            ...result,
+            verdict: 'block',
+            blockType: 'profile_or_runtime_health_block',
+            message: `⏸ Neurcode: pre-write evidence authority is ${boundedPreWrite.authority}; ` +
+                `missing, stale, partial, changed, or late evidence cannot prove this write safe. ` +
+                `Reason codes: ${boundedPreWrite.reasonCodes.join(', ')}.`,
+            options: ['narrow', 'replan'],
         };
     }
     // ── Record the event ─────────────────────────────────────────────────────
@@ -2072,6 +2256,8 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                         : null,
                 },
                 boundaryVerdict,
+                sensitivePathEvidence,
+                boundedPreWrite,
                 activePlanRevision,
                 planPresent: Boolean(session.contract.agentPlan),
             },
@@ -2080,46 +2266,36 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
         const refreshed = (0, governance_runtime_1.refreshArchitectureObligations)(repoRoot, session.sessionId)
             || (0, governance_runtime_1.loadSession)(repoRoot, session.sessionId);
         if (refreshed)
-            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed, { profileFreshness });
+            await (0, runtime_live_1.publishRuntimeLiveStatus)(repoRoot, refreshed, { profileFreshness, flush: false });
     }
     catch {
         // Recording failure must not affect the verdict
     }
-    const consequenceNudge = result.verdict === 'block'
-        ? null
-        : await maybeRecordConsequenceNudge(repoRoot, session);
-    // ── Repo brain facts (P0/P1) ─────────────────────────────────────────────
-    // Load source-free repo context for the blocked/warned path. Best-effort:
-    // if the artifact is missing the message is unchanged and recovery guidance
-    // is appended instead.
-    let repoBrainFileFacts = null;
+    // Consequence analysis can build a TypeScript Program and therefore cannot
+    // run inside the bounded pre-write critical path. It remains available as a
+    // post-write/background product surface.
+    // ── Bounded Repo Brain reference (P0/P1) ─────────────────────────────────
+    // The complete legacy Brain object is intentionally not read on pre-write.
     let repoBrainMeta = {
-        artifactHash: null,
-        generatedAt: null,
+        artifactHash: repoIntelligence.evidence.graph.graphId,
+        generatedAt: repoIntelligence.evidence.graph.lastSuccessfulIndexAt ?? null,
         status: 'missing',
     };
-    try {
-        const brainCtx = (0, local_repo_brain_1.getRepoBrainContext)(repoRoot, [filePath]);
-        repoBrainMeta = { artifactHash: brainCtx.artifactHash, generatedAt: brainCtx.generatedAt, status: brainCtx.status };
-        repoBrainFileFacts = brainCtx.files[0] ?? null;
-    }
-    catch {
-        // Never let brain context loading break the enforcement path.
-    }
+    if (repoBrainMeta.artifactHash)
+        repoBrainMeta = { ...repoBrainMeta, status: 'found' };
     // ── Emit hook response ────────────────────────────────────────────────────
     if (result.verdict === 'block') {
         // Enrich deny message with source-free repo facts (P1).
-        const brainSuffix = repoBrainFileFacts
-            ? (0, local_repo_brain_1.formatRepoBrainFactsForMessage)(repoBrainFileFacts)
-            : repoBrainMeta.status === 'missing'
-                ? 'Run `neurcode brain index` for local source-free repo context.'
-                : '';
+        const brainSuffix = repoBrainMeta.status === 'missing'
+            ? 'Run `neurcode brain index` for local source-free repo context.'
+            : '';
         const enrichedMessage = brainSuffix
             ? `${result.message} | ${brainSuffix}`
             : result.message;
         // Include machine-readable approvalContext when the block is approval-required,
         // so the agent can surface a structured approval request to the human.
         denyPreToolUse(enrichedMessage, {
+            boundedPreWrite,
             repoSymbolPolicy,
             ...(result.approvalContext ? { approvalContext: result.approvalContext } : {}),
             ...(result.blockType
@@ -2134,138 +2310,37 @@ async function handleCheck(cmdCwd, trustedAdapterId, trustedTiming) {
                             proposalId: pendingScopeAmendmentProposalId,
                             runtimeMode: runtimeMode(session),
                         }),
-                        ...(repoBrainFileFacts ? {
-                            repoBrainFacts: {
-                                sensitiveKinds: repoBrainFileFacts.sensitiveKinds,
-                                module: repoBrainFileFacts.module,
-                                hotspot: repoBrainFileFacts.hotspot,
-                                ownerBoundary: repoBrainFileFacts.ownerBoundary,
-                                reuseAdvisories: repoBrainFileFacts.reuseAdvisories,
-                                artifactHash: repoBrainMeta.artifactHash,
-                                generatedAt: repoBrainMeta.generatedAt,
-                            },
-                        } : { repoBrainStatus: 'missing', repoBrainRecovery: 'neurcode brain index' }),
+                        repoBrainStatus: repoBrainMeta.status,
+                        ...(repoBrainMeta.status === 'missing' ? { repoBrainRecovery: 'neurcode brain index' } : {}),
                     },
                 }
                 : {}),
         });
     }
     if (result.verdict === 'warn') {
-        const reason = consequenceNudge
-            ? `${result.message}\n\n${consequenceNudge.headline}`
-            : result.message;
         process.stdout.write(JSON.stringify({
             hookSpecificOutput: {
                 hookEventName: 'PreToolUse',
                 permissionDecision: 'allow',
-                reason,
+                reason: result.message,
+                boundedPreWrite,
                 repoSymbolPolicy,
             },
         }) + '\n');
         process.exit(0);
     }
-    if (consequenceNudge && isReuseNudge(consequenceNudge)) {
-        process.stdout.write(JSON.stringify({
-            hookSpecificOutput: {
-                hookEventName: 'PreToolUse',
-                permissionDecision: 'allow',
-                reason: consequenceNudge.headline,
-                reuseNudge: {
-                    nudgeVersion: consequenceNudge.nudgeVersion,
-                    nudgeKey: consequenceNudge.nudgeKey,
-                    severity: consequenceNudge.severity,
-                    consequenceClass: consequenceNudge.consequenceClass,
-                    operatorAction: consequenceNudge.operatorAction,
-                    reviewFocus: consequenceNudge.reviewFocus,
-                    artifactHash: consequenceNudge.artifactHash,
-                    finding: consequenceNudge.reuseFinding,
-                    surfacedFindingLimit: 3,
-                    topFindings: consequenceNudge.surfacedReuseFindings,
-                },
-            },
-        }) + '\n');
-        process.exit(0);
-    }
-    if (consequenceNudge) {
-        process.stdout.write(JSON.stringify({
-            hookSpecificOutput: {
-                hookEventName: 'PreToolUse',
-                permissionDecision: 'allow',
-                reason: consequenceNudge.headline,
-                consequenceNudge: {
-                    nudgeVersion: consequenceNudge.nudgeVersion,
-                    nudgeKey: consequenceNudge.nudgeKey,
-                    severity: consequenceNudge.severity,
-                    consequenceClass: consequenceNudge.consequenceClass,
-                    operatorAction: consequenceNudge.operatorAction,
-                    reviewFocus: consequenceNudge.reviewFocus,
-                    artifactHash: consequenceNudge.artifactHash,
-                    impact: consequenceNudge.impact ? {
-                        rank: consequenceNudge.impact.rank,
-                        score: consequenceNudge.impact.score,
-                        file: consequenceNudge.impact.file,
-                        symbol: consequenceNudge.impact.symbol,
-                        summary: consequenceNudge.impact.summary,
-                        findingTypes: consequenceNudge.impact.findingTypes,
-                        findingCount: consequenceNudge.impact.findingCount,
-                        reachableProductionConsumerCount: consequenceNudge.impact.reachableProductionConsumerCount,
-                        externalProductionConsumerCount: consequenceNudge.impact.externalProductionConsumerCount,
-                        changedProductionConsumerCount: consequenceNudge.impact.changedProductionConsumerCount,
-                        productionFiles: consequenceNudge.impact.productionFiles,
-                        changedProductionFiles: consequenceNudge.impact.changedProductionFiles,
-                        sensitiveConsumerCount: consequenceNudge.impact.sensitiveConsumerCount,
-                        approvalRequiredConsumerCount: consequenceNudge.impact.approvalRequiredConsumerCount,
-                        runtimeGovernanceConsumerCount: consequenceNudge.impact.runtimeGovernanceConsumerCount,
-                        highFanout: consequenceNudge.impact.highFanout,
-                        architectureRelevant: consequenceNudge.impact.architectureRelevant,
-                        reasonCodes: consequenceNudge.impact.reasonCodes,
-                    } : null,
-                    finding: {
-                        findingType: consequenceNudge.finding.findingType,
-                        file: consequenceNudge.finding.file,
-                        symbol: consequenceNudge.finding.symbol,
-                        externalConsumerCount: consequenceNudge.finding.externalConsumerCount,
-                        externalConsumerFiles: consequenceNudge.finding.externalConsumerFiles,
-                        consumerSummary: consequenceNudge.finding.consumerSummary,
-                        reasonCodes: consequenceNudge.finding.reasonCodes,
-                    },
-                    surfacedFindingLimit: 3,
-                    topFindings: consequenceNudge.surfacedFindings.map((finding) => ({
-                        findingType: finding.findingType,
-                        file: finding.file,
-                        symbol: finding.symbol,
-                        externalConsumerCount: finding.externalConsumerCount,
-                        externalConsumerFiles: finding.externalConsumerFiles,
-                        consumerSummary: finding.consumerSummary,
-                        reasonCodes: finding.reasonCodes,
-                    })),
-                    surfacedImpactLimit: 3,
-                    topImpacts: consequenceNudge.surfacedImpacts.map((impact) => ({
-                        rank: impact.rank,
-                        score: impact.score,
-                        file: impact.file,
-                        symbol: impact.symbol,
-                        summary: impact.summary,
-                        findingTypes: impact.findingTypes,
-                        findingCount: impact.findingCount,
-                        reachableProductionConsumerCount: impact.reachableProductionConsumerCount,
-                        externalProductionConsumerCount: impact.externalProductionConsumerCount,
-                        changedProductionConsumerCount: impact.changedProductionConsumerCount,
-                        productionFiles: impact.productionFiles,
-                        changedProductionFiles: impact.changedProductionFiles,
-                        sensitiveConsumerCount: impact.sensitiveConsumerCount,
-                        approvalRequiredConsumerCount: impact.approvalRequiredConsumerCount,
-                        runtimeGovernanceConsumerCount: impact.runtimeGovernanceConsumerCount,
-                        highFanout: impact.highFanout,
-                        architectureRelevant: impact.architectureRelevant,
-                        reasonCodes: impact.reasonCodes,
-                    })),
-                },
-            },
-        }) + '\n');
-        process.exit(0);
-    }
-    // ok or warn-allowed → exit 0
+    // Every governed pre-write returns a parseable bounded decision, including a
+    // plain allow with no advisory nudge.
+    process.stdout.write(JSON.stringify({
+        hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: boundedPreWrite.permissionDecision,
+            reason: boundedPreWrite.decision === 'allow'
+                ? 'Neurcode bounded pre-write evidence permits this path.'
+                : `Neurcode bounded pre-write decision: ${boundedPreWrite.decision}.`,
+            boundedPreWrite,
+        },
+    }) + '\n');
     process.exit(0);
 }
 /** Stop — finalize the active session and emit the replay record. */
@@ -2329,11 +2404,11 @@ async function handleFinish(cmdCwd) {
             diagnostic(`agent guard supervisor stop requested (pid ${supervisorStop.state?.pid ?? 'unknown'})`);
         }
         try {
-            const brain = await (0, brain_lifecycle_1.scheduleBrainIndex)(repoRoot, { force: true });
-            diagnostic(`repository Brain refresh ${brain.state}`);
+            const brain = (0, brain_lifecycle_1.readBrainLifecycle)(repoRoot) ?? await (0, brain_lifecycle_1.inspectBrainLifecycle)(repoRoot);
+            diagnostic(`repository Brain generation retained at finish (${brain.state}); refresh remains an explicit/background lifecycle action`);
         }
         catch (brainError) {
-            diagnostic(`repository Brain refresh scheduling failed: ${brainError instanceof Error ? brainError.message : String(brainError)}`);
+            diagnostic(`repository Brain status unavailable at finish: ${brainError instanceof Error ? brainError.message : String(brainError)}`);
         }
         const blockCount = finished.events.filter((e) => e.type === 'check_block').length;
         const warnCount = finished.events.filter((e) => e.type === 'check_warn').length;

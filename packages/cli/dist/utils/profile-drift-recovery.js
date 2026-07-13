@@ -97,6 +97,10 @@ function pendingProfileDriftDecisions(session) {
             approvalRequiredGlobs: session.contract.approvalRequiredGlobs,
             approvedPaths: session.contract.approvedPaths,
             approvalGrants: session.contract.approvalGrants,
+            sessionId: session.sessionId,
+            profileHash: session.profileHash,
+            planRevision: session.contract.agentPlanRevision ?? (session.contract.agentPlan ? 1 : null),
+            brainGeneration: session.contract.brainGeneration?.generation ?? null,
             scopeMode: session.contract.scopeMode,
             localMode: session.contract.runtimeMode,
         });

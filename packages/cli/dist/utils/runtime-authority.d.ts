@@ -13,7 +13,9 @@ export interface RuntimeAuthorityRepairResult {
     restartRequired: boolean;
     nextCheck: string;
 }
-export declare function recordActivatedRuntime(repoRootInput: string, adapters: RuntimeAdapter[]): Promise<{
+export declare function recordActivatedRuntime(repoRootInput: string, adapters: RuntimeAdapter[], options?: {
+    scheduleBrain?: boolean;
+}): Promise<{
     manifestPath: string;
     manifestHash: string;
     changed: boolean;

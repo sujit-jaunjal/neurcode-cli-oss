@@ -91,6 +91,16 @@ export interface RepositoryTopologyArtifact {
         promptIncluded: false;
         pathsIncluded: true;
     };
+    /** Present when this is a session-bounded projection of an immutable profile topology. */
+    projection?: {
+        bounded: true;
+        sourceArtifactHash: string;
+        selectedFacts: number;
+        totalFacts: number | null;
+        selectedRelationships: number;
+        totalRelationships: number | null;
+        reason: 'session_relevant_projection' | 'profile_generation_reference';
+    };
 }
 export interface CompileRepositoryTopologyInput {
     paths: string[];
@@ -108,6 +118,16 @@ export declare function compileRepositoryTopology(input: CompileRepositoryTopolo
 export declare function topologyFacts(topology: RepositoryTopologyArtifact | null | undefined, kinds: TopologyFactKind[], options?: {
     deterministicOnly?: boolean;
 }): RepositoryTopologyFact[];
+/**
+ * Materialize only session-relevant topology facts. The complete authority stays
+ * in the immutable Brain/profile generation identified by sourceArtifactHash.
+ * Projection limits never change repository coverage denominators.
+ */
+export declare function projectRepositoryTopologyForSession(topology: RepositoryTopologyArtifact | null | undefined, relevantGlobs: string[], limits?: {
+    facts?: number;
+    relationships?: number;
+    brainFacts?: number;
+}): RepositoryTopologyArtifact | undefined;
 export declare function topologyHasPath(topology: RepositoryTopologyArtifact | null | undefined, pathOrGlob: string): boolean;
 export declare function topologySupportGlobs(topology: RepositoryTopologyArtifact | null | undefined, packageRoots?: string[], kinds?: TopologyFactKind[]): string[];
 export declare function topologyPackageRootsForPaths(topology: RepositoryTopologyArtifact | null | undefined, paths: string[]): string[];

@@ -616,6 +616,10 @@ async function runLocalFirstValue(options = {}) {
             approvalRequiredGlobs: contract.approvalRequiredGlobs,
             approvedPaths: contract.approvedPaths,
             approvalGrants: contract.approvalGrants ?? [],
+            sessionId,
+            profileHash: ((0, governance_runtime_1.loadSession)(repoRoot, sessionId) ?? session).profileHash,
+            planRevision: contract.agentPlanRevision ?? (contract.agentPlan ? 1 : null),
+            brainGeneration: contract.brainGeneration?.generation ?? null,
             scopeMode: 'explicit',
             localMode: 'strict',
         });

@@ -67,7 +67,7 @@ function sameActivation(existing, next) {
         && JSON.stringify(existing.integrations.map(({ activatedAt: _activatedAt, ...rest }) => rest))
             === JSON.stringify(next.integrations.map(({ activatedAt: _activatedAt, ...rest }) => rest));
 }
-async function recordActivatedRuntime(repoRootInput, adapters) {
+async function recordActivatedRuntime(repoRootInput, adapters, options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(repoRootInput);
     const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot).profile;
     const identity = (0, cli_runtime_1.collectCliRuntimeIdentity)({ bundledCliDir: (0, cli_entry_1.bundledCliDir)() });
@@ -85,7 +85,11 @@ async function recordActivatedRuntime(repoRootInput, adapters) {
     if (changed)
         (0, cli_runtime_1.writeActivatedRuntimeManifest)(repoRoot, manifest);
     writeRuntimeWiring(repoRoot, identity.entryRealPath);
-    const brain = await (0, brain_lifecycle_1.scheduleBrainIndex)(repoRoot);
+    // Session start reuses the immutable Brain generation and must remain
+    // bounded. Explicit activation/repair may schedule indexing separately.
+    const brain = options.scheduleBrain === false
+        ? (0, brain_lifecycle_1.readBrainLifecycle)(repoRoot) ?? await (0, brain_lifecycle_1.inspectBrainLifecycle)(repoRoot)
+        : await (0, brain_lifecycle_1.scheduleBrainIndex)(repoRoot);
     return {
         manifestPath: (0, cli_runtime_1.runtimeManifestPath)(repoRoot),
         manifestHash: manifest.manifestHash,

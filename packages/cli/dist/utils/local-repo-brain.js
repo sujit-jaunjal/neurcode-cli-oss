@@ -1002,20 +1002,48 @@ function evaluateRepoSymbolDuplicatePolicy(input) {
     if (policyMode === 'off') {
         return notEvaluatedSymbolPolicy(policyMode, 'repoSymbolDuplicateMode is off.');
     }
-    const artifact = readLocalRepoBrain(input.projectRoot);
-    if (!artifact) {
-        return notEvaluatedSymbolPolicy(policyMode, 'Local repo brain is missing; run neurcode brain index.');
-    }
     if ((!input.proposedSource || !input.proposedSource.trim()) &&
         (!input.proposedSymbols || input.proposedSymbols.length === 0)) {
-        return notEvaluatedSymbolPolicy(policyMode, 'No proposed source text was available from the host hook payload.', artifact);
+        return notEvaluatedSymbolPolicy(policyMode, 'No proposed source text was available from the host hook payload.');
     }
     const language = localRepoBrainLanguageFor(input.filePath);
     if (!['typescript', 'javascript', 'python'].includes(language)) {
-        return notEvaluatedSymbolPolicy(policyMode, `Unsupported language for deterministic symbol duplicate policy: ${language}.`, artifact);
+        return notEvaluatedSymbolPolicy(policyMode, `Unsupported language for deterministic symbol duplicate policy: ${language}.`);
     }
     const proposedSymbols = (input.proposedSymbols ??
         extractSymbols(input.filePath, input.proposedSource ?? '', language)).filter(policyCandidate);
+    const metadata = input.boundedPreWrite ? (0, brain_1.readRepositoryGraphMetadata)(input.projectRoot) : null;
+    const boundedSymbols = input.boundedPreWrite && metadata
+        ? [...new Map(proposedSymbols
+                .flatMap((symbol) => (0, brain_1.queryStoredRepositoryGraphNodes)(input.projectRoot, {
+                kind: 'symbol', name: symbol.name, limit: 100,
+            }))
+                .map((node) => [node.id, {
+                    name: node.name ?? '',
+                    kind: String(node.attributes.symbolKind ?? 'const'),
+                    file: node.path ?? '',
+                    line: Number(node.attributes.line ?? 1),
+                    exported: node.attributes.exported === true,
+                    local: node.attributes.local === true,
+                    normalizedSignature: null,
+                    normalizedSignatureHash: typeof node.attributes.signatureHash === 'string' ? node.attributes.signatureHash : null,
+                    signatureHash: typeof node.attributes.signatureHash === 'string' ? node.attributes.signatureHash : node.id,
+                    tokenFingerprintHash: typeof node.attributes.structuralFingerprint === 'string' ? node.attributes.structuralFingerprint : null,
+                    arity: typeof node.attributes.arity === 'number' ? node.attributes.arity : null,
+                    language: (node.language ?? 'other'),
+                }])).values()]
+        : null;
+    const artifact = input.boundedPreWrite && metadata
+        ? {
+            artifactHash: `${metadata.graphId}:${metadata.generation}`,
+            generatedAt: metadata.updatedAt,
+            freshness: null,
+            symbols: boundedSymbols ?? [],
+        }
+        : readLocalRepoBrain(input.projectRoot);
+    if (!artifact) {
+        return notEvaluatedSymbolPolicy(policyMode, 'Local repo brain is missing; run neurcode brain index.');
+    }
     if (proposedSymbols.length === 0) {
         return cleanSymbolPolicy(policyMode, artifact);
     }

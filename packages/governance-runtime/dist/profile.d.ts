@@ -38,6 +38,11 @@ export interface RepoGovernanceProfile {
     };
     /** Canonical source-free topology facts used by runtime scope compilation. */
     repositoryTopology?: RepositoryTopologyArtifact;
+    /**
+     * Content-addressed pointer to the immutable local Brain generation used by
+     * this profile. Repository-wide graph rows remain in SQLite.
+     */
+    brainGeneration?: RepoBrainGenerationReference;
     runtimeConfig: RuntimeGovernanceConfig;
     stack: {
         primaryLanguage: string;
@@ -68,6 +73,21 @@ export interface RepoGovernanceProfile {
     };
     generatedAt: string;
 }
+export interface RepoBrainGenerationReference {
+    schemaVersion: 'neurcode.brain-generation-reference.v1';
+    graphId: string;
+    generation: number;
+    repositoryFingerprint: string | null;
+    state: 'not_started' | 'discovering' | 'structural_indexing' | 'structural_ready' | 'governance_ready' | 'semantic_slice_pending' | 'semantic_slice_ready' | 'background_enrichment' | 'fully_enriched' | 'partial' | 'stale' | 'unavailable' | 'failed';
+    eligibleFiles: number;
+    indexedFiles: number;
+    structuralCoverage: number;
+    semanticCoverage: number;
+    relevantPlanCoverage: number | null;
+    semanticSliceId: string | null;
+    authorityCeiling: string;
+    sourceFree: true;
+}
 export interface ProfileInput {
     /** Result of `git ls-files` split into lines — paths relative to repo root. */
     paths: string[];
@@ -88,6 +108,8 @@ export interface ProfileInput {
         freshness: string | null;
         facts: TopologyBrainFact[];
     } | null;
+    /** Bounded immutable Brain reference; repository-wide facts remain in SQLite. */
+    brainGeneration?: RepoBrainGenerationReference | null;
     /**
      * Per-file import specifiers, read locally by the caller. When supplied, the
      * builder derives the architecture dependency graph. Source-free: only module
@@ -155,7 +177,16 @@ export interface BoundaryCheckInput {
         path: string;
         expiresAt?: string | null;
         revokedAt?: string | null;
+        sessionId?: string;
+        profileHash?: string;
+        planRevision?: number | null;
+        brainGeneration?: number | null;
     }[];
+    /** Authority context for exact approval replay containment. */
+    sessionId?: string;
+    profileHash?: string;
+    planRevision?: number | null;
+    brainGeneration?: number | null;
     /** Test hook / replay hook for deterministic expiry checks. Defaults to now. */
     checkedAt?: string;
     /**

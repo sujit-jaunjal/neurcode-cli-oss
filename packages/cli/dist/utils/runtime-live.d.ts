@@ -15,6 +15,7 @@ export interface RuntimeLiveApproval {
 export declare function publishRuntimeLiveStatus(repoRoot: string, session: GovernanceSession, options?: {
     profileFreshness?: ProfileFreshnessSignal;
     flushTimeoutMs?: number;
+    flush?: boolean;
 }): Promise<{
     ok: boolean;
     queued?: boolean;
@@ -42,14 +43,22 @@ export declare function queueRuntimeLiveApprovalAppliedAck(repoRoot: string, ses
     appliedPath: string;
     expiresAt?: string | null;
 }): void;
-export declare function applyPendingRuntimeLiveActions(repoRoot: string, sessionId: string): Promise<{
+export declare function applyPendingRuntimeLiveActions(repoRoot: string, sessionId: string, options?: {
+    fetchTimeoutMs?: number;
+    flushBefore?: boolean;
+    flushAfter?: boolean;
+}): Promise<{
     applied: number;
     revoked: number;
     scopeAmended: number;
     scopeDenied: number;
     failed: number;
 }>;
-export declare function applyPendingRuntimeLiveApprovals(repoRoot: string, sessionId: string): Promise<{
+export declare function applyPendingRuntimeLiveApprovals(repoRoot: string, sessionId: string, options?: {
+    fetchTimeoutMs?: number;
+    flushBefore?: boolean;
+    flushAfter?: boolean;
+}): Promise<{
     applied: number;
     revoked: number;
     scopeAmended: number;

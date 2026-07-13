@@ -229,10 +229,13 @@ function readFirstExisting(cwd, candidates) {
     }
     return { path: null, content: null };
 }
-function readManifestBundle(cwd, paths) {
+function readManifestBundle(cwd, paths, options = {}) {
     const manifestNames = new Set(exports.MANIFEST_CANDIDATES);
     return paths
         .filter((pathValue) => manifestNames.has((0, path_1.basename)(pathValue)))
+        .filter((pathValue) => !options.brainBacked
+        || (0, path_1.dirname)(pathValue) === '.'
+        || ['pnpm-workspace.yaml', 'lerna.json', 'nx.json', 'turbo.json', 'rush.json', 'workspace.json'].includes((0, path_1.basename)(pathValue)))
         .sort()
         .map((pathValue) => {
         try {
@@ -354,54 +357,32 @@ function readGeneratedProvenanceEvidence(repoRoot, paths, manifests) {
     }
     return Array.from(evidence.values()).sort((left, right) => left.outputPath.localeCompare(right.outputPath) || left.evidenceType.localeCompare(right.evidenceType));
 }
-function readTopologyBrainFacts(repoRoot) {
-    const graph = (0, brain_1.readRepositoryGraph)(repoRoot);
-    if (!graph)
+function readTopologyBrainReference(repoRoot) {
+    const metadata = (0, brain_1.readRepositoryGraphMetadata)(repoRoot);
+    if (!metadata)
         return null;
-    const facts = [];
-    const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
-    const graphCoverageComplete = graph.coverageAuthority?.coverageComplete === true;
-    for (const node of graph.nodes) {
-        if (!node.path)
-            continue;
-        if (node.kind === 'symbol' || node.kind === 'package' || node.kind === 'test') {
-            facts.push({
-                kind: node.kind,
-                path: node.path,
-                name: node.name,
-                parserId: node.provenance.parserId,
-                parserVersion: node.provenance.parserVersion,
-                parserDepth: node.provenance.parserDepth,
-                authority: graphCoverageComplete ? 'deterministic_structural' : 'not_evaluated',
-                enforcementEligible: graphCoverageComplete,
-                reasonCodes: graphCoverageComplete ? ['canonical_graph_node'] : ['not_evaluated_due_to_coverage'],
-            });
-        }
-    }
-    for (const edge of graph.edges) {
-        const from = nodesById.get(edge.fromId);
-        const to = nodesById.get(edge.toId);
-        if (!from?.path || !to?.path)
-            continue;
-        const kind = edge.type === 'imports'
-            ? 'import'
-            : edge.type === 'tests'
-                ? 'test'
-                : 'reference';
-        facts.push({
-            kind,
-            path: from.path,
-            relatedPath: to.path,
-            parserId: edge.provenance,
-            parserDepth: nodesById.get(edge.fromId)?.provenance.parserDepth ?? 'metadata_only',
-            authority: edge.relationshipAuthorityClass ?? 'not_evaluated',
-            enforcementEligible: edge.enforcementEligible === true,
-            reasonCodes: [...(edge.authorityReasonCodes ?? [])],
-        });
-    }
+    const authority = (0, brain_1.readProgressiveAuthority)(repoRoot);
+    const allowedStates = new Set([
+        'not_started', 'discovering', 'structural_indexing', 'structural_ready',
+        'governance_ready', 'semantic_slice_pending', 'semantic_slice_ready',
+        'background_enrichment', 'fully_enriched', 'partial', 'stale',
+        'unavailable', 'failed',
+    ]);
+    const state = allowedStates.has(authority.state) ? authority.state : 'unavailable';
     return {
-        freshness: graph.freshness.state,
-        facts,
+        schemaVersion: 'neurcode.brain-generation-reference.v1',
+        graphId: metadata.graphId,
+        generation: authority.graphGeneration ?? metadata.generation,
+        repositoryFingerprint: authority.repositoryFingerprint ?? null,
+        state: state,
+        eligibleFiles: authority.eligibleFiles,
+        indexedFiles: authority.indexedFiles,
+        structuralCoverage: authority.structuralCoverage,
+        semanticCoverage: authority.semanticCoverage,
+        relevantPlanCoverage: authority.relevantPlanCoverage,
+        semanticSliceId: authority.semanticSliceId,
+        authorityCeiling: authority.authorityCeiling,
+        sourceFree: true,
     };
 }
 function prefixCodeownersContent(content, baseDir) {
@@ -653,6 +634,7 @@ function readModuleImports(repoRoot, paths) {
     return records;
 }
 exports.PROFILE_STALENESS_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_INLINE_PROFILE_BUILD_CACHE_BYTES = 256 * 1024;
 function buildCurrentGovernanceProfile(repoRoot, options = {}) {
     const root = resolveRepoRoot(repoRoot);
     const stateFingerprint = profileCacheStateFingerprint(root);
@@ -667,11 +649,18 @@ function buildCurrentGovernanceProfile(repoRoot, options = {}) {
     const paths = gitLsFiles(root);
     const codeowners = readCodeownersBundle(root, paths);
     const manifest = readFirstExisting(root, exports.MANIFEST_CANDIDATES);
-    const manifests = readManifestBundle(root, paths);
+    const brainGeneration = readTopologyBrainReference(root);
+    const manifests = readManifestBundle(root, paths, { brainBacked: Boolean(brainGeneration) });
     const governance = readRuntimeGovernanceConfig(root);
-    const imports = readModuleImports(root, paths);
-    const brain = readTopologyBrainFacts(root);
-    const generatedEvidence = readGeneratedProvenanceEvidence(root, paths, manifests);
+    // Repository-wide structural rows stay in the immutable SQLite generation.
+    // The legacy import graph is retained only for repositories without Brain.
+    const imports = brainGeneration ? null : readModuleImports(root, paths);
+    // A Brain-backed profile keeps repository-wide generated provenance in the
+    // immutable graph generation. Path-specific pre-write checks materialize the
+    // relevant facts; startup does not reread thousands of source headers.
+    const generatedEvidence = brainGeneration
+        ? []
+        : readGeneratedProvenanceEvidence(root, paths, manifests);
     const profile = (0, governance_runtime_1.buildRepoGovernanceProfile)({
         paths,
         codeownersContent: codeowners.content,
@@ -681,7 +670,8 @@ function buildCurrentGovernanceProfile(repoRoot, options = {}) {
         source: 'local',
         runtimeConfig: governance.config,
         imports,
-        brain,
+        brain: null,
+        brainGeneration,
         generatedEvidence,
     });
     if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
@@ -698,7 +688,9 @@ function readProfileBuildFileCache(repoRoot, stateFingerprint) {
         return null;
     try {
         const parsed = JSON.parse((0, fs_1.readFileSync)(path, 'utf8'));
-        if (!parsed.profile || stateFingerprint === null || parsed.stateFingerprint === null)
+        if (parsed.schemaVersion !== 'neurcode.profile-build-cache.v1.5.1')
+            return null;
+        if (stateFingerprint === null || parsed.stateFingerprint === null)
             return null;
         // The repository-state fingerprint, not wall-clock age, is the cache's
         // correctness boundary. Expiring an unchanged cache forced large repos to
@@ -708,7 +700,12 @@ function readProfileBuildFileCache(repoRoot, stateFingerprint) {
         // persisted profile for as long as the source-free fingerprint matches.
         if (parsed.stateFingerprint !== stateFingerprint)
             return null;
-        return parsed.profile;
+        if (parsed.profile)
+            return parsed.profile;
+        if (parsed.profileRef?.path !== '.neurcode/profile.json' || !parsed.profileRef.profileHash)
+            return null;
+        const referenced = readGovernanceProfile(repoRoot).profile;
+        return referenced?.profileHash === parsed.profileRef.profileHash ? referenced : null;
     }
     catch {
         return null;
@@ -717,12 +714,31 @@ function readProfileBuildFileCache(repoRoot, stateFingerprint) {
 function writeProfileBuildFileCache(repoRoot, profile, stateFingerprint) {
     const path = profileBuildCachePath(repoRoot);
     (0, fs_1.mkdirSync)((0, path_1.dirname)(path), { recursive: true });
-    (0, fs_1.writeFileSync)(path, JSON.stringify({
+    const persisted = readGovernanceProfile(repoRoot).profile;
+    const common = {
+        schemaVersion: 'neurcode.profile-build-cache.v1.5.1',
         expiresAt: new Date(Date.now() + exports.PROFILE_STALENESS_CACHE_TTL_MS).toISOString(),
         profileHash: profile.profileHash,
         stateFingerprint,
-        profile,
-    }, null, 2) + '\n', 'utf8');
+    };
+    if (persisted?.profileHash === profile.profileHash) {
+        atomicJsonWrite(path, {
+            ...common,
+            profileRef: {
+                path: '.neurcode/profile.json',
+                profileHash: profile.profileHash,
+            },
+        });
+        return;
+    }
+    // Direct callers can build before the authoritative profile projection has
+    // been persisted. Cache only a bounded inline projection in that case;
+    // ensureFreshGovernanceProfile rewrites it to the content-addressed pointer
+    // immediately after the authoritative write.
+    const inlineBytes = Buffer.byteLength(JSON.stringify(profile), 'utf8');
+    if (inlineBytes <= MAX_INLINE_PROFILE_BUILD_CACHE_BYTES) {
+        atomicJsonWrite(path, { ...common, profile });
+    }
 }
 function clearProfileBuildFileCache(repoRoot) {
     const path = profileBuildCachePath(resolveRepoRoot(repoRoot));
@@ -743,6 +759,9 @@ function readGovernanceProfile(repoRoot) {
     if (!(0, fs_1.existsSync)(path))
         return { profile: null, path };
     try {
+        if ((0, fs_1.statSync)(path).size > 32 * 1024 * 1024) {
+            return { profile: null, path, error: 'legacy profile exceeds bounded V1.5 projection size' };
+        }
         return { profile: JSON.parse((0, fs_1.readFileSync)(path, 'utf8')), path };
     }
     catch (error) {
@@ -755,9 +774,46 @@ function readGovernanceProfile(repoRoot) {
 }
 function writeGovernanceProfile(repoRoot, profile) {
     const path = profilePath(repoRoot);
-    (0, fs_1.mkdirSync)((0, path_1.dirname)(path), { recursive: true });
-    (0, fs_1.writeFileSync)(path, JSON.stringify(profile, null, 2) + '\n', 'utf8');
+    atomicJsonWrite(path, profile);
     return path;
+}
+function atomicJsonWrite(path, value) {
+    (0, fs_1.mkdirSync)((0, path_1.dirname)(path), { recursive: true });
+    const temporaryPath = `${path}.tmp.${process.pid}.${Date.now()}`;
+    let descriptor = null;
+    try {
+        descriptor = (0, fs_1.openSync)(temporaryPath, 'w', 0o600);
+        (0, fs_1.writeFileSync)(descriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+        (0, fs_1.fsyncSync)(descriptor);
+        (0, fs_1.closeSync)(descriptor);
+        descriptor = null;
+        (0, fs_1.renameSync)(temporaryPath, path);
+        try {
+            const directory = (0, fs_1.openSync)((0, path_1.dirname)(path), 'r');
+            try {
+                (0, fs_1.fsyncSync)(directory);
+            }
+            finally {
+                (0, fs_1.closeSync)(directory);
+            }
+        }
+        catch {
+            // Directory fsync is unavailable on some platforms.
+        }
+    }
+    catch (error) {
+        if (descriptor !== null) {
+            try {
+                (0, fs_1.closeSync)(descriptor);
+            }
+            catch { /* best effort */ }
+        }
+        try {
+            (0, fs_1.rmSync)(temporaryPath, { force: true });
+        }
+        catch { /* best effort */ }
+        throw error;
+    }
 }
 function topologyHash(profile) {
     const maybe = profile;
@@ -855,46 +911,26 @@ function profileCacheStateFingerprint(root) {
             ':(exclude).neurcode-admission/**',
             ':(exclude).cursor/rules/neurcode-*',
         ];
-        const status = (0, child_process_1.execFileSync)('git', [
-            'status', '--porcelain=v2', '-z', '--untracked-files=all',
-            ...internalPathExclusions,
-        ], {
+        const stagedTree = (0, child_process_1.execFileSync)('git', ['write-tree'], {
             cwd: root,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'ignore'],
-            maxBuffer: 8 * 1024 * 1024,
+            maxBuffer: 1024 * 1024,
             timeout: 5_000,
-        });
-        const stagedSummary = (0, child_process_1.execFileSync)('git', [
-            'diff', '--cached', '--no-ext-diff', '--numstat', '-z',
-            ...internalPathExclusions,
+        }).trim();
+        const modifiedPaths = (0, child_process_1.execFileSync)('git', [
+            'diff', '--no-ext-diff', '--name-only', '-z', ...internalPathExclusions,
         ], {
-            cwd: root,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore'],
-            maxBuffer: 4 * 1024 * 1024,
-            timeout: 5_000,
-        });
-        const worktreeSummary = (0, child_process_1.execFileSync)('git', [
-            'diff', '--no-ext-diff', '--numstat', '-z',
-            ...internalPathExclusions,
+            cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+            maxBuffer: 8 * 1024 * 1024, timeout: 5_000,
+        }).split('\0').filter(Boolean);
+        const untrackedPaths = (0, child_process_1.execFileSync)('git', [
+            'ls-files', '--others', '--exclude-standard', '-z', ...internalPathExclusions,
         ], {
-            cwd: root,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore'],
-            maxBuffer: 4 * 1024 * 1024,
-            timeout: 5_000,
-        });
-        const changedPaths = (0, child_process_1.execFileSync)('git', [
-            'ls-files', '-m', '-o', '--exclude-standard', '-z',
-            ...internalPathExclusions,
-        ], {
-            cwd: root,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore'],
-            maxBuffer: 8 * 1024 * 1024,
-            timeout: 5_000,
-        }).split('\0').filter(Boolean).sort();
+            cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+            maxBuffer: 8 * 1024 * 1024, timeout: 5_000,
+        }).split('\0').filter(Boolean);
+        const changedPaths = [...new Set([...modifiedPaths, ...untrackedPaths])].sort();
         // Only dirty/untracked paths are content-hashed. This preserves exact
         // invalidation (including same-size edits with restored mtimes) without
         // rescanning every tracked file or following repository symlinks.
@@ -902,7 +938,7 @@ function profileCacheStateFingerprint(root) {
             .map((path) => changedPathContentFingerprint(root, path))
             .join('\n');
         return (0, crypto_1.createHash)('sha256')
-            .update(`${head}\n${status}\n${stagedSummary}\n${worktreeSummary}\n${workingContent}`)
+            .update(`${head}\n${stagedTree}\n${workingContent}`)
             .digest('hex')
             .slice(0, 24);
     }
@@ -928,6 +964,29 @@ function getProfileStaleness(repoRoot, options = {}) {
     const now = Date.now();
     const stateFingerprint = profileCacheStateFingerprint(root);
     lastProfileCacheHit = false;
+    // V1.5 fast path: the small cache envelope is keyed by the exact Git state
+    // fingerprint and points at one bounded profile. Reuse that single parsed
+    // object instead of materializing both "cached" and "current" full graphs.
+    if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
+        const referenced = readProfileBuildFileCache(root, stateFingerprint);
+        if (referenced) {
+            lastProfileCacheHit = true;
+            const result = {
+                status: 'fresh',
+                profilePath: profilePath(root),
+                cachedProfile: referenced,
+                currentProfile: referenced,
+                reasons: [],
+                profileCacheHit: true,
+            };
+            profileStalenessCache.set(root, {
+                expiresAt: now + exports.PROFILE_STALENESS_CACHE_TTL_MS,
+                stateFingerprint,
+                result,
+            });
+            return result;
+        }
+    }
     if (options.bypassCache !== true && process.env.NEURCODE_PROFILE_CACHE !== '0') {
         const cached = profileStalenessCache.get(root);
         if (cached &&
@@ -1007,6 +1066,7 @@ function ensureFreshGovernanceProfile(repoRoot, options = {}) {
         : staleness.cachedProfile ?? staleness.currentProfile;
     if (shouldRefresh) {
         writeGovernanceProfile(repoRoot, profile);
+        writeProfileBuildFileCache(resolveRepoRoot(repoRoot), profile, profileCacheStateFingerprint(resolveRepoRoot(repoRoot)));
         profileStalenessCache.delete(resolveRepoRoot(repoRoot));
     }
     return {

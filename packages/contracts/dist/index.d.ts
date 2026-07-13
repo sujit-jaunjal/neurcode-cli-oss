@@ -229,4 +229,5 @@ export declare function parseCliShipResumeJsonPayload(value: unknown, label?: st
 export declare function parseCliShipAttestationVerifyJsonPayload(value: unknown, label?: string): CliShipAttestationVerifyJsonPayload;
 export declare function parseCliCompatJsonPayload(value: unknown, label?: string): CliCompatJsonPayload;
 export * from './typescript-governance-quality-v14';
+export * from './typescript-governance-quality-v15';
 //# sourceMappingURL=index.d.ts.map

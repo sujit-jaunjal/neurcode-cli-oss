@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.REPOSITORY_TOPOLOGY_SCHEMA_VERSION = void 0;
 exports.compileRepositoryTopology = compileRepositoryTopology;
 exports.topologyFacts = topologyFacts;
+exports.projectRepositoryTopologyForSession = projectRepositoryTopologyForSession;
 exports.topologyHasPath = topologyHasPath;
 exports.topologySupportGlobs = topologySupportGlobs;
 exports.topologyPackageRootsForPaths = topologyPackageRootsForPaths;
@@ -705,6 +706,70 @@ function topologyFacts(topology, kinds, options = {}) {
     const kindSet = new Set(kinds);
     return topology.facts.filter((fact) => kindSet.has(fact.kind)
         && (!options.deterministicOnly || fact.evidence.authority === 'deterministic'));
+}
+/**
+ * Materialize only session-relevant topology facts. The complete authority stays
+ * in the immutable Brain/profile generation identified by sourceArtifactHash.
+ * Projection limits never change repository coverage denominators.
+ */
+function projectRepositoryTopologyForSession(topology, relevantGlobs, limits = {}) {
+    if (!topology)
+        return undefined;
+    const factLimit = Math.max(32, Math.min(1_000, limits.facts ?? 512));
+    const relationshipLimit = Math.max(16, Math.min(1_000, limits.relationships ?? 512));
+    const brainFactLimit = Math.max(0, Math.min(500, limits.brainFacts ?? 200));
+    const matchers = relevantGlobs.map((glob) => {
+        const prefix = glob.replace(/\/\*\*$/, '').replace(/\/\*$/, '');
+        const matcher = /[*?]/.test(glob) ? micromatch_1.default.matcher(glob, { dot: true }) : null;
+        return (pathValue) => pathValue === prefix || pathValue.startsWith(`${prefix}/`) || matcher?.(pathValue) === true;
+    });
+    const relevant = (pathValue) => matchers.some((matcher) => matcher(pathValue));
+    const priorityKinds = new Set([
+        'repository-root', 'workspace-root', 'package-root', 'protected-boundary',
+        'owner-boundary', 'migration', 'generated-output', 'schema', 'api-contract',
+    ]);
+    const facts = topology.facts
+        .map((fact) => {
+        const isRelevant = relevant(fact.path);
+        return {
+            fact,
+            isRelevant,
+            score: (isRelevant ? 4 : 0) + (priorityKinds.has(fact.kind) ? 2 : 0) + (fact.evidence.authority === 'deterministic' ? 1 : 0),
+        };
+    })
+        .filter(({ fact, isRelevant }) => isRelevant || priorityKinds.has(fact.kind))
+        .sort((left, right) => right.score - left.score || left.fact.path.localeCompare(right.fact.path))
+        .slice(0, factLimit)
+        .map(({ fact }) => fact)
+        .sort((left, right) => left.kind.localeCompare(right.kind) || left.path.localeCompare(right.path));
+    const selectedPaths = new Set(facts.map((fact) => fact.path));
+    const relationships = topology.relationships
+        .filter((relationship) => relevant(relationship.from) || relevant(relationship.to) || selectedPaths.has(relationship.from) || selectedPaths.has(relationship.to))
+        .slice(0, relationshipLimit);
+    const brainFacts = topology.brain.facts
+        .filter((fact) => relevant(fact.path) || (fact.relatedPath ? relevant(fact.relatedPath) : false))
+        .slice(0, brainFactLimit);
+    const projection = {
+        bounded: true,
+        sourceArtifactHash: topology.artifactHash,
+        selectedFacts: facts.length,
+        totalFacts: topology.facts.length,
+        selectedRelationships: relationships.length,
+        totalRelationships: topology.relationships.length,
+        reason: 'session_relevant_projection',
+    };
+    return {
+        ...topology,
+        artifactHash: stableHash({ sourceArtifactHash: topology.artifactHash, facts, relationships, brainFacts, projection }),
+        facts,
+        relationships,
+        brain: { ...topology.brain, factCount: brainFacts.length, facts: brainFacts },
+        limitations: [...new Set([
+                ...topology.limitations,
+                'Session topology is a bounded relevant projection; complete authority remains in the referenced immutable profile and Brain generation.',
+            ])],
+        projection,
+    };
 }
 function topologyHasPath(topology, pathOrGlob) {
     if (!topology)

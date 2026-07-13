@@ -50,7 +50,17 @@ function readPolicyArtifact(repoRoot, inputPath) {
 function activeApprovals(input) {
     const nowMs = Date.parse(input.now);
     const grants = (input.approvalGrants ?? []).filter((grant) => {
+        if (/[*?]/.test(grant.path))
+            return false;
         if (grant.revokedAt)
+            return false;
+        if (input.sessionId && grant.sessionId !== input.sessionId)
+            return false;
+        if (input.profileHash && grant.profileHash !== input.profileHash)
+            return false;
+        if (input.planRevision !== undefined && grant.planRevision !== input.planRevision)
+            return false;
+        if (input.brainGeneration !== undefined && grant.brainGeneration !== input.brainGeneration)
             return false;
         if (!grant.expiresAt)
             return true;
@@ -64,7 +74,9 @@ function activeApprovals(input) {
             approvedBy: grant.approvedBy || 'session-approval',
         }));
     }
-    return (input.approvedPaths ?? []).map((path) => ({
+    if (input.sessionId || input.profileHash || input.planRevision !== undefined || input.brainGeneration !== undefined)
+        return [];
+    return (input.approvedPaths ?? []).filter((path) => !/[*?]/.test(path)).map((path) => ({
         path,
         owners: [],
         approvedBy: 'session-approval',
@@ -73,13 +85,19 @@ function activeApprovals(input) {
 async function evaluateLocalRepoIntelligenceV2(input) {
     const generatedAt = input.generatedAt ?? new Date().toISOString();
     const policy = readPolicyArtifact(input.repoRoot, input.policyPath);
-    let graph = (0, brain_1.readRepositoryGraph)(input.repoRoot);
-    const freshness = graph
-        ? await (0, brain_1.repositoryGraphStatus)(input.repoRoot)
-        : missingFreshness('graph_missing');
+    const metadata = (0, brain_1.readRepositoryGraphMetadata)(input.repoRoot);
+    let graph = input.boundedPreWrite ? null : (0, brain_1.readRepositoryGraph)(input.repoRoot);
+    // Session startup already binds the immutable graph generation and current
+    // repository fingerprint. A bounded pre-write consumes that small persisted
+    // snapshot; it must not run another repository-wide Git/graph status pass.
+    const freshness = input.boundedPreWrite && metadata
+        ? metadata.freshness
+        : graph || metadata
+            ? await (0, brain_1.repositoryGraphStatus)(input.repoRoot)
+            : missingFreshness('graph_missing');
     if (graph)
         graph = { ...graph, freshness };
-    const evaluation = policy.artifact
+    const evaluation = policy.artifact && !input.boundedPreWrite
         ? (0, policy_engine_1.evaluateStructuralPolicies)({
             graph,
             change: input.change,
@@ -87,10 +105,14 @@ async function evaluateLocalRepoIntelligenceV2(input) {
             approvals: input.approvals ?? activeApprovals({
                 approvedPaths: input.approvedPaths,
                 approvalGrants: input.approvalGrants,
+                sessionId: input.sessionId,
+                profileHash: input.profileHash,
+                planRevision: input.planRevision,
+                brainGeneration: input.brainGeneration,
                 now: generatedAt,
             }),
         })
-        : notEvaluated(freshness, []);
+        : notEvaluated(freshness, policy.artifact?.compilation.compiled.map((rule) => rule.ruleId) ?? []);
     const advisory = input.includeAdvisory !== false && graph && graph.freshness.state === 'fresh'
         ? (await (0, brain_1.runSemanticAdvisory)({
             repoRoot: input.repoRoot,
@@ -107,8 +129,8 @@ async function evaluateLocalRepoIntelligenceV2(input) {
         repository: input.change.repository.repoId,
         target: input.change.target,
         contentHash: input.change.content.contentHash,
-        graphId: graph?.graphId ?? null,
-        graphGeneration: graph?.generation ?? null,
+        graphId: graph?.graphId ?? metadata?.graphId ?? null,
+        graphGeneration: graph?.generation ?? metadata?.generation ?? null,
         evaluatedRuleIds: evaluation.evaluatedRuleIds,
         notEvaluatedRuleIds: evaluation.notEvaluatedRuleIds,
         findingIds: evaluation.findings.map((finding) => finding.findingId),
@@ -125,8 +147,9 @@ async function evaluateLocalRepoIntelligenceV2(input) {
         .includes(input.change.host.capability);
     const deterministicEnforcementEligible = deterministicEvidenceEligible && enforcementCapable;
     const enforcementIneligibilityReasons = [
-        ...(!graph ? ['graph_missing'] : []),
-        ...(graph && !completeGraph ? ['graph_not_complete'] : []),
+        ...(!graph && !metadata ? ['graph_missing'] : []),
+        ...((graph || metadata) && !completeGraph ? ['graph_not_complete'] : []),
+        ...(input.boundedPreWrite && policy.artifact ? ['bounded_prewrite_policy_projection_unavailable'] : []),
         ...(evaluation.truth !== 'deterministic' ? ['policy_not_deterministically_evaluated'] : []),
         ...(evaluation.notEvaluatedRuleIds.length > 0 ? ['policy_rules_not_evaluated'] : []),
         ...(!enforcementCapable ? ['host_not_enforcement_capable'] : []),
@@ -139,22 +162,22 @@ async function evaluateLocalRepoIntelligenceV2(input) {
         verdict: evaluation.verdict,
         enforcement: input.change.host,
         graph: {
-            graphId: graph?.graphId ?? null,
+            graphId: graph?.graphId ?? metadata?.graphId ?? null,
             schemaVersion: graph?.schemaVersion ?? null,
             canonicalModel: 'repository_graph_v2',
-            storageSchemaVersion: graph?.storage.schemaVersion ?? null,
+            storageSchemaVersion: graph?.storage.schemaVersion ?? (metadata ? 4 : null),
             freshness: evaluation.graphFreshness,
-            lastSuccessfulIndexAt: graph?.updatedAt ?? null,
-            lastAttemptedIndexAt: graph?.updatedAt ?? null,
-            unsupportedPercent: graph?.coverage.unsupportedPercent ?? null,
-            coverage: graph ? {
-                filesSeen: graph.coverage.filesSeen,
-                filesIndexed: graph.coverage.filesIndexed,
-                filesAnalyzed: graph.coverage.filesAnalyzed ?? 0,
-                filesSkipped: graph.coverage.filesSkipped ?? 0,
-                filesUnsupported: graph.coverage.filesUnsupported,
-                filesDegraded: graph.coverage.filesDegraded ?? 0,
-                filesFailed: graph.coverage.filesFailed ?? 0,
+            lastSuccessfulIndexAt: graph?.updatedAt ?? metadata?.updatedAt ?? null,
+            lastAttemptedIndexAt: graph?.updatedAt ?? metadata?.updatedAt ?? null,
+            unsupportedPercent: graph?.coverage.unsupportedPercent ?? metadata?.coverage.unsupportedPercent ?? null,
+            coverage: graph || metadata ? {
+                filesSeen: graph?.coverage.filesSeen ?? metadata.coverage.filesSeen,
+                filesIndexed: graph?.coverage.filesIndexed ?? metadata.coverage.filesIndexed,
+                filesAnalyzed: graph?.coverage.filesAnalyzed ?? metadata.coverage.filesAnalyzed ?? 0,
+                filesSkipped: graph?.coverage.filesSkipped ?? metadata.coverage.filesSkipped ?? 0,
+                filesUnsupported: graph?.coverage.filesUnsupported ?? metadata.coverage.filesUnsupported,
+                filesDegraded: graph?.coverage.filesDegraded ?? metadata.coverage.filesDegraded ?? 0,
+                filesFailed: graph?.coverage.filesFailed ?? metadata.coverage.filesFailed ?? 0,
             } : null,
             deterministicEvidenceEligible,
             deterministicEnforcementEligible,
@@ -191,10 +214,10 @@ async function evaluateLocalRepoIntelligenceV2(input) {
                 ownershipZoneCount: graph.nodes.filter((node) => node.kind === 'ownership_zone').length,
                 sensitiveSurfaceCount: graph.nodes.filter((node) => node.kind === 'sensitive_surface').length,
             } : undefined,
-            coverageAuthority: graph?.coverageAuthority ?? null,
-            relationshipAuthority: graph?.coverageAuthority ? {
-                impactAuthority: graph.coverageAuthority.impactAuthority,
-                reasonCodes: [...graph.coverageAuthority.reasonCodes].sort(),
+            coverageAuthority: graph?.coverageAuthority ?? metadata?.coverageAuthority ?? null,
+            relationshipAuthority: (graph?.coverageAuthority ?? metadata?.coverageAuthority) ? {
+                impactAuthority: (graph?.coverageAuthority ?? metadata.coverageAuthority).impactAuthority,
+                reasonCodes: [...(graph?.coverageAuthority ?? metadata.coverageAuthority).reasonCodes].sort(),
             } : undefined,
         },
         policy: {
