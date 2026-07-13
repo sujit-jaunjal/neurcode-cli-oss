@@ -66,7 +66,7 @@ const TOOL_CATALOG = [
     },
     {
         tool: 'codex',
-        adapter: 'codex-mcp',
+        adapter: 'codex-hooks',
         displayName: 'Codex',
         setup: {
             install: 'neurcode agent bootstrap codex',
@@ -75,8 +75,9 @@ const TOOL_CATALOG = [
             repair: 'neurcode runtime repair',
         },
         knownWedges: [
-            'Cooperative mode: the host cannot hard-deny writes; governance applies when Codex calls the runtime.',
-            'Edits made outside the runtime adapter are detected and reported, not prevented.',
+            'Trusted project hooks can deny intercepted apply_patch, simple Bash, and MCP calls before write.',
+            'Codex documents hooks as a guardrail, not a complete enforcement boundary; unified execution and equivalent tool paths may bypass it.',
+            'Use `/hooks` to review and trust the project hook. Disabled or untrusted hooks provide no automatic interception.',
         ],
         versionComponents: ['cli'],
     },

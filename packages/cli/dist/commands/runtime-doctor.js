@@ -472,7 +472,7 @@ function runtimeDoctorCommand(options = {}) {
                     : 'Use cooperative `neurcode runtime-adapter event` calls before edits; this host is not a hard pre-write blocker.'
             : undefined,
     });
-    const codexCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('codex-mcp');
+    const codexCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('codex-hooks');
     const cursorCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('cursor-mcp');
     const vscodeCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('vscode-extension');
     const actionCapability = (0, governance_runtime_1.getAgentRuntimeAdapterCapability)('github-action');
@@ -485,8 +485,10 @@ function runtimeDoctorCommand(options = {}) {
                 : 'warn'
             : 'skip',
         message: activeAdapter === 'codex-mcp' || activeAdapter === 'cursor-mcp'
-            ? `${activeAdapter} is active. Control level: ${compatibilityModeLabel((activeAdapter === 'codex-mcp' ? codexCapability : cursorCapability).compatibilityMode)}; enforceable: ${(activeAdapter === 'codex-mcp' ? codexCapability : cursorCapability).enforceable.join('; ')}.`
-            : 'Codex and Cursor are compatibility modes: supervised CLI/MCP workflow plus admission/evidence path, not Claude-style host hooks.',
+            ? activeAdapter === 'codex-mcp'
+                ? `Codex uses the MCP session contract plus the installed supported-tool PreToolUse guardrail. Enforceable when intercepted: ${codexCapability.enforceable.join('; ')}. Limitation: ${codexCapability.advisoryOnly.join('; ')}.`
+                : `${activeAdapter} is active. Control level: ${compatibilityModeLabel(cursorCapability.compatibilityMode)}; enforceable: ${cursorCapability.enforceable.join('; ')}.`
+            : 'Codex can use a supported-tool project-hook guardrail plus MCP; Cursor remains cooperative plus supervisor evidence.',
         recommendation: activeAdapter === 'codex-mcp' || activeAdapter === 'cursor-mcp'
             ? supervisor?.effectiveStatus === 'running'
                 ? 'Keep the supervisor running until finish, then export runtime admission.'

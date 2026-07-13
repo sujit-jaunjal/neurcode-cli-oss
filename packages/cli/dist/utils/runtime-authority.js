@@ -17,6 +17,7 @@ const TARGETS = [
     { adapter: 'cli', enforcementLevel: 'cooperative' },
     { adapter: 'claude-code-hooks', enforcementLevel: 'hard_hook' },
     { adapter: 'copilot-hooks', enforcementLevel: 'hard_hook' },
+    { adapter: 'codex-hooks', enforcementLevel: 'hard_hook' },
     { adapter: 'codex-mcp', enforcementLevel: 'cooperative' },
     { adapter: 'cursor-mcp', enforcementLevel: 'cooperative' },
     { adapter: 'generic-mcp', enforcementLevel: 'cooperative' },
@@ -53,7 +54,7 @@ function integrationsForCurrentRuntime(adapters) {
         absoluteEntrypoint: identity.entryRealPath,
         buildHash: identity.buildFingerprint,
         installationSource: identity.source === 'workspace' ? 'workspace_build' : identity.source === 'packaged' ? 'packaged_artifact' : 'registry',
-        machinePinned: target.adapter === 'claude-code-hooks' || target.adapter === 'copilot-hooks',
+        machinePinned: target.adapter === 'claude-code-hooks' || target.adapter === 'copilot-hooks' || target.adapter === 'codex-hooks',
     }));
 }
 function sameActivation(existing, next) {

@@ -50,6 +50,7 @@ function resolveOnboardAgent(value) {
 const ADAPTER_AGENT = {
     'claude-code-hooks': 'claude',
     'cursor-mcp': 'cursor',
+    'codex-hooks': 'codex',
     'codex-mcp': 'codex',
     'copilot-hooks': 'copilot',
     'vscode-extension': 'vscode',

@@ -1,4 +1,4 @@
-import { type FirstValueActivationProofPayload } from '@neurcode-ai/contracts';
+import { type FirstValueActivationProofPayload, type FirstValueActivationProofLocalPosture, type FirstValueActivationProofStage } from '@neurcode-ai/contracts';
 export interface QueuedFirstValueActivationProof {
     proof: FirstValueActivationProofPayload;
     orgId?: string | null;
@@ -24,6 +24,16 @@ export interface FlushFirstValueActivationProofResult {
     reasonCodes: string[];
 }
 export declare function firstValueActivationProofQueuePath(): string;
+export declare function buildBoundActivationProof(input: {
+    projectId: string;
+    repoId?: string | null;
+    stage: FirstValueActivationProofStage;
+    agentTarget?: string | null;
+    localPosture?: FirstValueActivationProofLocalPosture | null;
+    commandFamily?: string;
+    reasonCode?: string;
+    timestamp?: string;
+}): FirstValueActivationProofPayload;
 export declare function buildRepoConnectActivationProof(input: {
     projectId: string;
     commandFamily?: string;

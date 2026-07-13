@@ -1,210 +1,136 @@
 "use strict";
 /**
- * Canonical account-to-first-evidence activation journey.
+ * Canonical account-to-verified-evidence activation journey V2.
  *
- * This read model is intentionally evidence-derived. Clients may select an
- * agent or repository, but they cannot mark a stage complete. Completion is
- * built from durable account, credential, repository, Brain, runtime-session,
- * and evidence facts owned by the API.
+ * Clients may choose a workspace, a locally paired repository, and a host.
+ * They cannot mark any stage complete. Every completion is derived from
+ * durable backend authority scoped to user + workspace + repository + host.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ACTIVATION_JOURNEY_STAGE_IDS = exports.ACTIVATION_JOURNEY_SCHEMA_VERSION = void 0;
+exports.getActivationHostCapability = getActivationHostCapability;
+exports.listActivationHostCapabilities = listActivationHostCapabilities;
 exports.activationSessionCommand = activationSessionCommand;
 exports.buildActivationJourney = buildActivationJourney;
-exports.ACTIVATION_JOURNEY_SCHEMA_VERSION = 'neurcode.activation-journey.v1';
+exports.ACTIVATION_JOURNEY_SCHEMA_VERSION = 'neurcode.activation-journey.v2';
 exports.ACTIVATION_JOURNEY_STAGE_IDS = [
-    'account_onboarded',
-    'cli_authenticated',
-    'agent_selected',
-    'repository_connected',
-    'brain_ready',
-    'runtime_active',
-    'first_governed_session',
-    'evidence_available',
+    'account_ready',
+    'workspace_selected',
+    'local_repo_paired',
+    'host_selected',
+    'host_configured',
+    'brain_proof_synced',
+    'session_runtime_active',
+    'first_governed_action_observed',
+    'evidence_verified',
 ];
+const HOST_CAPABILITIES = {
+    claude: {
+        id: 'claude', label: 'Claude Code', adapter: 'claude-code-hooks',
+        automaticPreWriteInterception: true, interception: 'complete_prewrite_boundary',
+        governedAction: 'Claude Edit, Write, MultiEdit, and shell write tool calls covered by installed lifecycle hooks.',
+        evidenceLevel: 'host_enforced',
+        limitation: 'Hard denial applies only while the installed Claude Code hooks are enabled and healthy.',
+        setupCommand: 'neurcode activate claude --dir <repository-path>',
+        repairCommand: 'neurcode activate claude --dir <repository-path> --force',
+    },
+    codex: {
+        id: 'codex', label: 'Codex', adapter: 'codex-hooks',
+        automaticPreWriteInterception: true, interception: 'supported_tool_prewrite_guardrail',
+        governedAction: 'Codex PreToolUse calls for apply_patch, simple Bash, and MCP tools covered by the trusted repository hook.',
+        evidenceLevel: 'host_guardrail',
+        limitation: 'Codex documents PreToolUse as a guardrail, not a complete boundary: unified execution and equivalent tool paths are not fully intercepted.',
+        setupCommand: 'neurcode agent bootstrap codex --dir <repository-path>',
+        repairCommand: 'neurcode agent bootstrap codex --dir <repository-path>',
+    },
+    copilot: {
+        id: 'copilot', label: 'GitHub Copilot', adapter: 'copilot-hooks',
+        automaticPreWriteInterception: true, interception: 'host_dependent_prewrite_hook',
+        governedAction: 'Copilot Agent Mode tool calls exposed through repository lifecycle hooks.',
+        evidenceLevel: 'host_dependent',
+        limitation: 'Pre-write denial exists only in Copilot hosts and versions that discover and honor repository hooks.',
+        setupCommand: 'neurcode activate copilot --dir <repository-path>',
+        repairCommand: 'neurcode activate copilot --dir <repository-path> --force',
+    },
+    cursor: {
+        id: 'cursor', label: 'Cursor', adapter: 'cursor-mcp',
+        automaticPreWriteInterception: false, interception: 'cooperative_prewrite',
+        governedAction: 'An edit.before call made through Neurcode MCP, plus supervisor detection of unverified writes.',
+        evidenceLevel: 'cooperative',
+        limitation: 'Cursor can write without calling MCP; Neurcode cannot claim host-level automatic denial.',
+        setupCommand: 'neurcode cursor onboard --strict',
+        repairCommand: 'neurcode cursor onboard --strict',
+    },
+    vscode: {
+        id: 'vscode', label: 'VS Code', adapter: 'vscode-extension',
+        automaticPreWriteInterception: false, interception: 'post_write_observation',
+        governedAction: 'Runtime companion visibility and source-free post-write evidence.',
+        evidenceLevel: 'observed',
+        limitation: 'The extension does not own Copilot or another agent host write boundary.',
+        setupCommand: 'neurcode agent bootstrap vscode --dir <repository-path>',
+        repairCommand: 'neurcode agent bootstrap vscode --dir <repository-path>',
+    },
+    action: {
+        id: 'action', label: 'GitHub Action', adapter: 'github-action',
+        automaticPreWriteInterception: false, interception: 'ci_backstop',
+        governedAction: 'Post-change CI admission and evidence checks.',
+        evidenceLevel: 'post_change',
+        limitation: 'A CI Action runs after changes exist and is never in-flow host enforcement.',
+        setupCommand: 'neurcode activate action --dir <repository-path>',
+        repairCommand: 'neurcode activate action --dir <repository-path> --force',
+    },
+};
+function getActivationHostCapability(agent) {
+    return { ...HOST_CAPABILITIES[agent] };
+}
+function listActivationHostCapabilities() {
+    return Object.keys(HOST_CAPABILITIES).map(getActivationHostCapability);
+}
 const STAGE_COPY = {
-    account_onboarded: {
-        label: 'Account ready',
-        description: 'Profile, workspace intent, and orientation are complete.',
-    },
-    cli_authenticated: {
-        label: 'CLI connected',
-        description: 'This user has an active CLI credential scoped to this workspace.',
-    },
-    agent_selected: {
-        label: 'Agent selected',
-        description: 'The coding environment is explicit, so setup never installs the wrong integration.',
-    },
-    repository_connected: {
-        label: 'Repository connected',
-        description: 'A repository ownership record is selected for this activation journey.',
-    },
-    brain_ready: {
-        label: 'Brain proof synced',
-        description: 'The dashboard received an authenticated fresh or bounded-partial Brain readiness proof for this repository.',
-    },
-    runtime_active: {
-        label: 'Runtime active',
-        description: 'The selected agent integration is installed and has reported runtime readiness.',
-    },
-    first_governed_session: {
-        label: 'First governed session',
-        description: 'This user has completed a governed session for the selected repository.',
-    },
-    evidence_available: {
-        label: 'Evidence available',
-        description: 'Source-free governed-session evidence is available in the workspace.',
-    },
+    account_ready: { label: 'Account ready', description: 'Versioned account onboarding is complete.' },
+    workspace_selected: { label: 'Workspace selected', description: 'The authenticated user is a member of this explicit workspace.' },
+    local_repo_paired: { label: 'Local repository paired', description: 'An authenticated local-checkout proof or runtime pairing matches the selected repository.' },
+    host_selected: { label: 'Host selected', description: 'The intended AI coding host is explicit for this repository.' },
+    host_configured: { label: 'Host configured', description: 'Repository-bound setup proof reports the selected host integration installed.' },
+    brain_proof_synced: { label: 'Brain proof synced', description: 'The server received fresh repository-bound Brain readiness proof.' },
+    session_runtime_active: { label: 'Session runtime active', description: 'A user-owned runtime session reported for this repository and host.' },
+    first_governed_action_observed: { label: 'Governed action observed', description: 'The backend observed an allow, warning, or denial from the governed runtime.' },
+    evidence_verified: { label: 'Evidence verified', description: 'A backend-signed source-free receipt exists for replayable session evidence.' },
 };
 function validTimestamp(value) {
     if (!value || Number.isNaN(Date.parse(value)))
         return null;
     return value;
 }
-function selectedAgentFlag(agent) {
-    return agent ? ` --agent ${agent}` : '';
-}
-function setupCommand(agent, requireRepo) {
-    return `npx -y @neurcode-ai/cli@latest setup${requireRepo ? ' --repo <repository-path>' : ''}${selectedAgentFlag(agent)}`;
+function setupCommand(agent) {
+    return `npx -y @neurcode-ai/cli@latest setup --repo <repository-path>${agent ? ` --agent ${agent}` : ''}`;
 }
 function activationSessionCommand(agent) {
-    if (agent === 'action') {
+    if (agent === 'action')
         return 'neurcode setup --repo <repository-path> --agent <claude|cursor|codex|vscode|copilot>';
-    }
     const target = agent || '<claude|cursor|codex|vscode|copilot>';
     return `neurcode agent guard start ${target} --goal "<bounded task>" --plan "<source-free plan>" --no-supervise`;
 }
 function nextActionFor(input) {
-    const stage = input.stage;
-    if (!stage) {
-        return {
-            stage: 'complete',
-            surface: 'web',
-            label: 'Prove governance reality',
-            reason: 'The first governed evidence loop is complete. Exercise the remaining runtime scenarios and inspect what is proven versus not yet evaluated.',
-            command: null,
-            href: 'governance-reality',
-        };
+    if (!input.stage)
+        return { stage: 'complete', surface: 'web', label: 'Review verified evidence', reason: 'The first repository-bound governed action has a backend-signed replay receipt.', command: null, href: 'runtime-evidence' };
+    switch (input.stage) {
+        case 'account_ready': return { stage: input.stage, surface: 'web', label: 'Finish account setup', reason: 'Account identity must be complete before workspace activation.', command: null, href: '/onboarding' };
+        case 'workspace_selected': return { stage: input.stage, surface: 'hybrid', label: 'Select a workspace', reason: 'Neurcode never guesses a personal or organization tenant.', command: 'neurcode login', href: '/workspaces' };
+        case 'local_repo_paired': return { stage: input.stage, surface: 'hybrid', label: input.repositorySelectionRequired ? 'Select a locally paired repository' : 'Pair a local checkout', reason: 'Neurcode never guesses a repository. GitHub visibility is discovery only; run setup inside the checkout or pass its path.', command: setupCommand(null), href: 'workspaces' };
+        case 'host_selected': return { stage: input.stage, surface: 'hybrid', label: 'Choose the AI coding host', reason: 'The host and its enforcement limit must be explicit for this repository.', command: 'neurcode setup --repo <repository-path> --agent <claude|cursor|codex|vscode|copilot|action>', href: null };
+        case 'host_configured': return { stage: input.stage, surface: 'cli', label: `Configure ${input.agent || 'the selected host'}`, reason: 'Install and verify only the repository-bound integration selected for this checkout.', command: setupCommand(input.agent), href: null };
+        case 'brain_proof_synced': return { stage: input.stage, surface: 'cli', label: 'Build and sync Brain proof', reason: 'A local index is not server proof. Setup verifies freshness and syncs a source-free repository-bound proof.', command: setupCommand(input.agent), href: null };
+        case 'session_runtime_active': return { stage: input.stage, surface: 'cli', label: 'Start a governed host session', reason: 'Start one real bounded task with the selected host.', command: activationSessionCommand(input.agent), href: null };
+        case 'first_governed_action_observed': return { stage: input.stage, surface: 'cli', label: 'Run one governed write check', reason: 'Produce a real allow, warning, or denial through the configured host path.', command: input.sessionStatus === 'active' ? 'Make one bounded change with the selected host, then inspect its Neurcode decision.' : activationSessionCommand(input.agent), href: null };
+        case 'evidence_verified': return { stage: input.stage, surface: 'hybrid', label: 'Finish, sync, and verify evidence', reason: 'Finish the session and sync its source-free record for backend signing and replay.', command: input.sessionStatus === 'active' ? 'neurcode agent guard finish --fail-on-unverified && neurcode sync --runtime' : 'neurcode sync --runtime', href: 'runtime-evidence' };
     }
-    if (stage === 'account_onboarded') {
-        return {
-            stage,
-            surface: 'web',
-            label: 'Finish account onboarding',
-            reason: 'Profile and workspace authority must be explicit before local activation begins.',
-            command: null,
-            href: '/onboarding',
-        };
-    }
-    if (stage === 'cli_authenticated') {
-        return {
-            stage,
-            surface: 'cli',
-            label: 'Connect this machine',
-            reason: 'Setup can start from any terminal. It will authenticate first and will not mutate a directory until a repository is explicit.',
-            command: setupCommand(input.agent, false),
-            href: null,
-        };
-    }
-    if (stage === 'agent_selected') {
-        return {
-            stage,
-            surface: 'hybrid',
-            label: 'Choose the coding agent',
-            reason: 'Neurcode does not guess an integration or overstate its enforcement capability.',
-            command: 'neurcode setup --agent <claude|cursor|codex|vscode|copilot|action>',
-            href: 'setup',
-        };
-    }
-    if (stage === 'repository_connected') {
-        return {
-            stage,
-            surface: input.repositorySelectionRequired ? 'hybrid' : 'cli',
-            label: input.repositorySelectionRequired ? 'Select the repository to activate' : 'Connect a repository',
-            reason: input.repositorySelectionRequired
-                ? 'This workspace has multiple repositories. Select one so another repository cannot complete this journey accidentally.'
-                : 'Run setup inside the repository or pass its path explicitly from any terminal.',
-            command: setupCommand(input.agent, true),
-            href: input.repositorySelectionRequired ? 'home' : null,
-        };
-    }
-    if (stage === 'brain_ready') {
-        return {
-            stage,
-            surface: 'cli',
-            label: 'Verify and sync repository intelligence',
-            reason: 'A local Brain may already exist, but the dashboard marks this complete only after an authenticated readiness proof is synced for this repository.',
-            command: setupCommand(input.agent, true),
-            href: null,
-        };
-    }
-    if (stage === 'runtime_active') {
-        return {
-            stage,
-            surface: 'cli',
-            label: `Activate ${input.agent || 'the selected agent'}`,
-            reason: 'Setup installs only the integration selected for this repository and reports its honest enforcement posture.',
-            command: setupCommand(input.agent, true),
-            href: null,
-        };
-    }
-    if (stage === 'first_governed_session') {
-        if (input.agent === 'action') {
-            return {
-                stage,
-                surface: 'hybrid',
-                label: 'Choose a local agent for the governed session',
-                reason: 'GitHub Action is a post-change CI backstop, not an in-flow coding agent. Select a local agent to produce a real governed session; keep the Action as the later admission check.',
-                command: activationSessionCommand(input.agent),
-                href: 'home',
-            };
-        }
-        if (input.sessionStatus === 'active') {
-            return {
-                stage,
-                surface: 'cli',
-                label: 'Finish the active governed task',
-                reason: 'A user-owned session is live for this repository. Finish it after the agent completes the bounded task so its final guard posture can be recorded.',
-                command: 'neurcode agent guard finish --fail-on-unverified',
-                href: null,
-            };
-        }
-        if (input.sessionStatus === 'finished_pending_evidence') {
-            return {
-                stage,
-                surface: 'cli',
-                label: 'Sync the finished governed session',
-                reason: 'The session finished locally. Sync its source-free record so the workspace can verify completion and expose evidence.',
-                command: 'neurcode sync --runtime',
-                href: null,
-            };
-        }
-        return {
-            stage,
-            surface: 'cli',
-            label: 'Start one bounded governed task',
-            reason: 'First value requires a real user-owned governed session, not a manually completed checklist.',
-            command: activationSessionCommand(input.agent),
-            href: null,
-        };
-    }
-    return {
-        stage,
-        surface: 'hybrid',
-        label: 'Sync and inspect the first evidence',
-        reason: 'Finish the governed session and sync its source-free record to the workspace.',
-        command: 'neurcode sync --runtime',
-        href: 'runtime-evidence',
-    };
 }
 function emptySummary(input) {
     return {
-        memberCount: Math.max(0, input?.memberCount || 0),
-        repositoryCount: Math.max(0, input?.repositoryCount || 0),
-        cliConnectedMemberCount: Math.max(0, input?.cliConnectedMemberCount || 0),
-        activeMemberCount: Math.max(0, input?.activeMemberCount || 0),
-        governedSessionCount: Math.max(0, input?.governedSessionCount || 0),
-        evidenceRecordCount: Math.max(0, input?.evidenceRecordCount || 0),
+        memberCount: Math.max(0, input?.memberCount || 0), repositoryCount: Math.max(0, input?.repositoryCount || 0),
+        cliConnectedMemberCount: Math.max(0, input?.cliConnectedMemberCount || 0), activeMemberCount: Math.max(0, input?.activeMemberCount || 0),
+        governedSessionCount: Math.max(0, input?.governedSessionCount || 0), evidenceRecordCount: Math.max(0, input?.evidenceRecordCount || 0),
         pendingApprovalCount: Math.max(0, input?.pendingApprovalCount || 0),
     };
 }
@@ -212,84 +138,65 @@ function buildActivationJourney(input) {
     const generatedAt = validTimestamp(input.generatedAt) || new Date().toISOString();
     const candidates = [...(input.repositoryCandidates || [])];
     const selected = input.selectedRepository || null;
-    const selectionRequired = !selected && candidates.length > 1;
+    const selectionRequired = !selected;
     const signals = {
-        account_onboarded: input.accountOnboarded,
-        cli_authenticated: input.cliAuthenticated,
-        agent_selected: input.agentSelected,
-        repository_connected: input.repositoryConnected,
-        brain_ready: input.brainReady,
-        runtime_active: input.runtimeActive,
-        first_governed_session: input.firstGovernedSession,
-        evidence_available: input.evidenceAvailable,
+        account_ready: input.accountReady, workspace_selected: input.workspaceSelected,
+        local_repo_paired: input.localRepoPaired, host_selected: input.hostSelected,
+        host_configured: input.hostConfigured, brain_proof_synced: input.brainProofSynced,
+        session_runtime_active: input.sessionRuntimeActive, first_governed_action_observed: input.firstGovernedActionObserved,
+        evidence_verified: input.evidenceVerified,
     };
+    // The activation journey is a state machine, not a collection of badges.
+    // Durable evidence for a later stage remains in its source table, but it
+    // cannot visually skip an unproven prerequisite.
     const completed = new Set();
     for (const id of exports.ACTIVATION_JOURNEY_STAGE_IDS) {
-        if (validTimestamp(signals[id]?.completedAt))
-            completed.add(id);
+        if (!validTimestamp(signals[id]?.completedAt))
+            break;
+        completed.add(id);
     }
     const currentStage = exports.ACTIVATION_JOURNEY_STAGE_IDS.find((id) => !completed.has(id)) || null;
     const currentIndex = currentStage ? exports.ACTIVATION_JOURNEY_STAGE_IDS.indexOf(currentStage) : -1;
     const stages = exports.ACTIVATION_JOURNEY_STAGE_IDS.map((id, index) => {
-        const completedAt = validTimestamp(signals[id]?.completedAt);
-        const complete = Boolean(completedAt);
-        const status = complete
-            ? 'complete'
-            : id === 'repository_connected' && selectionRequired && currentStage === id
-                ? 'blocked'
-                : index === currentIndex
-                    ? 'current'
-                    : 'pending';
-        return {
-            id,
-            ...STAGE_COPY[id],
-            status,
-            complete,
-            completedAt,
-            evidence: complete ? signals[id]?.evidence || null : null,
-        };
+        const provenAt = validTimestamp(signals[id]?.completedAt);
+        const complete = completed.has(id);
+        const completedAt = complete ? provenAt : null;
+        const status = complete ? 'complete'
+            : id === 'local_repo_paired' && selectionRequired && currentStage === id ? 'blocked'
+                : index === currentIndex ? 'current' : 'pending';
+        return { id, ...STAGE_COPY[id], status, complete, completedAt, evidence: complete ? signals[id]?.evidence || null : null };
     });
     const progress = stages.filter((stage) => stage.complete).length;
-    const sessionStatus = input.sessionStatus || (input.evidenceAvailable?.completedAt
-        ? 'evidence_available'
-        : input.firstGovernedSession?.completedAt
-            ? 'finished_pending_evidence'
-            : 'not_started');
+    const sessionStatus = input.sessionStatus || (input.evidenceVerified?.completedAt ? 'evidence_available' : 'not_started');
+    const capability = input.selectedAgent ? getActivationHostCapability(input.selectedAgent) : null;
+    const host = {
+        id: input.selectedAgent || null,
+        capability,
+        detected: input.hostFacts?.detected === true,
+        selected: Boolean(input.hostSelected?.completedAt && input.selectedAgent),
+        configured: input.hostFacts?.configured === true,
+        authenticated: input.hostFacts?.authenticated === true,
+        active: input.hostFacts?.active === true,
+        failureReason: input.hostFacts?.failureReason || null,
+        repairCommand: capability?.repairCommand || null,
+    };
+    const verified = currentStage === null;
     return {
         schemaVersion: exports.ACTIVATION_JOURNEY_SCHEMA_VERSION,
         generatedAt,
         workspace: input.workspace,
         selectedAgent: input.selectedAgent || null,
+        host,
         repository: { selected, candidates, selectionRequired },
-        session: {
-            status: sessionStatus,
-            startedAt: validTimestamp(input.sessionStartedAt),
-            finishedAt: validTimestamp(input.sessionFinishedAt),
-        },
-        stages,
-        currentStage,
-        progress,
-        total: stages.length,
-        firstValueReached: currentStage === null,
-        nextAction: nextActionFor({
-            stage: currentStage,
-            agent: input.selectedAgent || null,
-            repositorySelectionRequired: selectionRequired,
-            sessionStatus,
-        }),
+        session: { status: sessionStatus, startedAt: validTimestamp(input.sessionStartedAt), finishedAt: validTimestamp(input.sessionFinishedAt) },
+        stages, currentStage, progress, total: stages.length, firstValueReached: verified,
+        nextAction: nextActionFor({ stage: currentStage, agent: input.selectedAgent || null, sessionStatus, repositorySelectionRequired: selectionRequired }),
         summary: emptySummary(input.summary),
-        privacy: {
-            sourceUploaded: false,
-            promptsStored: false,
-            diffsStored: false,
-            machinePathsStored: false,
-            evidenceDerived: true,
-        },
-        limitations: [
-            'Local Brain readiness appears only after authenticated source-free proof reaches the workspace.',
-            'A team repository can be shared, but governed-session completion is scoped to the current user.',
-            'Cursor and Codex use cooperative guard evidence; only supported hook hosts may claim hard pre-write denial.',
-        ],
+        outcome: verified
+            ? { verified: true, headline: 'First governed action verified', detail: 'The selected workspace, local repository, host, runtime action, and backend-signed replay receipt are bound.' }
+            : { verified: false, headline: 'Activation is not yet verified', detail: 'Only completed backend-derived stages are shown as proven.' },
+        privacy: { sourceUploaded: false, promptsStored: false, diffsStored: false, machinePathsStored: false, evidenceDerived: true },
+        limitations: capability ? [capability.limitation, 'Local Brain readiness appears only after authenticated source-free proof reaches the workspace.'] : ['No host capability is assumed until a host is explicitly selected for the repository.'],
     };
 }
 //# sourceMappingURL=index.js.map

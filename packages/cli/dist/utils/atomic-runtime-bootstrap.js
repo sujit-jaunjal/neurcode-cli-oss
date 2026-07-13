@@ -7,6 +7,7 @@ const v0_governance_1 = require("./v0-governance");
 const runtime_authority_1 = require("./runtime-authority");
 const runtime_state_1 = require("./runtime-state");
 const agent_session_launcher_1 = require("./agent-session-launcher");
+const agent_adapter_setup_1 = require("./agent-adapter-setup");
 exports.ATOMIC_RUNTIME_BOOTSTRAP_SCHEMA_VERSION = 'neurcode.atomic-runtime-bootstrap.v1';
 function throwIfTestBootstrapFail(phase) {
     const target = process.env.NEURCODE_TEST_BOOTSTRAP_FAIL?.trim();
@@ -26,13 +27,15 @@ function adaptersForAgent(agent) {
     if (adapter === 'cursor-mcp')
         return [...base, 'cursor-mcp', 'generic-mcp'];
     if (adapter === 'codex-mcp')
-        return [...base, 'codex-mcp', 'generic-mcp'];
+        return [...base, 'codex-hooks', 'codex-mcp', 'generic-mcp'];
     return [...base, 'generic-mcp'];
 }
 function protectedAdapterForAgent(agent) {
     const adapter = (0, agent_session_launcher_1.adapterForLauncherAgent)(agent);
     if (adapter === 'claude-code-hooks' || adapter === 'copilot-hooks')
         return adapter;
+    if (agent === 'codex')
+        return 'codex-hooks';
     return 'cli';
 }
 async function atomicRuntimeBootstrap(repoRootInput, input) {
@@ -56,6 +59,12 @@ async function atomicRuntimeBootstrap(repoRootInput, input) {
             const hooks = (0, v0_governance_1.installCopilotGovernanceHooks)(repoRoot, { force: input.forceProfile === true });
             repaired.push(...hooks.repaired, ...hooks.added);
             preserved.push(...hooks.preserved);
+        }
+        if (input.agent === 'codex') {
+            const setup = (0, agent_adapter_setup_1.writeAgentSetup)({ target: 'codex', repoRoot });
+            const instructions = (0, agent_adapter_setup_1.writeAgentInstructions)({ target: 'codex', repoRoot });
+            (setup.status === 'written' ? repaired : preserved).push(`codex:${setup.configPath || 'configuration'}`);
+            (instructions.status === 'written' ? repaired : preserved).push(`codex:${instructions.filePath || 'instructions'}`);
         }
     }
     const adapters = adaptersForAgent(input.agent);

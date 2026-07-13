@@ -48,8 +48,17 @@ export interface AgentInstructionWriteResult {
     filePath: string | null;
     message: string;
 }
+export interface HostRuntimeFacts {
+    detected: boolean;
+    configured: boolean;
+    authenticated: boolean;
+    automaticPreWriteInterception: boolean;
+    failureReason: string | null;
+    repairCommand: string;
+}
 export declare function normalizeAgentSetupTarget(value?: string): AgentSetupTarget;
 export declare function adapterForSetupTarget(target: AgentSetupTarget): AgentRuntimeAdapterId;
+export declare function codexHooksPath(repoRoot: string): string;
 export declare function buildAgentSetupSnippet(input: {
     target: AgentSetupTarget;
     repoRoot: string;
@@ -64,6 +73,10 @@ export declare function inspectAgentSetup(input: {
     repoRoot: string;
     global?: boolean;
 }): AgentSetupInspection;
+export declare function inspectHostRuntimeFacts(input: {
+    target: AgentSetupTarget;
+    repoRoot: string;
+}): HostRuntimeFacts;
 export declare function inspectAgentInstructions(input: {
     target: AgentSetupTarget;
     repoRoot: string;

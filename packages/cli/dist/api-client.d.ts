@@ -82,6 +82,7 @@ export interface CreateShipCardResponse {
 export interface RuntimeEvidenceUploadRequest {
     repo: {
         name: string;
+        branch?: string;
         rootHash?: string;
         remoteHash?: string;
         profileHash?: string;
@@ -150,6 +151,7 @@ export interface AIChangeRecordReceiptResponse {
 export interface RuntimeLiveSessionStatusRequest {
     repo: {
         name: string;
+        branch?: string;
         rootHash?: string;
         remoteHash?: string;
         profileHash?: string;

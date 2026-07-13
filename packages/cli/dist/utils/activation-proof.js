@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.firstValueActivationProofQueuePath = firstValueActivationProofQueuePath;
+exports.buildBoundActivationProof = buildBoundActivationProof;
 exports.buildRepoConnectActivationProof = buildRepoConnectActivationProof;
 exports.queueFirstValueActivationProof = queueFirstValueActivationProof;
 exports.submitFirstValueActivationProof = submitFirstValueActivationProof;
@@ -81,21 +82,38 @@ function readCliVersion() {
     }
 }
 function buildEventId(input) {
-    return `fvp:${input.stage}:${sha(`${input.installId}:${input.projectId}:${input.stage}`).slice(0, 32)}`;
+    return `fvp:${input.stage}:${sha(`${input.installId}:${input.projectId}:${input.stage}:${input.agentTarget || 'none'}`).slice(0, 32)}`;
 }
-function buildRepoConnectActivationProof(input) {
+function buildBoundActivationProof(input) {
     const installId = (0, activation_telemetry_1.getActivationInstallId)();
     return (0, contracts_1.assertFirstValueActivationProofPayload)({
         schemaVersion: contracts_1.FIRST_VALUE_ACTIVATION_PROOF_SCHEMA_VERSION,
-        eventId: buildEventId({ installId, projectId: input.projectId, stage: 'repo_connect' }),
+        eventId: buildEventId({
+            installId,
+            projectId: input.projectId,
+            stage: input.stage,
+            agentTarget: input.agentTarget,
+        }),
         installId,
         cliVersion: readCliVersion(),
-        commandFamily: normalizeCommandFamily(input.commandFamily || 'repo_connect'),
-        stage: 'repo_connect',
-        reasonCode: input.reasonCode || 'repo_connect.completed',
+        commandFamily: normalizeCommandFamily(input.commandFamily || input.stage),
+        stage: input.stage,
+        reasonCode: input.reasonCode || `${input.stage}.completed`,
         timestamp: input.timestamp || new Date().toISOString(),
         success: true,
         projectId: input.projectId,
+        ...(input.repoId ? { repoId: input.repoId } : {}),
+        ...(input.agentTarget ? { agentTarget: input.agentTarget } : {}),
+        ...(input.localPosture ? { localPosture: input.localPosture } : {}),
+    });
+}
+function buildRepoConnectActivationProof(input) {
+    return buildBoundActivationProof({
+        projectId: input.projectId,
+        stage: 'repo_connect',
+        commandFamily: input.commandFamily || 'repo_connect',
+        reasonCode: input.reasonCode || 'repo_connect.completed',
+        timestamp: input.timestamp,
         localPosture: {
             repoConfigPresent: true,
         },

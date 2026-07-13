@@ -26,6 +26,8 @@ const project_root_1 = require("../utils/project-root");
 const activation_telemetry_1 = require("../utils/activation-telemetry");
 const init_1 = require("./init");
 const login_1 = require("./login");
+const activation_proof_1 = require("../utils/activation-proof");
+const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 const onboard_1 = require("./onboard");
 let chalk;
 try {
@@ -44,7 +46,7 @@ catch {
 const AGENT_ADAPTERS = {
     claude: new Set(['claude-code-hooks']),
     cursor: new Set(['cursor-mcp']),
-    codex: new Set(['codex-mcp']),
+    codex: new Set(['codex-hooks']),
     copilot: new Set(['copilot-hooks']),
     vscode: new Set(['copilot-hooks', 'vscode-extension']),
     action: new Set(['github-action']),
@@ -62,8 +64,9 @@ function enforcementPostureFor(agent) {
         case 'action':
             return 'Post-change CI advisory/admission evidence; not live host-level pre-write enforcement.';
         case 'cursor':
-        case 'codex':
             return 'Cooperative runtime checks and supervisor evidence; no host-level hard pre-write denial is claimed.';
+        case 'codex':
+            return 'Automatic pre-write denial for trusted, intercepted apply_patch, simple Bash, and MCP calls; Codex documents hooks as an incomplete guardrail.';
     }
 }
 /** Pure planner used by the CLI and focused next-step tests. */
@@ -462,6 +465,57 @@ function runCurrentCli(repoRoot, args, label) {
         throw new Error(`${label} failed with exit code ${result.status ?? 'unknown'}. Fix the reported issue and rerun neurcode setup.`);
     }
 }
+async function syncCanonicalSetupProofs(repoRoot, agent) {
+    const originalCwd = process.cwd();
+    try {
+        process.chdir(repoRoot);
+        const organizationId = (0, state_1.getOrgId)();
+        const projectId = (0, state_1.getProjectId)();
+        if (!organizationId || !projectId)
+            return;
+        const brainState = await readBrainState(repoRoot);
+        const brainIndexed = ['governance_ready', 'semantic_slice_ready', 'background_enrichment', 'fully_enriched'].includes(brainState);
+        if (brainIndexed) {
+            await (0, activation_proof_1.submitFirstValueActivationProof)({
+                orgId: organizationId,
+                proof: (0, activation_proof_1.buildBoundActivationProof)({
+                    projectId,
+                    stage: 'brain_index',
+                    commandFamily: 'setup',
+                    reasonCode: 'setup.brain_proof_synced',
+                    localPosture: { repoConfigPresent: true, brainIndexed: true },
+                }),
+            });
+        }
+        if (!agent || !agentIsConfigured(repoRoot, agent))
+            return;
+        const host = agent === 'action'
+            ? { detected: false, configured: true, authenticated: false, automaticPreWriteInterception: false }
+            : (0, agent_adapter_setup_1.inspectHostRuntimeFacts)({ target: agent, repoRoot });
+        await (0, activation_proof_1.submitFirstValueActivationProof)({
+            orgId: organizationId,
+            proof: (0, activation_proof_1.buildBoundActivationProof)({
+                projectId,
+                stage: 'agent_setup',
+                commandFamily: 'setup',
+                reasonCode: 'setup.host_proof_synced',
+                agentTarget: agent,
+                localPosture: {
+                    repoConfigPresent: true,
+                    runtimeConfigured: true,
+                    brainIndexed,
+                    hostDetected: host.detected,
+                    hostConfigured: true,
+                    hostAuthenticated: host.authenticated,
+                    automaticPreWriteInterception: host.automaticPreWriteInterception,
+                },
+            }),
+        });
+    }
+    finally {
+        process.chdir(originalCwd);
+    }
+}
 function renderSetupPlan(plan, readOnly) {
     console.log('');
     console.log(chalk.bold('Neurcode setup'));
@@ -545,6 +599,10 @@ function setupCommand(program) {
                 }
                 // login/init completion events were durably queued by their commands;
                 // make one bounded delivery attempt before rendering the resumed state.
+                if (plan.repositoryContext.repoRoot) {
+                    await syncCanonicalSetupProofs(plan.repositoryContext.repoRoot, plan.agent);
+                    plan = await collectSetupPlan(options.agent, repositoryPath || plan.repositoryContext.repoRoot);
+                }
                 await (0, activation_telemetry_1.flushActivationTelemetry)();
             }
             if (options.json) {

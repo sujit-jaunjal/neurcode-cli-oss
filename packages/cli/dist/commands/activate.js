@@ -12,6 +12,7 @@ const v0_governance_1 = require("../utils/v0-governance");
 const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_authority_1 = require("../utils/runtime-authority");
 const activation_telemetry_1 = require("../utils/activation-telemetry");
+const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
 let chalk;
 try {
     chalk = require('chalk');
@@ -29,16 +30,18 @@ catch {
 }
 const COMPATIBILITY_ACTIVATIONS = {
     codex: {
-        label: 'Codex supervised workflow',
-        controlLevel: 'supervised CLI workflow + admission/evidence path',
+        label: 'Codex supported-tool hook guardrail + MCP',
+        controlLevel: 'automatic deny for intercepted tools + cooperative MCP/supervisor coverage',
         enforced: [
-            'cooperative pre-write checks when Codex calls the Neurcode runtime',
+            'trusted PreToolUse hook can deny intercepted apply_patch, simple Bash, and MCP calls before write',
+            'cooperative pre-write checks remain available through Neurcode MCP',
             'local guard supervisor detects unverified or denied writes before handoff',
             'source-free admission export can travel with the PR',
         ],
         advisory: [
-            'no Claude-like host hook is installed by activate codex',
-            'bypassed filesystem writes are detected and reported, not prevented by the host',
+            'Codex documents hooks as a guardrail rather than a complete enforcement boundary',
+            'unified execution and equivalent write paths may bypass hook interception',
+            'project hooks must be reviewed, trusted, and enabled with /hooks',
             'the GitHub Action remains post-PR advisory unless admission records are committed',
         ],
         commands: [
@@ -49,7 +52,7 @@ const COMPATIBILITY_ACTIVATIONS = {
             'neurcode session export-admission --explain',
         ],
         next: [
-            'Run `neurcode agent bootstrap codex` to write repo-native instructions and MCP config where available.',
+            'Run `/hooks` in Codex and review/trust the repository hook installed by activation.',
             'Start with `neurcode agent guard start codex --goal "Evaluate exact-path runtime governance" --plan "Safe path first; request exact approval for billing boundary" --no-supervise`.',
             'Finish with `neurcode agent guard finish --fail-on-unverified`, then export admission for the PR.',
         ],
@@ -350,6 +353,10 @@ async function activateCopilotCommand(options = {}) {
 async function activateCompatibilityCommand(agent, options = {}) {
     const repoRoot = (0, v0_governance_1.resolveRepoRoot)(options.dir || process.cwd());
     const profile = (0, v0_governance_1.ensureFreshGovernanceProfile)(repoRoot, { force: options.force === true });
+    if (agent === 'codex') {
+        (0, agent_adapter_setup_1.writeAgentSetup)({ target: 'codex', repoRoot });
+        (0, agent_adapter_setup_1.writeAgentInstructions)({ target: 'codex', repoRoot });
+    }
     const connection = await connectRuntimeIfRequested(options, repoRoot, profile);
     const compatibility = COMPATIBILITY_ACTIVATIONS[agent];
     return {
@@ -506,7 +513,7 @@ function runtimeAdaptersForActivation(agent) {
     if (agent === 'copilot')
         return ['copilot-hooks'];
     if (agent === 'codex')
-        return ['codex-mcp', 'supervisor'];
+        return ['codex-hooks', 'codex-mcp', 'supervisor'];
     if (agent === 'cursor')
         return ['cursor-mcp', 'supervisor'];
     if (agent === 'vscode')

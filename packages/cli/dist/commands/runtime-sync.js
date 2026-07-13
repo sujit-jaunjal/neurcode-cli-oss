@@ -463,6 +463,7 @@ function buildUploadPayloadFromSessions(repoRoot, sessions) {
     const payload = {
         repo: {
             name: repoName,
+            branch: gitValue(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']) || undefined,
             rootHash: sha256(repoRoot),
             remoteHash: remote ? sha256(remote) : undefined,
             profileHash: typeof profile?.profileHash === 'string' ? profile.profileHash : undefined,

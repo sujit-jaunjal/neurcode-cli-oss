@@ -1,5 +1,5 @@
 import { type ProposedChangeEnvelope } from './repo-intelligence-v2';
-declare const ADAPTERS: readonly ["claude-code-hooks", "copilot-hooks", "generic-mcp", "codex-mcp", "cursor-mcp", "vscode-extension", "github-action", "neurcode-cli"];
+declare const ADAPTERS: readonly ["claude-code-hooks", "copilot-hooks", "generic-mcp", "codex-hooks", "codex-mcp", "cursor-mcp", "vscode-extension", "github-action", "neurcode-cli"];
 export type TrustedProposedChangeAdapterId = typeof ADAPTERS[number];
 export type ProposedChangeTiming = ProposedChangeEnvelope['host']['timing'];
 export interface TrustedProposedChangeContext {

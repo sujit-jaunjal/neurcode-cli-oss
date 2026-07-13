@@ -8,7 +8,7 @@
 import { HostEnforcementCapability, ProposedChangeEnvelope } from '@neurcode-ai/contracts';
 export declare const AGENT_RUNTIME_ADAPTER_SCHEMA_VERSION: "neurcode.agent-runtime-event.v1";
 export declare const AGENT_RUNTIME_DECISION_SCHEMA_VERSION: "neurcode.agent-runtime-decision.v1";
-export type AgentRuntimeAdapterId = 'claude-code-hooks' | 'copilot-hooks' | 'generic-mcp' | 'codex-mcp' | 'cursor-mcp' | 'vscode-extension' | 'github-action';
+export type AgentRuntimeAdapterId = 'claude-code-hooks' | 'copilot-hooks' | 'generic-mcp' | 'codex-hooks' | 'codex-mcp' | 'cursor-mcp' | 'vscode-extension' | 'github-action';
 export type AgentRuntimeEnforcementLevel = 'hard_deny' | 'cooperative' | 'observe_only' | 'post_change_backstop';
 export type AgentRuntimeControlLevel = 'hard_block_capable' | 'supervised_advisory_capable' | 'evidence_only_capable' | 'unsupported_unknown';
 export type AgentRuntimeCompatibilityMode = 'hard_pre_write_enforcement' | 'cooperative_check' | 'supervisor_diff_watch' | 'evidence_only';

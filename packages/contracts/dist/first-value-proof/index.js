@@ -99,6 +99,10 @@ const FIRST_VALUE_ACTIVATION_PROOF_LOCAL_POSTURE_FIELDS = new Set([
     'repoConfigPresent',
     'runtimeConfigured',
     'brainIndexed',
+    'hostDetected',
+    'hostConfigured',
+    'hostAuthenticated',
+    'automaticPreWriteInterception',
     'evidenceQueued',
     'telemetryQueued',
 ]);

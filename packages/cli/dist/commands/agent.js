@@ -21,6 +21,8 @@ const activation_telemetry_1 = require("../utils/activation-telemetry");
 const session_1 = require("./session");
 const cursor_gate_1 = require("../utils/cursor-gate");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
+const runtime_authority_1 = require("../utils/runtime-authority");
+const activation_proof_1 = require("../utils/activation-proof");
 let chalk;
 try {
     chalk = require('chalk');
@@ -262,6 +264,7 @@ function buildSetupPayload(agentArg, options) {
         global: options.global === true,
     });
     const instructionsAfter = (0, agent_adapter_setup_1.inspectAgentInstructions)({ target, repoRoot });
+    const host = (0, agent_adapter_setup_1.inspectHostRuntimeFacts)({ target, repoRoot });
     const goal = options.goal || 'modify one named safe file and keep protected boundaries untouched';
     return {
         schemaVersion: agent_adapter_setup_1.AGENT_ADAPTER_SETUP_SCHEMA_VERSION,
@@ -275,6 +278,7 @@ function buildSetupPayload(agentArg, options) {
         },
         target,
         adapter: snippet.adapter,
+        host,
         dashboardPairing,
         enforcement: {
             level: capability?.enforcementLevel ?? 'cooperative',
@@ -334,6 +338,7 @@ function renderSetup(payload) {
     console.log(chalk.dim('-'.repeat(72)));
     console.log(`Repo:     ${chalk.white(payload.repoRoot)}`);
     console.log(`Adapter:  ${payload.adapter} ${chalk.dim(`(${payload.enforcement.level}${payload.enforcement.automatic ? ', automatic' : ', explicit'})`)}`);
+    console.log(`Host:     detected=${payload.host.detected} configured=${payload.host.configured} authenticated=${payload.host.authenticated}`);
     console.log(`Control:  ${controlLevelLabel(payload.enforcement.controlLevel)}`);
     console.log(`Profile:  ${payload.profile.refreshed ? chalk.green('refreshed') : chalk.green(payload.profile.status)} ${chalk.dim(payload.profile.profileHash)}`);
     renderDashboardPairing(payload.dashboardPairing);
@@ -344,6 +349,8 @@ function renderSetup(payload) {
     }
     console.log(`Write:    ${payload.mcp.write.status} ${chalk.dim(payload.mcp.write.message)}`);
     console.log(`Instr:    ${payload.instructions.write.status} ${chalk.dim(payload.instructions.write.message)}`);
+    if (payload.host.failureReason)
+        console.log(`Repair:   ${chalk.yellow(payload.host.failureReason)} ${chalk.dim(payload.host.repairCommand)}`);
     console.log(chalk.dim('-'.repeat(72)));
     console.log(chalk.bold('MCP config'));
     console.log(chalk.dim(`# Destination: ${payload.mcp.snippet.destination}`));
@@ -1330,6 +1337,40 @@ function agentCommand(program) {
                 writeInstructions: true,
                 forceProfile: true,
             });
+            const adapters = payload.target === 'codex'
+                ? [payload.adapter, 'codex-mcp']
+                : [payload.adapter];
+            await (0, runtime_authority_1.recordActivatedRuntime)(payload.repoRoot, adapters, { scheduleBrain: false });
+            if (payload.target === 'codex' && payload.host.configured) {
+                const originalCwd = process.cwd();
+                try {
+                    process.chdir(payload.repoRoot);
+                    const binding = (0, activation_proof_1.readLocalRepoActivationBinding)();
+                    if (binding.orgId && binding.projectId) {
+                        await (0, activation_proof_1.submitFirstValueActivationProof)({
+                            orgId: binding.orgId,
+                            proof: (0, activation_proof_1.buildBoundActivationProof)({
+                                projectId: binding.projectId,
+                                stage: 'agent_setup',
+                                agentTarget: 'codex',
+                                commandFamily: 'agent:bootstrap',
+                                reasonCode: 'agent_setup.codex_hooks_configured',
+                                localPosture: {
+                                    repoConfigPresent: true,
+                                    runtimeConfigured: true,
+                                    hostDetected: payload.host.detected,
+                                    hostConfigured: true,
+                                    hostAuthenticated: payload.host.authenticated,
+                                    automaticPreWriteInterception: true,
+                                },
+                            }),
+                        });
+                    }
+                }
+                finally {
+                    process.chdir(originalCwd);
+                }
+            }
             if (options.json)
                 emitJson(payload);
             else

@@ -664,7 +664,7 @@ function brainCommand(program) {
             claude: 'hard_pre_write_deny_when_hook_installed',
             copilot: 'hard_pre_write_deny_when_hook_installed',
             cursor: 'cooperative_advisory_mcp_checks',
-            codex: 'cooperative_advisory_mcp_checks',
+            codex: 'supported_tool_prewrite_guardrail_plus_cooperative_mcp',
         };
         const progressiveAuthority = (0, brain_1.readProgressiveAuthority)(scope.cwd);
         const payload = {
@@ -763,7 +763,8 @@ function brainCommand(program) {
         }
         console.log(chalk.dim('Tiers: supported=deterministic · partial=bounded · advisory=heuristic · not_evaluated=no parser'));
         (0, messages_1.printSection)('Enforcement posture', '🛡️');
-        console.log(chalk.dim('Cursor/Codex: cooperative MCP checks (not hard pre-write deny)'));
+        console.log(chalk.dim('Cursor: cooperative MCP checks (no host-level hard pre-write deny)'));
+        console.log(chalk.dim('Codex: automatic deny for trusted intercepted tools; incomplete host guardrail plus cooperative MCP'));
         console.log(chalk.dim('Claude/Copilot: hard deny when host hooks are installed'));
         (0, messages_1.printSection)('Next', '▶️');
         for (const cmd of nextCommands)

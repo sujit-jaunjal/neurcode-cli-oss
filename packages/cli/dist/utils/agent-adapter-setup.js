@@ -3,13 +3,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AGENT_ADAPTER_DOCTOR_SCHEMA_VERSION = exports.AGENT_ADAPTER_SETUP_SCHEMA_VERSION = void 0;
 exports.normalizeAgentSetupTarget = normalizeAgentSetupTarget;
 exports.adapterForSetupTarget = adapterForSetupTarget;
+exports.codexHooksPath = codexHooksPath;
 exports.buildAgentSetupSnippet = buildAgentSetupSnippet;
 exports.buildAgentInstructionArtifact = buildAgentInstructionArtifact;
 exports.inspectAgentSetup = inspectAgentSetup;
+exports.inspectHostRuntimeFacts = inspectHostRuntimeFacts;
 exports.inspectAgentInstructions = inspectAgentInstructions;
 exports.writeAgentSetup = writeAgentSetup;
 exports.writeAgentInstructions = writeAgentInstructions;
 const node_fs_1 = require("node:fs");
+const node_child_process_1 = require("node:child_process");
 const node_os_1 = require("node:os");
 const node_path_1 = require("node:path");
 const jsonc_parser_1 = require("jsonc-parser");
@@ -65,7 +68,7 @@ function adapterForSetupTarget(target) {
     if (target === 'copilot')
         return 'copilot-hooks';
     if (target === 'codex')
-        return 'codex-mcp';
+        return 'codex-hooks';
     if (target === 'cursor')
         return 'cursor-mcp';
     if (target === 'vscode')
@@ -74,6 +77,53 @@ function adapterForSetupTarget(target) {
 }
 function codexConfigPath() {
     return (0, node_path_1.join)((0, node_os_1.homedir)(), '.codex', 'config.toml');
+}
+function codexHooksPath(repoRoot) {
+    return (0, node_path_1.join)(repoRoot, '.codex', 'hooks.json');
+}
+function codexHookRunnerPath(repoRoot) {
+    return (0, node_path_1.join)(repoRoot, '.neurcode', 'codex-hook.cjs');
+}
+const CODEX_HOOK_MARKER = 'neurcode-codex-hook-v2';
+function codexHookCommand(mode) {
+    return `node .neurcode/codex-hook.cjs ${mode}`;
+}
+function codexHookGroups() {
+    return {
+        UserPromptSubmit: {
+            hooks: [{ type: 'command', command: codexHookCommand('start'), timeout: 10, statusMessage: CODEX_HOOK_MARKER }],
+        },
+        PreToolUse: {
+            matcher: '^(apply_patch|Bash|mcp__.*)$',
+            hooks: [{ type: 'command', command: codexHookCommand('check'), timeout: 10, statusMessage: CODEX_HOOK_MARKER }],
+        },
+        Stop: {
+            hooks: [{ type: 'command', command: codexHookCommand('finish'), timeout: 30, statusMessage: CODEX_HOOK_MARKER }],
+        },
+    };
+}
+function codexHookRunner() {
+    return [
+        `'use strict';`,
+        `const { readFileSync } = require('node:fs');`,
+        `const { dirname, join } = require('node:path');`,
+        `const { spawnSync } = require('node:child_process');`,
+        `const repoRoot = dirname(__dirname);`,
+        `const wiring = JSON.parse(readFileSync(join(repoRoot, '.neurcode', 'runtime-wiring.json'), 'utf8'));`,
+        `const mode = process.argv[2];`,
+        `if (!['start', 'check', 'finish'].includes(mode)) process.exit(2);`,
+        `const args = ['session-hook', '--dir', repoRoot, mode];`,
+        `if (mode === 'check') args.push('--trusted-adapter', 'codex-hooks', '--trusted-timing', 'before_write');`,
+        `const result = spawnSync(process.execPath, [wiring.cliEntrypoint, ...args], { cwd: repoRoot, stdio: 'inherit', timeout: mode === 'finish' ? 28000 : 9500 });`,
+        `process.exit(result.status === null ? 2 : result.status);`,
+        '',
+    ].join('\n');
+}
+function isCodexHooksConfigured(repoRoot) {
+    const hooksPath = codexHooksPath(repoRoot);
+    const runnerPath = codexHookRunnerPath(repoRoot);
+    return readText(hooksPath).includes(CODEX_HOOK_MARKER)
+        && readText(runnerPath).includes(`'codex-hooks'`);
 }
 function cursorConfigPath(repoRoot, global) {
     return global
@@ -133,6 +183,23 @@ function instructionBody(input) {
             '',
             'Claude Code is governed by Neurcode hooks after `neurcode activate claude`.',
             'Hooks run before Edit/Write/MultiEdit and can hard-deny writes before they land.',
+            '',
+        ].join('\n');
+    }
+    if (input.target === 'codex') {
+        return [
+            '<!-- neurcode-agent-runtime-v1 -->',
+            '# Neurcode Runtime Governance for Codex',
+            '',
+            'This repository uses a trusted Codex `PreToolUse` hook plus Neurcode MCP.',
+            'The hook can automatically deny intercepted `apply_patch`, simple Bash, and MCP tool calls before write.',
+            '',
+            'Treat every Neurcode deny as authoritative and request exact-path approval when needed.',
+            'Keep project hooks trusted and enabled. Use `/hooks` in Codex to inspect the loaded hook.',
+            'Codex documents hooks as a guardrail, not a complete security boundary: unified execution and equivalent write paths may bypass interception.',
+            'Finish the governed session so source-free replay evidence is written.',
+            '',
+            'Never send source code, diffs, patches, file contents, or before/after text to Neurcode.',
             '',
         ].join('\n');
     }
@@ -280,11 +347,13 @@ function buildAgentSetupSnippet(input) {
             return {
                 target: input.target,
                 adapter,
-                destination: '~/.codex/config.toml',
-                configPath: codexConfigPath(),
-                format: 'toml',
-                body: tomlSnippet(input.repoRoot),
-                instruction: 'Append this block to your Codex config so Codex can call Neurcode MCP tools before edits.',
+                destination: '~/.codex/config.toml + .codex/hooks.json',
+                configPath: codexHooksPath(input.repoRoot),
+                format: 'text',
+                body: `${tomlSnippet(input.repoRoot)}\n${JSON.stringify({
+                    hooks: Object.fromEntries(Object.entries(codexHookGroups()).map(([event, group]) => [event, [group]])),
+                }, null, 2)}`,
+                instruction: 'Install pinned Neurcode MCP plus repository lifecycle hooks, then review and trust the project hook in Codex.',
             };
         case 'cursor':
             return {
@@ -440,7 +509,7 @@ function inspectAgentSetup(input) {
     const snippet = buildAgentSetupSnippet(input);
     const configPath = snippet.configPath;
     const configured = input.target === 'codex'
-        ? Boolean(configPath && isCodexConfigured(configPath))
+        ? isCodexConfigured(codexConfigPath()) && isCodexHooksConfigured(input.repoRoot)
         : Boolean(configPath && isCursorConfigured(configPath, input.repoRoot, input.global === true));
     return {
         target: input.target,
@@ -449,9 +518,46 @@ function inspectAgentSetup(input) {
         configured,
         configPath,
         message: configured
-            ? `Neurcode MCP is configured in ${configPath}.`
-            : `Neurcode MCP is not configured in ${configPath}.`,
+            ? input.target === 'codex'
+                ? `Neurcode MCP and project hooks are configured. Use /hooks in Codex to verify project trust.`
+                : `Neurcode MCP is configured in ${configPath}.`
+            : input.target === 'codex'
+                ? `Neurcode Codex MCP or project hook configuration is missing or stale.`
+                : `Neurcode MCP is not configured in ${configPath}.`,
     };
+}
+function inspectHostRuntimeFacts(input) {
+    const executable = {
+        claude: 'claude',
+        codex: 'codex',
+        cursor: 'cursor',
+        copilot: 'code',
+        vscode: 'code',
+    };
+    const binary = executable[input.target];
+    const detected = binary
+        ? (0, node_child_process_1.spawnSync)(binary, ['--version'], { stdio: 'ignore', timeout: 2_000 }).status === 0
+        : false;
+    const configured = inspectAgentSetup(input).configured === true;
+    const authenticated = input.target === 'codex' && detected
+        ? (0, node_child_process_1.spawnSync)('codex', ['login', 'status'], { stdio: 'ignore', timeout: 2_000 }).status === 0
+        : false;
+    const automaticPreWriteInterception = input.target === 'claude'
+        || input.target === 'copilot'
+        || input.target === 'codex';
+    const repairCommand = input.target === 'claude'
+        ? `neurcode activate claude --dir <repository-path> --force`
+        : input.target === 'copilot'
+            ? `neurcode activate copilot --dir <repository-path> --force`
+            : `neurcode agent bootstrap ${input.target} --dir <repository-path>`;
+    const failureReason = !detected
+        ? `${input.target} executable was not detected on this machine.`
+        : !configured
+            ? `${input.target} integration is missing or stale for this repository.`
+            : input.target === 'codex' && !authenticated
+                ? 'Codex login status could not be verified. Run codex login, then rerun setup.'
+                : null;
+    return { detected, configured, authenticated, automaticPreWriteInterception, failureReason, repairCommand };
 }
 function inspectAgentInstructions(input) {
     const artifact = buildAgentInstructionArtifact(input);
@@ -490,22 +596,64 @@ function inspectAgentInstructions(input) {
 function ensureParent(path) {
     (0, node_fs_1.mkdirSync)((0, node_path_1.dirname)(path), { recursive: true });
 }
-function writeCodexConfig(path, repoRoot) {
-    if (isCodexConfigured(path)) {
-        return {
-            status: 'already_configured',
-            configPath: path,
-            message: `Codex config already contains Neurcode MCP at ${path}.`,
-        };
-    }
+function mergeCodexHookGroups(path) {
     ensureParent(path);
-    const existing = readText(path);
-    const prefix = existing.trim().length > 0 && !existing.endsWith('\n') ? '\n\n' : existing.trim().length > 0 ? '\n' : '';
-    (0, node_fs_1.writeFileSync)(path, `${existing}${prefix}${tomlSnippet(repoRoot)}`, 'utf8');
+    let text = (0, node_fs_1.existsSync)(path) ? (0, node_fs_1.readFileSync)(path, 'utf8') : '{}\n';
+    let changed = false;
+    for (const [event, group] of Object.entries(codexHookGroups())) {
+        const errors = [];
+        const parsed = (0, jsonc_parser_1.parse)(text, errors, { allowTrailingComma: true, disallowComments: false });
+        if (errors.length > 0 || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            const reason = errors.length > 0 ? (0, jsonc_parser_1.printParseErrorCode)(errors[0].error) : 'Root must be an object';
+            throw new Error(`Could not parse ${path}: ${reason}`);
+        }
+        const hooks = parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)
+            ? parsed.hooks
+            : {};
+        const existingGroups = Array.isArray(hooks[event]) ? hooks[event] : [];
+        if (existingGroups.some((entry) => JSON.stringify(entry).includes(CODEX_HOOK_MARKER)))
+            continue;
+        const editPath = existingGroups.length > 0 ? ['hooks', event, existingGroups.length] : ['hooks', event];
+        const value = existingGroups.length > 0 ? group : [group];
+        const edits = (0, jsonc_parser_1.modify)(text, editPath, value, {
+            isArrayInsertion: existingGroups.length > 0,
+            formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
+        });
+        text = (0, jsonc_parser_1.applyEdits)(text, edits);
+        changed = true;
+    }
+    if (changed || !(0, node_fs_1.existsSync)(path))
+        (0, node_fs_1.writeFileSync)(path, text.endsWith('\n') ? text : `${text}\n`, 'utf8');
+    return changed;
+}
+function writeCodexConfig(path, repoRoot) {
+    let changed = false;
+    if (!isCodexConfigured(path)) {
+        ensureParent(path);
+        const existing = readText(path);
+        const prefix = existing.trim().length > 0 && !existing.endsWith('\n') ? '\n\n' : existing.trim().length > 0 ? '\n' : '';
+        (0, node_fs_1.writeFileSync)(path, `${existing}${prefix}${tomlSnippet(repoRoot)}`, 'utf8');
+        changed = true;
+    }
+    const hooksPath = codexHooksPath(repoRoot);
+    changed = mergeCodexHookGroups(hooksPath) || changed;
+    const runnerPath = codexHookRunnerPath(repoRoot);
+    const runner = codexHookRunner();
+    if (readText(runnerPath) !== runner) {
+        ensureParent(runnerPath);
+        (0, node_fs_1.writeFileSync)(runnerPath, runner, 'utf8');
+        try {
+            (0, node_fs_1.chmodSync)(runnerPath, 0o700);
+        }
+        catch { /* best-effort local hardening */ }
+        changed = true;
+    }
     return {
-        status: 'written',
-        configPath: path,
-        message: `Wrote Neurcode MCP server block to ${path}.`,
+        status: changed ? 'written' : 'already_configured',
+        configPath: hooksPath,
+        message: changed
+            ? `Configured Neurcode MCP in ${path} and Codex project hooks in ${hooksPath}. Review and trust the hook with /hooks.`
+            : `Codex MCP and project hooks are already configured. Verify trust with /hooks.`,
     };
 }
 function writeCursorConfig(path, repoRoot, global) {

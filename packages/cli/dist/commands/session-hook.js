@@ -441,6 +441,20 @@ function hookFilePathCandidates(hookInput) {
                 candidates.push(candidate);
         }
     }
+    // Codex sends apply_patch as one source-bearing command string. The hook
+    // never persists or uploads that body; it extracts only patch header paths
+    // so each actual intercepted write can be governed before it lands.
+    const toolName = String(hookInput['tool_name'] || hookInput['toolName'] || '');
+    const patchBody = typeof toolInput['command'] === 'string' ? toolInput['command'] : '';
+    if (/^(apply_patch|patch)$/i.test(toolName) && patchBody) {
+        for (const line of patchBody.split(/\r?\n/)) {
+            const neurcodePatch = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/);
+            const unifiedPatch = line.match(/^\+\+\+ (?:b\/)?(.+)$/);
+            const candidate = neurcodePatch?.[1] || unifiedPatch?.[1];
+            if (candidate && candidate !== '/dev/null')
+                candidates.push(candidate.trim());
+        }
+    }
     return Array.from(new Set(candidates));
 }
 function stringField(record, keys) {
@@ -1308,7 +1322,7 @@ async function handleStart(cmdCwd) {
         (0, session_start_transaction_1.clearSessionStartTransaction)(repoRoot);
     }
 }
-const HARD_PREWRITE_ADAPTERS = new Set(['claude-code-hooks', 'copilot-hooks']);
+const HARD_PREWRITE_ADAPTERS = new Set(['claude-code-hooks', 'copilot-hooks', 'codex-hooks']);
 /**
  * Bind the attested host posture to the session's established launcher posture.
  * A governed session launched by a cooperative or observe-only agent can never
@@ -1320,6 +1334,13 @@ const HARD_PREWRITE_ADAPTERS = new Set(['claude-code-hooks', 'copilot-hooks']);
 function reconcileTrustedAdapterPosture(declared, launched) {
     if (!launched || declared === launched)
         return { adapterId: declared, downgraded: false };
+    // Codex launches the portable MCP session contract, while a generated,
+    // runtime-pinned PreToolUse runner is the stronger ingress for the actual
+    // intercepted call. Preserve that observed hook posture; its capability
+    // profile still labels host coverage as incomplete.
+    if (declared === 'codex-hooks' && launched === 'codex-mcp') {
+        return { adapterId: declared, downgraded: false };
+    }
     if (HARD_PREWRITE_ADAPTERS.has(declared) && !HARD_PREWRITE_ADAPTERS.has(launched)) {
         return { adapterId: launched, downgraded: true };
     }
@@ -2481,7 +2502,7 @@ function sessionHookCommand(program) {
     check.action(async (subOpts) => {
         const opts = cmd.opts();
         const adapters = [
-            'claude-code-hooks', 'copilot-hooks', 'generic-mcp', 'codex-mcp',
+            'claude-code-hooks', 'copilot-hooks', 'codex-hooks', 'generic-mcp', 'codex-mcp',
             'cursor-mcp', 'vscode-extension', 'github-action',
         ];
         const timings = ['before_write', 'during_write', 'after_write', 'ci'];

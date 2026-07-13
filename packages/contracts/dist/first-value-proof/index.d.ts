@@ -92,6 +92,10 @@ export interface FirstValueActivationProofLocalPosture {
     repoConfigPresent?: boolean;
     runtimeConfigured?: boolean;
     brainIndexed?: boolean;
+    hostDetected?: boolean;
+    hostConfigured?: boolean;
+    hostAuthenticated?: boolean;
+    automaticPreWriteInterception?: boolean;
     evidenceQueued?: boolean;
     telemetryQueued?: boolean;
 }

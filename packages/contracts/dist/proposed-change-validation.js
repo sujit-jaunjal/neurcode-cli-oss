@@ -17,6 +17,7 @@ const ADAPTERS = [
     'claude-code-hooks',
     'copilot-hooks',
     'generic-mcp',
+    'codex-hooks',
     'codex-mcp',
     'cursor-mcp',
     'vscode-extension',
@@ -398,7 +399,7 @@ function deriveTrustedHostPosture(adapterId, timing) {
         ? timing === 'ci'
         : adapterId === 'vscode-extension'
             ? timing === 'after_write'
-            : adapterId === 'claude-code-hooks' || adapterId === 'copilot-hooks'
+            : adapterId === 'claude-code-hooks' || adapterId === 'copilot-hooks' || adapterId === 'codex-hooks'
                 ? timing === 'before_write'
                 : adapterId === 'neurcode-cli'
                     ? timing === 'before_write' || timing === 'after_write'
@@ -411,7 +412,7 @@ function deriveTrustedHostPosture(adapterId, timing) {
         capability = 'post_write';
     else if (timing === 'ci' || adapterId === 'github-action')
         capability = 'ci_only';
-    else if (adapterId === 'claude-code-hooks' || adapterId === 'copilot-hooks')
+    else if (adapterId === 'claude-code-hooks' || adapterId === 'copilot-hooks' || adapterId === 'codex-hooks')
         capability = 'hard_prewrite';
     else if (adapterId === 'cursor-mcp')
         capability = 'supervised_write';
