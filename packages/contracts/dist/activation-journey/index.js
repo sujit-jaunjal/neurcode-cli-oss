@@ -40,8 +40,8 @@ const STAGE_COPY = {
         description: 'A repository ownership record is selected for this activation journey.',
     },
     brain_ready: {
-        label: 'Brain ready',
-        description: 'The selected repository has a fresh or bounded-partial local Brain proof.',
+        label: 'Brain proof synced',
+        description: 'The dashboard received an authenticated fresh or bounded-partial Brain readiness proof for this repository.',
     },
     runtime_active: {
         label: 'Runtime active',
@@ -132,8 +132,8 @@ function nextActionFor(input) {
         return {
             stage,
             surface: 'cli',
-            label: 'Build repository intelligence',
-            reason: 'A fresh source-free repository graph is required before runtime activation is claimed.',
+            label: 'Verify and sync repository intelligence',
+            reason: 'A local Brain may already exist, but the dashboard marks this complete only after an authenticated readiness proof is synced for this repository.',
             command: setupCommand(input.agent, true),
             href: null,
         };
