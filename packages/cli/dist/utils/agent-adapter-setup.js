@@ -86,7 +86,10 @@ function codexHookRunnerPath(repoRoot) {
 }
 const CODEX_HOOK_MARKER = 'neurcode-codex-hook-v2';
 function codexHookCommand(mode) {
-    return `node .neurcode/codex-hook.cjs ${mode}`;
+    // Codex runs hook commands with the session cwd. A session may start in any
+    // nested directory, so a repository-relative command is not stable enough.
+    // Resolve from Git at execution time without persisting a machine path.
+    return `node "$(git rev-parse --show-toplevel)/.neurcode/codex-hook.cjs" ${mode}`;
 }
 function codexHookGroups() {
     return {

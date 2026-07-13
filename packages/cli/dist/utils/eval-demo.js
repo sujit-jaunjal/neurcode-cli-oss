@@ -119,12 +119,13 @@ function detectMultipleInstallations() {
         const { checkDeploymentConsistency } = require('@neurcode-ai/cli-runtime');
         const bundledCliDir = (0, node_path_1.resolve)(__dirname, '..');
         const report = checkDeploymentConsistency({ bundledCliDir, strict: false });
-        const installs = report?.installations ?? [];
+        const violation = (report?.violations ?? []).find((item) => item.code === 'multiple_installations');
+        const installs = violation?.detail?.installations ?? [];
         const distinct = new Set(installs.map((i) => i.buildFingerprint)).size;
-        return { count: installs.length, distinctBuilds: distinct };
+        return { count: installs.length, distinctBuilds: distinct, conflicting: Boolean(violation) };
     }
     catch {
-        return { count: 1, distinctBuilds: 1 };
+        return { count: 1, distinctBuilds: 1, conflicting: false };
     }
 }
 /**
@@ -159,12 +160,12 @@ function buildEvalDemoPreflight(repoRoot, options = {}) {
     // CLI version + multiple-installation detection with clear recovery.
     const version = cliVersion();
     const installs = detectMultipleInstallations();
-    if (installs.distinctBuilds > 1) {
+    if (installs.conflicting) {
         checks.push({
             id: 'cli',
             label: 'CLI version',
             status: 'warn',
-            detail: `Neurcode CLI ${version ?? 'unknown'} running, but ${installs.count} installations (${installs.distinctBuilds} distinct builds) are visible on PATH.`,
+            detail: `Neurcode CLI ${version ?? 'unknown'} is running, but ${installs.count} conflicting PATH/environment executables resolve to ${installs.distinctBuilds} builds.`,
             recovery: 'Pin one build: `npm uninstall -g @neurcode-ai/cli` everywhere, then `npm install -g @neurcode-ai/cli@latest` — or always use `npx -y @neurcode-ai/cli@latest`.',
         });
     }
@@ -173,7 +174,7 @@ function buildEvalDemoPreflight(repoRoot, options = {}) {
             id: 'cli',
             label: 'CLI version',
             status: 'ok',
-            detail: `Neurcode CLI ${version ?? 'unknown'} (single build on PATH).`,
+            detail: `Neurcode CLI ${version ?? 'unknown'} (no conflicting executable build).`,
         });
     }
     // Repo state.

@@ -181,12 +181,23 @@ function buildActivationJourney(input) {
         repairCommand: capability?.repairCommand || null,
     };
     const verified = currentStage === null;
+    const brain = {
+        proofStatus: input.brain?.proofStatus || (input.brainProofSynced?.completedAt ? 'verified' : 'unavailable'),
+        localStatus: input.brain?.localStatus || 'not_observed',
+        uploadedAt: validTimestamp(input.brain?.uploadedAt),
+        verifiedAt: validTimestamp(input.brain?.verifiedAt || input.brainProofSynced?.completedAt),
+        reason: input.brain?.reason || (input.brainProofSynced?.completedAt
+            ? 'Fresh authenticated repository-bound Brain proof is verified by the server.'
+            : 'No server-observed Brain proof is available for the selected repository.'),
+        repairCommand: input.brain?.repairCommand || 'neurcode setup --repo <repository-path>',
+    };
     return {
         schemaVersion: exports.ACTIVATION_JOURNEY_SCHEMA_VERSION,
         generatedAt,
         workspace: input.workspace,
         selectedAgent: input.selectedAgent || null,
         host,
+        brain,
         repository: { selected, candidates, selectionRequired },
         session: { status: sessionStatus, startedAt: validTimestamp(input.sessionStartedAt), finishedAt: validTimestamp(input.sessionFinishedAt) },
         stages, currentStage, progress, total: stages.length, firstValueReached: verified,

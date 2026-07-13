@@ -37,7 +37,7 @@
   "dependencies": {
     "@neurcode-ai/analysis": "^0.1.3",
     "@neurcode-ai/brain": "^0.2.8",
-    "@neurcode-ai/cli-runtime": "^0.2.1",
+    "@neurcode-ai/cli-runtime": "^0.2.2",
     "@neurcode-ai/contracts": "file:../contracts",
     "@neurcode-ai/core": "^0.1.0",
     "@neurcode-ai/diff-parser": "^0.1.0",

@@ -13,6 +13,16 @@ export type ActivationJourneyWorkspaceKind = 'personal' | 'organization';
 export type ActivationJourneyAgent = 'claude' | 'cursor' | 'codex' | 'copilot' | 'vscode' | 'action';
 export type ActivationJourneyRepositoryKind = 'project' | 'runtime_repo';
 export type ActivationJourneySessionStatus = 'not_started' | 'active' | 'finished_pending_evidence' | 'evidence_available';
+export type ActivationBrainProofStatus = 'unavailable' | 'uploaded' | 'verified' | 'stale' | 'failed';
+export type ActivationBrainLocalStatus = 'not_observed' | 'indexing' | 'fresh' | 'partial' | 'stale' | 'failed';
+export interface ActivationJourneyBrainState {
+    proofStatus: ActivationBrainProofStatus;
+    localStatus: ActivationBrainLocalStatus;
+    uploadedAt: string | null;
+    verifiedAt: string | null;
+    reason: string;
+    repairCommand: string;
+}
 export type ActivationHostAutomaticInterception = 'complete_prewrite_boundary' | 'supported_tool_prewrite_guardrail' | 'host_dependent_prewrite_hook' | 'cooperative_prewrite' | 'post_write_observation' | 'ci_backstop';
 export type ActivationHostEvidenceLevel = 'host_enforced' | 'host_guardrail' | 'host_dependent' | 'cooperative' | 'observed' | 'post_change';
 export interface ActivationHostCapabilityProfile {
@@ -93,6 +103,7 @@ export interface ActivationJourney {
     };
     selectedAgent: ActivationJourneyAgent | null;
     host: ActivationJourneyHostState;
+    brain: ActivationJourneyBrainState;
     repository: {
         selected: ActivationJourneyRepositoryCandidate | null;
         candidates: ActivationJourneyRepositoryCandidate[];
@@ -147,6 +158,7 @@ export interface ActivationJourneySignals {
     firstGovernedActionObserved?: ActivationJourneyStageSignal;
     evidenceVerified?: ActivationJourneyStageSignal;
     hostFacts?: Partial<Pick<ActivationJourneyHostState, 'detected' | 'configured' | 'authenticated' | 'active' | 'failureReason'>>;
+    brain?: Partial<ActivationJourneyBrainState>;
     summary?: Partial<ActivationJourneyWorkspaceSummary>;
 }
 export declare function activationSessionCommand(agent: ActivationJourneyAgent | null): string;

@@ -262,7 +262,7 @@ function suppliedEnvelope(value, input) {
     if (value === undefined || value === null)
         return null;
     if (![
-        'claude-code-hooks', 'copilot-hooks', 'generic-mcp', 'codex-mcp',
+        'claude-code-hooks', 'copilot-hooks', 'generic-mcp', 'codex-hooks', 'codex-mcp',
         'cursor-mcp', 'vscode-extension', 'github-action', 'neurcode-cli',
     ].includes(input.adapterId)) {
         throw new Error(`Unsupported trusted proposed-change adapter: ${input.adapterId}`);
@@ -368,7 +368,7 @@ function analyzeProposedChange(input) {
     const exports = canonicalFacts?.exports ?? fallbackExports;
     const relationships = canonicalFacts?.relationships ?? fallbackRelationships;
     if (![
-        'claude-code-hooks', 'copilot-hooks', 'generic-mcp', 'codex-mcp',
+        'claude-code-hooks', 'copilot-hooks', 'generic-mcp', 'codex-hooks', 'codex-mcp',
         'cursor-mcp', 'vscode-extension', 'github-action', 'neurcode-cli',
     ].includes(input.adapterId)) {
         throw new Error(`Unsupported trusted proposed-change adapter: ${input.adapterId}`);
