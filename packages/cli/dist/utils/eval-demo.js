@@ -40,7 +40,11 @@ const enterprise_eval_report_1 = require("./enterprise-eval-report");
 exports.EVAL_DEMO_RUN_SCHEMA_VERSION = 'neurcode.eval-demo-run.v1';
 const SIGNING_SECRET_ENV = 'NEURCODE_AI_CHANGE_RECORD_SIGNING_SECRET';
 // Fixture paths (mirror utils/guided-eval.ts scaffoldEvalFixture).
-const SAFE_PATH = 'src/tasks/export_task.py';
+// The safe fixture path is TypeScript so Graph V2 can build a complete,
+// checker-backed semantic slice before the governed session starts. Python is
+// intentionally regex-degraded today; using it here would make the V1.5
+// authority ceiling correctly fail closed instead of proving a safe allow.
+const SAFE_PATH = 'src/tasks/export_task.ts';
 const BOUNDARY_PATH = 'src/billing/charge.py';
 const NEIGHBOR_PATH = 'src/billing/refund.py';
 // ── CLI self-spawn plumbing ───────────────────────────────────────────────────
@@ -336,20 +340,31 @@ function runEvalDemo(options) {
     });
     // Only proceed with the live loop if the fixture exists.
     const fixtureReady = (0, node_fs_1.existsSync)((0, node_path_1.join)(fixtureDir, 'CODEOWNERS'));
-    // 2) Repo brain index (best-effort; advisory).
+    // 2) Repo brain index + exact plan semantic slice. A safe allow must be
+    // backed by the same complete plan-scoped semantic authority required by the
+    // production pre-write path; the demo never bypasses or relaxes that gate.
     if (fixtureReady) {
         commandsRun.push('cd .neurcode/eval/fixture && neurcode brain index --json');
         const brain = runCli(cliEntry, ['brain', 'index', '--json'], fixtureDir);
         const brainPayload = parseCliJson(brain.stdout);
+        const filesIndexed = brainPayload?.canonicalGraph?.coverage?.filesIndexed ?? null;
+        let slicePayload = null;
+        if (brain.status === 0 && typeof filesIndexed === 'number') {
+            commandsRun.push(`cd .neurcode/eval/fixture && neurcode brain semantic-slice --file ${SAFE_PATH} --json`);
+            const slice = runCli(cliEntry, ['brain', 'semantic-slice', '--file', SAFE_PATH, '--json'], fixtureDir);
+            slicePayload = parseCliJson(slice.stdout);
+        }
+        const planCoverage = slicePayload?.coverage?.relevantPlanCoverage ?? null;
+        const sliceReady = slicePayload?.ok === true && planCoverage === 1;
         add({
             id: 'repo_brain_indexed',
             title: 'Repo brain indexed',
             truthTier: 'advisory',
-            status: brainPayload?.summary ? 'advisory' : 'skipped',
-            expected: 'A structural map of files, owners, and symbols (advisory intelligence).',
-            observed: brainPayload?.summary
-                ? `Indexed ${brainPayload.summary.filesIndexed ?? 'n/a'} files, ${brainPayload.summary.ownerBoundaries ?? 0} owner boundaries.`
-                : 'Brain index unavailable in this run (non-blocking).',
+            status: sliceReady ? 'advisory' : 'skipped',
+            expected: 'A structural map plus a complete semantic slice for the exact safe-path plan.',
+            observed: sliceReady
+                ? `Indexed ${filesIndexed} files; exact plan semantic coverage ${(planCoverage * 100).toFixed(0)}%.`
+                : `Plan semantic authority unavailable (indexed ${filesIndexed ?? 'n/a'} files, coverage ${planCoverage ?? 'n/a'}); safe writes will fail closed.`,
             critical: false,
         });
     }
@@ -376,7 +391,14 @@ function runEvalDemo(options) {
     const check = (path, toolName) => {
         commandsRun.push(`neurcode agent check ${path} --agent ${agent} --tool-name ${toolName} --session-id ${sessionId} --dir .neurcode/eval/fixture --json`);
         const r = runCli(cliEntry, ['agent', 'check', path, '--agent', agent, '--tool-name', toolName, '--session-id', sessionId, '--dir', fixtureDir, '--json'], fixtureDir);
-        return decisionFromCheck(parseCliJson(r.stdout) ?? {});
+        const payload = parseCliJson(r.stdout) ?? {};
+        return {
+            ...decisionFromCheck(payload),
+            message: typeof payload?.message === 'string' ? payload.message : null,
+            reasonCodes: Array.isArray(payload?.payload?.hookSpecificOutput?.boundedPreWrite?.reasonCodes)
+                ? payload.payload.hookSpecificOutput.boundedPreWrite.reasonCodes.filter((value) => typeof value === 'string')
+                : [],
+        };
     };
     // 4) Safe edit allowed.
     if (canCheck) {
@@ -389,7 +411,9 @@ function runEvalDemo(options) {
             truthTier: 'deterministic',
             status: safeEditAllowed ? 'pass' : 'fail',
             expected: `In-scope ${SAFE_PATH} is allowed (no false positive).`,
-            observed: `Decision: ${r.decision}.`,
+            observed: r.decision === 'deny'
+                ? `Decision: deny${r.reasonCodes.length ? ` (${r.reasonCodes.join(', ')})` : ''}${r.message ? ` — ${r.message}` : ''}.`
+                : `Decision: ${r.decision}.`,
             critical: true,
         });
     }

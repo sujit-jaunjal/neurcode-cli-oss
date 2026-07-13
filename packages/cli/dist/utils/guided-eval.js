@@ -876,7 +876,7 @@ function scaffoldEvalFixture(repoRoot) {
             'CODEOWNERS',
             '# Boundary fixtures for the guided evaluation.\nsrc/billing/ @payments-team\nconfig/secrets/ @security-platform\n',
         ],
-        ['src/tasks/export_task.py', 'fixture: a non-sensitive task file you may freely edit\n'],
+        ['src/tasks/export_task.ts', 'export const fixtureTask = true;\n'],
         ['src/billing/charge.py', 'fixture: billing boundary placeholder (owned by @payments-team)\n'],
         ['src/billing/refund.py', 'fixture: neighbor of charge, also a billing boundary\n'],
         // Explicit governance config so session-hook always enforces approval_required_boundary
@@ -903,6 +903,11 @@ function scaffoldEvalFixture(repoRoot) {
             (0, node_fs_1.writeFileSync)(p, content, 'utf8');
         }
     }
+    // Migrate fixtures created by older CLI builds. The fixture is disposable
+    // and isolated from user source, so remove the retired Python safe-path and
+    // commit the canonical fixture files to keep git-backed Brain indexing
+    // deterministic across repeat runs.
+    (0, node_fs_1.rmSync)((0, node_path_1.join)(dir, 'src', 'tasks', 'export_task.py'), { force: true });
     // Initialise as its own git repo so brain/activate/verify have a HEAD.
     if (!(0, node_fs_1.existsSync)((0, node_path_1.join)(dir, '.git'))) {
         try {
@@ -911,6 +916,14 @@ function scaffoldEvalFixture(repoRoot) {
         catch {
             // git may be unavailable; the fixture files still exist for inspection.
         }
+    }
+    try {
+        (0, node_child_process_1.execSync)('git add -A', { cwd: dir, stdio: 'ignore' });
+        (0, node_child_process_1.execSync)('git -c user.email=eval@neurcode.local -c user.name=neurcode-eval commit -q -m "refresh eval fixture"', { cwd: dir, stdio: 'ignore' });
+    }
+    catch {
+        // No fixture delta to commit (the normal idempotent repeat-run case), or
+        // git is unavailable. The runtime will report either condition honestly.
     }
     // Write a runtime-manifest.json for the fixture so session-hook passes the
     // assertProtectedRuntimeAuthority check.  Without this, the check fails with
