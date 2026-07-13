@@ -61,6 +61,33 @@ function latestEventAt(session) {
         .sort()
         .at(-1) ?? null;
 }
+function cloudSafeAgentInvocationSummary(session) {
+    const summary = (0, governance_runtime_1.buildAgentInvocationSummary)(session);
+    return {
+        schemaVersion: summary.schemaVersion,
+        status: summary.status,
+        score: summary.score,
+        adapter: summary.adapter,
+        enforcementLevel: summary.enforcementLevel,
+        automatic: summary.automatic,
+        sourceFree: true,
+        launched: summary.launched,
+        handshakeSeen: summary.handshakeSeen,
+        planCaptured: summary.planCaptured,
+        planBeforeFirstEdit: summary.planBeforeFirstEdit,
+        explicitRuntimeCallCount: summary.explicitRuntimeCallCount,
+        editBeforeCallCount: summary.editBeforeCallCount,
+        preWriteCheckCount: summary.preWriteCheckCount,
+        allowedCheckCount: summary.allowedCheckCount,
+        warningCheckCount: summary.warningCheckCount,
+        deniedPreWriteCount: summary.deniedPreWriteCount,
+        approvalsApplied: summary.approvalsApplied,
+        planAmendments: summary.planAmendments,
+        pendingPlanAmendments: summary.pendingPlanAmendments,
+        finishSeen: summary.finishSeen,
+        eventCount: summary.eventCount,
+    };
+}
 function intentContent(session) {
     const plan = session.contract.agentPlan;
     const clarifications = session.events.flatMap((event) => {
@@ -428,6 +455,7 @@ function buildCloudSafeRuntimeSession(session) {
         finishedAt: timestamp(session.finishedAt),
         replayHash: stringValue(session.replayHash, 200),
         intentSummary: buildRuntimeIntentSummary(session),
+        agentInvocationSummary: cloudSafeAgentInvocationSummary(session),
         contract: {
             scopeMode: session.contract.scopeMode,
             allowedGlobs: safePaths(session.contract.allowedGlobs),

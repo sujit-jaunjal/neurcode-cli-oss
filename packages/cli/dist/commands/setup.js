@@ -28,6 +28,7 @@ const init_1 = require("./init");
 const login_1 = require("./login");
 const activation_proof_1 = require("../utils/activation-proof");
 const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
+const runtime_connection_1 = require("../utils/runtime-connection");
 const onboard_1 = require("./onboard");
 let chalk;
 try {
@@ -473,6 +474,10 @@ async function syncCanonicalSetupProofs(repoRoot, agent) {
         const projectId = (0, state_1.getProjectId)();
         if (!organizationId || !projectId)
             return;
+        const runtimeConnection = (0, runtime_connection_1.loadRuntimeConnection)(repoRoot);
+        const repoId = runtimeConnection?.organizationId === organizationId
+            ? runtimeConnection.repo.id
+            : null;
         const brainState = await readBrainState(repoRoot);
         const brainIndexed = ['governance_ready', 'semantic_slice_ready', 'background_enrichment', 'fully_enriched'].includes(brainState);
         if (brainIndexed) {
@@ -480,6 +485,7 @@ async function syncCanonicalSetupProofs(repoRoot, agent) {
                 orgId: organizationId,
                 proof: (0, activation_proof_1.buildBoundActivationProof)({
                     projectId,
+                    repoId,
                     stage: 'brain_index',
                     commandFamily: 'setup',
                     reasonCode: 'setup.brain_proof_synced',
@@ -496,6 +502,7 @@ async function syncCanonicalSetupProofs(repoRoot, agent) {
             orgId: organizationId,
             proof: (0, activation_proof_1.buildBoundActivationProof)({
                 projectId,
+                repoId,
                 stage: 'agent_setup',
                 commandFamily: 'setup',
                 reasonCode: 'setup.host_proof_synced',

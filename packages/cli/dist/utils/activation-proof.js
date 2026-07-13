@@ -82,7 +82,10 @@ function readCliVersion() {
     }
 }
 function buildEventId(input) {
-    return `fvp:${input.stage}:${sha(`${input.installId}:${input.projectId}:${input.stage}:${input.agentTarget || 'none'}`).slice(0, 32)}`;
+    const scope = input.repoId
+        ? `repo:${input.repoId}:project:${input.projectId}`
+        : `project:${input.projectId}`;
+    return `fvp:${input.stage}:${sha(`${input.installId}:${scope}:${input.stage}:${input.agentTarget || 'none'}`).slice(0, 32)}`;
 }
 function buildBoundActivationProof(input) {
     const installId = (0, activation_telemetry_1.getActivationInstallId)();
@@ -91,6 +94,7 @@ function buildBoundActivationProof(input) {
         eventId: buildEventId({
             installId,
             projectId: input.projectId,
+            repoId: input.repoId,
             stage: input.stage,
             agentTarget: input.agentTarget,
         }),

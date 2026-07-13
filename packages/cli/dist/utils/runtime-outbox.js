@@ -335,6 +335,7 @@ function assertRuntimeSessionShape(value) {
         'finishedAt',
         'replayHash',
         'intentSummary',
+        'agentInvocationSummary',
         'contract',
         'events',
         'repoIntelligence',
@@ -374,6 +375,32 @@ function assertRuntimeSessionShape(value) {
         'classification',
         'source',
     ], 'payload.session.intentSummary.provenance');
+    if (session.agentInvocationSummary !== undefined) {
+        assertAllowedKeys(session.agentInvocationSummary, [
+            'schemaVersion',
+            'status',
+            'score',
+            'adapter',
+            'enforcementLevel',
+            'automatic',
+            'sourceFree',
+            'launched',
+            'handshakeSeen',
+            'planCaptured',
+            'planBeforeFirstEdit',
+            'explicitRuntimeCallCount',
+            'editBeforeCallCount',
+            'preWriteCheckCount',
+            'allowedCheckCount',
+            'warningCheckCount',
+            'deniedPreWriteCount',
+            'approvalsApplied',
+            'planAmendments',
+            'pendingPlanAmendments',
+            'finishSeen',
+            'eventCount',
+        ], 'payload.session.agentInvocationSummary');
+    }
     assertAllowedKeys(session.contract, [
         'scopeMode',
         'allowedGlobs',

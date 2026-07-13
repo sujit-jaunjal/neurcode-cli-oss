@@ -1346,11 +1346,16 @@ function agentCommand(program) {
                 try {
                     process.chdir(payload.repoRoot);
                     const binding = (0, activation_proof_1.readLocalRepoActivationBinding)();
+                    const runtimeConnection = (0, runtime_connection_1.loadRuntimeConnection)(payload.repoRoot);
+                    const repoId = runtimeConnection?.organizationId === binding.orgId
+                        ? runtimeConnection.repo.id
+                        : null;
                     if (binding.orgId && binding.projectId) {
                         await (0, activation_proof_1.submitFirstValueActivationProof)({
                             orgId: binding.orgId,
                             proof: (0, activation_proof_1.buildBoundActivationProof)({
                                 projectId: binding.projectId,
+                                repoId,
                                 stage: 'agent_setup',
                                 agentTarget: 'codex',
                                 commandFamily: 'agent:bootstrap',
