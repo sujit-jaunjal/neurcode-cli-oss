@@ -175,14 +175,15 @@ function compareVersions(a, b) {
  * ------------------------------------------------------------------------ */
 /**
  * Derive a short, honest one-line guarantee from the registry's
- * `(enforcementLevel, compatibilityMode)`. This is a deterministic projection
- * of canonical fields — NOT independent marketing prose. The authority gate
- * asserts no non-`hard_pre_write_enforcement` tool gets a "hard deny" guarantee.
+ * canonical capability registry. Hard-prewrite hosts use the registry's own
+ * adapter-specific description so bounded Codex coverage is never flattened
+ * into the complete Claude lifecycle claim. The authority gate asserts no
+ * non-`hard_pre_write_enforcement` tool gets a "hard deny" guarantee.
  */
 function deriveGuarantee(capability) {
     switch (capability.compatibilityMode) {
         case 'hard_pre_write_enforcement':
-            return 'Hard pre-write deny when hooks are installed and a governed session is active.';
+            return capability.description;
         case 'cooperative_check':
             return 'Cooperative pre-write checks when the agent calls the runtime — no host-level hard deny.';
         case 'supervisor_diff_watch':
@@ -445,7 +446,7 @@ function buildIntegrationsCompatibilityReport(input) {
     });
     const overallStatus = tools.reduce((acc, tool) => worse(acc, tool.status), 'ready');
     const notes = [
-        'Enforcement guarantees differ by host tool. Only Claude Code and Copilot hooks provide hard pre-write deny; Cursor and Codex are cooperative; the VS Code companion is observe-only; the GitHub Action is post-PR advisory.',
+        'Enforcement guarantees differ by host tool. Claude Code lifecycle hooks hard-deny supported writes; trusted Codex project hooks deny supported intercepted calls with incomplete coverage; Copilot is host-dependent; Cursor is cooperative; the VS Code companion is observe-only; the GitHub Action is post-PR advisory.',
         'Every enforcement label is derived from the canonical Agent Runtime Adapter capability registry, not marketing copy.',
         'This report is source-free: it carries versions, statuses, reason codes, and neurcode commands — never source, diffs, or prompts.',
     ];

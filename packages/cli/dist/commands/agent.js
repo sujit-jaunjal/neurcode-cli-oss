@@ -757,7 +757,7 @@ function buildReadinessPayload(agentArg, options) {
             : 'warn', 'VS Code is observe-only; pair it with Codex/Cursor/MCP guard supervision for write accountability.', 'Use VS Code as the companion surface, then launch the real agent workflow from the Runtime Companion or CLI.'));
     }
     else if (isHardDeny) {
-        checks.push(readinessCheck('guard_posture', 'Local guard posture', 'skip', 'Claude Code hooks provide the hard-deny layer; guard supervision is optional as a bypass audit.'));
+        checks.push(readinessCheck('guard_posture', 'Local guard posture', 'skip', `${capability?.description ?? 'This adapter provides a hard-deny layer.'} Guard supervision is optional as a bypass audit.`));
     }
     checks.push(readinessCheck('source_free_contract', 'Source-free contract', 'pass', 'Readiness uses paths, config presence, runtime metadata, guard posture, and integrity hashes only.'));
     const summary = {
@@ -795,7 +795,7 @@ function buildReadinessPayload(agentArg, options) {
                 : isObserveOnly
                     ? 'VS Code provides operator visibility and approval UX, not editor-level hard deny.'
                     : isHardDeny
-                        ? 'Claude Code hooks can deny supported write tools before the write lands.'
+                        ? capability?.description ?? 'This adapter can deny supported write tools before the write lands.'
                         : capability?.description ?? 'Runtime guarantee is unknown.',
         },
         pilotReady: readiness === 'ready' || (readiness === 'needs_attention' && summary.fail === 0 && !isCooperative),

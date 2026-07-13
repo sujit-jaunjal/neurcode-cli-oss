@@ -463,7 +463,7 @@ function runtimeDoctorCommand(options = {}) {
             : 'skip',
         message: activeCapability
             ? `${launcherState?.agent.normalized || activeCapability.adapter} uses ${compatibilityModeLabel(activeCapability.compatibilityMode)}. Actually enforceable: ${activeCapability.enforceable.join('; ')}. Advisory only: ${activeCapability.advisoryOnly.join('; ')}.`
-            : 'No active agent adapter was detected. Claude Code hard hooks can be checked above; Codex/Cursor need cooperative runtime calls or supervisor mode.',
+            : 'No active agent adapter was detected. Claude Code lifecycle hooks and trusted Codex project hooks can be checked above; Cursor needs cooperative runtime calls or supervisor mode.',
         recommendation: activeCapability && activeCapability.enforcementLevel !== 'hard_deny'
             ? supervisor?.effectiveStatus === 'running'
                 ? `Supervisor/diff-watch is running for session ${activeSession?.sessionId}; last pass: ${supervisor.state?.lastPass === null ? 'pending' : supervisor.state?.lastPass ? 'yes' : 'no'}.`
