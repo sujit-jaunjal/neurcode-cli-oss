@@ -18,6 +18,7 @@ const node_path_1 = require("node:path");
 const jsonc_parser_1 = require("jsonc-parser");
 const v0_governance_1 = require("./v0-governance");
 const mcp_server_pin_1 = require("./mcp-server-pin");
+const managed_host_installation_1 = require("./managed-host-installation");
 exports.AGENT_ADAPTER_SETUP_SCHEMA_VERSION = 'neurcode.agent-adapter-setup.v1';
 exports.AGENT_ADAPTER_DOCTOR_SCHEMA_VERSION = 'neurcode.agent-adapter-doctor.v1';
 const MCP_PACKAGE = mcp_server_pin_1.MCP_SERVER_PACKAGE;
@@ -215,8 +216,8 @@ function instructionBody(input) {
             '',
             'Use this workflow for serious agentic work:',
             '',
-            '1. Start the local Neurcode daemon from the command palette or CLI.',
-            '2. Run "Neurcode: Start Governed AI Session" and choose the real agent host: Claude Code, Codex, Cursor, or Generic MCP.',
+            '1. Run "Neurcode: Start Governed AI Session" or start the governed session with the CLI, then choose the real agent host: Claude Code, Codex, Cursor, or Generic MCP.',
+            '2. The legacy daemon is optional; activation and evidence must not depend on it.',
             '3. Treat the VS Code extension as observe-only. It shows live session state, active plan, blocked paths, guard posture, exact-path approvals, repo profile drift, and replayable evidence.',
             '4. For Codex, Cursor, or another MCP-capable agent, keep the MCP/CLI runtime calls active before writes. VS Code visibility is not a substitute for pre-write checks.',
             '5. If a protected path is blocked, approve the exact suggested path from the Runtime Companion or Control Plane. Do not broaden approval scope unless the human explicitly asks.',
@@ -541,13 +542,19 @@ function inspectHostRuntimeFacts(input) {
     const detected = binary
         ? (0, node_child_process_1.spawnSync)(binary, ['--version'], { stdio: 'ignore', timeout: 2_000 }).status === 0
         : false;
-    const configured = inspectAgentSetup(input).configured === true;
+    const setup = inspectAgentSetup(input);
     const authenticated = input.target === 'codex' && detected
         ? (0, node_child_process_1.spawnSync)('codex', ['login', 'status'], { stdio: 'ignore', timeout: 2_000 }).status === 0
         : false;
-    const automaticPreWriteInterception = input.target === 'claude'
-        || input.target === 'copilot'
-        || input.target === 'codex';
+    const installation = (0, managed_host_installation_1.inspectManagedHostInstallation)({
+        target: input.target, repoRoot: input.repoRoot, detected, authenticated, setup,
+    });
+    if (input.persist)
+        (0, managed_host_installation_1.persistManagedHostInstallation)(input.repoRoot, installation);
+    const configured = installation.configIntegrity === 'verified';
+    const automaticPreWriteInterception = configured && detected
+        && (input.target !== 'codex' || authenticated)
+        && (input.target === 'claude' || input.target === 'copilot' || input.target === 'codex');
     const repairCommand = input.target === 'claude'
         ? `neurcode activate claude --dir <repository-path> --force`
         : input.target === 'copilot'
@@ -560,7 +567,7 @@ function inspectHostRuntimeFacts(input) {
             : input.target === 'codex' && !authenticated
                 ? 'Codex login status could not be verified. Run codex login, then rerun setup.'
                 : null;
-    return { detected, configured, authenticated, automaticPreWriteInterception, failureReason, repairCommand };
+    return { detected, configured, authenticated, automaticPreWriteInterception, failureReason, repairCommand, installation };
 }
 function inspectAgentInstructions(input) {
     const artifact = buildAgentInstructionArtifact(input);

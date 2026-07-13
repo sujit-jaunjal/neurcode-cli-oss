@@ -22,7 +22,7 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
     for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.FIRST_VALUE_FORBIDDEN_FIELDS = exports.FIRST_VALUE_ACTIVATION_PROOF_STAGES = exports.FIRST_VALUE_STEP_IDS = exports.FIRST_VALUE_ACTIVATION_PROOF_SCHEMA_VERSION = exports.FIRST_VALUE_PROOF_SCHEMA_VERSION = void 0;
+exports.FIRST_VALUE_FORBIDDEN_FIELDS = exports.MANAGED_HOST_INSTALLATION_SCHEMA_VERSION = exports.FIRST_VALUE_ACTIVATION_PROOF_STAGES = exports.FIRST_VALUE_STEP_IDS = exports.FIRST_VALUE_ACTIVATION_PROOF_SCHEMA_VERSION = exports.FIRST_VALUE_PROOF_SCHEMA_VERSION = void 0;
 exports.firstValueNextCommand = firstValueNextCommand;
 exports.buildFirstValueProof = buildFirstValueProof;
 exports.buildFirstValueState = buildFirstValueState;
@@ -48,6 +48,7 @@ exports.FIRST_VALUE_ACTIVATION_PROOF_STAGES = [
     'evidence_view',
     'repo_intelligence_sync',
 ];
+exports.MANAGED_HOST_INSTALLATION_SCHEMA_VERSION = 'neurcode.managed-host-installation.v1';
 exports.FIRST_VALUE_FORBIDDEN_FIELDS = [
     'source',
     'sourceCode',
@@ -105,6 +106,20 @@ const FIRST_VALUE_ACTIVATION_PROOF_LOCAL_POSTURE_FIELDS = new Set([
     'automaticPreWriteInterception',
     'evidenceQueued',
     'telemetryQueued',
+    'hostInstallation',
+]);
+const MANAGED_HOST_INSTALLATION_FIELDS = new Set([
+    'schemaVersion', 'adapter', 'state', 'distribution', 'manifestVersion',
+    'configIntegrity', 'trustState', 'checkedAt', 'fingerprint', 'reasonCodes',
+]);
+const MANAGED_HOST_INSTALLATION_STATES = new Set(['healthy', 'attention', 'drifted', 'incomplete', 'unsupported']);
+const MANAGED_HOST_INSTALLATION_DISTRIBUTIONS = new Set(['managed', 'manual', 'host_managed']);
+const MANAGED_HOST_CONFIG_INTEGRITIES = new Set(['verified', 'drifted', 'unverified', 'not_applicable']);
+const MANAGED_HOST_TRUST_STATES = new Set(['verified', 'user_action_required', 'not_applicable', 'unknown']);
+const MANAGED_HOST_REASON_CODES = new Set([
+    'host_not_detected', 'managed_config_missing', 'managed_config_drifted', 'host_auth_unverified',
+    'host_trust_required', 'host_invocation_unobserved', 'host_boundary_cooperative',
+    'host_boundary_observe_only', 'host_boundary_post_change',
 ]);
 const ABSOLUTE_PATH_VALUE = /(?:\/Users\/|\/home\/|\/var\/|\/etc\/|\/private\/|[A-Za-z]:\\)/;
 const SECRET_VALUE = /(sk-[a-z0-9]{16,}|nk_[a-z0-9_]{12,}|gh[pousr]_[a-z0-9_]{20,}|AKIA[0-9A-Z]{16})/i;
@@ -396,6 +411,12 @@ function normalizeLocalPosture(value, errors) {
             errors.push(`localPosture.${key} is not allowed`);
             continue;
         }
+        if (key === 'hostInstallation') {
+            const installation = normalizeManagedHostInstallation(child, errors);
+            if (installation)
+                posture.hostInstallation = installation;
+            continue;
+        }
         if (typeof child !== 'boolean') {
             errors.push(`localPosture.${key} must be boolean`);
             continue;
@@ -403,6 +424,56 @@ function normalizeLocalPosture(value, errors) {
         posture[key] = child;
     }
     return posture;
+}
+function normalizeManagedHostInstallation(value, errors) {
+    if (!isObject(value)) {
+        errors.push('localPosture.hostInstallation must be an object');
+        return null;
+    }
+    for (const key of Object.keys(value)) {
+        if (!MANAGED_HOST_INSTALLATION_FIELDS.has(key))
+            errors.push(`localPosture.hostInstallation.${key} is not allowed`);
+    }
+    const schemaVersion = value.schemaVersion;
+    const adapter = typeof value.adapter === 'string' ? value.adapter.trim() : '';
+    const state = value.state;
+    const distribution = value.distribution;
+    const manifestVersion = typeof value.manifestVersion === 'string' ? value.manifestVersion.trim() : '';
+    const configIntegrity = value.configIntegrity;
+    const trustState = value.trustState;
+    const checkedAt = typeof value.checkedAt === 'string' ? value.checkedAt.trim() : '';
+    const fingerprint = value.fingerprint === null ? null : typeof value.fingerprint === 'string' ? value.fingerprint.trim() : '';
+    const reasonCodes = Array.isArray(value.reasonCodes) ? value.reasonCodes : [];
+    if (schemaVersion !== exports.MANAGED_HOST_INSTALLATION_SCHEMA_VERSION)
+        errors.push('localPosture.hostInstallation.schemaVersion is invalid');
+    if (!/^[a-z][a-z0-9-]{1,39}$/.test(adapter))
+        errors.push('localPosture.hostInstallation.adapter is invalid');
+    if (!MANAGED_HOST_INSTALLATION_STATES.has(state))
+        errors.push('localPosture.hostInstallation.state is invalid');
+    if (!MANAGED_HOST_INSTALLATION_DISTRIBUTIONS.has(distribution))
+        errors.push('localPosture.hostInstallation.distribution is invalid');
+    if (!/^[a-z0-9][a-z0-9._-]{0,39}$/i.test(manifestVersion))
+        errors.push('localPosture.hostInstallation.manifestVersion is invalid');
+    if (!MANAGED_HOST_CONFIG_INTEGRITIES.has(configIntegrity))
+        errors.push('localPosture.hostInstallation.configIntegrity is invalid');
+    if (!MANAGED_HOST_TRUST_STATES.has(trustState))
+        errors.push('localPosture.hostInstallation.trustState is invalid');
+    if (!checkedAt || Number.isNaN(Date.parse(checkedAt)))
+        errors.push('localPosture.hostInstallation.checkedAt must be ISO-8601');
+    if (fingerprint !== null && !/^[a-f0-9]{64}$/.test(fingerprint))
+        errors.push('localPosture.hostInstallation.fingerprint must be a SHA-256 digest or null');
+    if (!Array.isArray(value.reasonCodes) || reasonCodes.length > 12
+        || reasonCodes.some((reason) => !MANAGED_HOST_REASON_CODES.has(reason))) {
+        errors.push('localPosture.hostInstallation.reasonCodes is invalid');
+    }
+    if (errors.some((error) => error.startsWith('localPosture.hostInstallation')))
+        return null;
+    return {
+        schemaVersion: exports.MANAGED_HOST_INSTALLATION_SCHEMA_VERSION,
+        adapter, state, distribution, manifestVersion, configIntegrity, trustState, checkedAt,
+        fingerprint: fingerprint || null,
+        reasonCodes: reasonCodes,
+    };
 }
 function validateFirstValueActivationProofPayload(input) {
     const errors = [];

@@ -304,6 +304,14 @@ async function readBrainState(repoRoot) {
 function agentIsConfigured(repoRoot, agent) {
     if (!agent)
         return false;
+    if (agent !== 'action') {
+        try {
+            return (0, agent_adapter_setup_1.inspectHostRuntimeFacts)({ target: agent, repoRoot }).configured;
+        }
+        catch {
+            return false;
+        }
+    }
     try {
         const manifest = (0, cli_runtime_1.readActivatedRuntimeManifest)(repoRoot);
         const expected = AGENT_ADAPTERS[agent];
@@ -495,9 +503,15 @@ async function syncCanonicalSetupProofs(repoRoot, agent) {
         }
         if (!agent || !agentIsConfigured(repoRoot, agent))
             return;
+        const actionInstallation = {
+            schemaVersion: contracts_1.MANAGED_HOST_INSTALLATION_SCHEMA_VERSION,
+            adapter: 'github-action', state: 'healthy', distribution: 'host_managed', manifestVersion: '1.0.0',
+            configIntegrity: 'verified', trustState: 'not_applicable', checkedAt: new Date().toISOString(),
+            fingerprint: null, reasonCodes: ['host_boundary_post_change'],
+        };
         const host = agent === 'action'
-            ? { detected: false, configured: true, authenticated: false, automaticPreWriteInterception: false }
-            : (0, agent_adapter_setup_1.inspectHostRuntimeFacts)({ target: agent, repoRoot });
+            ? { detected: false, configured: true, authenticated: false, automaticPreWriteInterception: false, installation: actionInstallation }
+            : (0, agent_adapter_setup_1.inspectHostRuntimeFacts)({ target: agent, repoRoot, persist: true });
         await (0, activation_proof_1.submitFirstValueActivationProof)({
             orgId: organizationId,
             proof: (0, activation_proof_1.buildBoundActivationProof)({
@@ -515,6 +529,7 @@ async function syncCanonicalSetupProofs(repoRoot, agent) {
                     hostConfigured: true,
                     hostAuthenticated: host.authenticated,
                     automaticPreWriteInterception: host.automaticPreWriteInterception,
+                    hostInstallation: host.installation,
                 },
             }),
         });

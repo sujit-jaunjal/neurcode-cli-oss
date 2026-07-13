@@ -179,6 +179,10 @@ function buildActivationJourney(input) {
         active: input.hostFacts?.active === true,
         failureReason: input.hostFacts?.failureReason || null,
         repairCommand: capability?.repairCommand || null,
+        installation: input.hostFacts?.installation || {
+            state: 'unverified', configIntegrity: 'unverified', trustState: 'unknown', checkedAt: null,
+            fresh: false, runtimeObserved: false, reasonCodes: ['managed_installation_proof_missing'],
+        },
     };
     const verified = currentStage === null;
     const brain = {

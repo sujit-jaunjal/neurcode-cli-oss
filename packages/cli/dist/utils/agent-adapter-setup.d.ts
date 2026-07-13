@@ -1,4 +1,5 @@
 import type { AgentRuntimeAdapterId } from '@neurcode-ai/governance-runtime';
+import type { ManagedHostInstallationAttestation } from '@neurcode-ai/contracts';
 export declare const AGENT_ADAPTER_SETUP_SCHEMA_VERSION: "neurcode.agent-adapter-setup.v1";
 export declare const AGENT_ADAPTER_DOCTOR_SCHEMA_VERSION: "neurcode.agent-adapter-doctor.v1";
 export type AgentSetupTarget = 'claude' | 'copilot' | 'codex' | 'cursor' | 'generic-mcp' | 'vscode';
@@ -55,6 +56,7 @@ export interface HostRuntimeFacts {
     automaticPreWriteInterception: boolean;
     failureReason: string | null;
     repairCommand: string;
+    installation: ManagedHostInstallationAttestation;
 }
 export declare function normalizeAgentSetupTarget(value?: string): AgentSetupTarget;
 export declare function adapterForSetupTarget(target: AgentSetupTarget): AgentRuntimeAdapterId;
@@ -76,6 +78,7 @@ export declare function inspectAgentSetup(input: {
 export declare function inspectHostRuntimeFacts(input: {
     target: AgentSetupTarget;
     repoRoot: string;
+    persist?: boolean;
 }): HostRuntimeFacts;
 export declare function inspectAgentInstructions(input: {
     target: AgentSetupTarget;

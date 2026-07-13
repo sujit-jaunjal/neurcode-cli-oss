@@ -91,6 +91,15 @@ export interface ActivationJourneyHostState {
     active: boolean;
     failureReason: string | null;
     repairCommand: string | null;
+    installation: {
+        state: 'healthy' | 'attention' | 'drifted' | 'incomplete' | 'unsupported' | 'unverified';
+        configIntegrity: 'verified' | 'drifted' | 'unverified' | 'not_applicable';
+        trustState: 'verified' | 'user_action_required' | 'not_applicable' | 'unknown';
+        checkedAt: string | null;
+        fresh: boolean;
+        runtimeObserved: boolean;
+        reasonCodes: string[];
+    };
 }
 export interface ActivationJourney {
     schemaVersion: typeof ACTIVATION_JOURNEY_SCHEMA_VERSION;
@@ -157,7 +166,7 @@ export interface ActivationJourneySignals {
     sessionRuntimeActive?: ActivationJourneyStageSignal;
     firstGovernedActionObserved?: ActivationJourneyStageSignal;
     evidenceVerified?: ActivationJourneyStageSignal;
-    hostFacts?: Partial<Pick<ActivationJourneyHostState, 'detected' | 'configured' | 'authenticated' | 'active' | 'failureReason'>>;
+    hostFacts?: Partial<Pick<ActivationJourneyHostState, 'detected' | 'configured' | 'authenticated' | 'active' | 'failureReason' | 'installation'>>;
     brain?: Partial<ActivationJourneyBrainState>;
     summary?: Partial<ActivationJourneyWorkspaceSummary>;
 }

@@ -98,6 +98,25 @@ export interface FirstValueActivationProofLocalPosture {
     automaticPreWriteInterception?: boolean;
     evidenceQueued?: boolean;
     telemetryQueued?: boolean;
+    hostInstallation?: ManagedHostInstallationAttestation;
+}
+export declare const MANAGED_HOST_INSTALLATION_SCHEMA_VERSION: "neurcode.managed-host-installation.v1";
+export type ManagedHostInstallationState = 'healthy' | 'attention' | 'drifted' | 'incomplete' | 'unsupported';
+export type ManagedHostInstallationDistribution = 'managed' | 'manual' | 'host_managed';
+export type ManagedHostConfigIntegrity = 'verified' | 'drifted' | 'unverified' | 'not_applicable';
+export type ManagedHostTrustState = 'verified' | 'user_action_required' | 'not_applicable' | 'unknown';
+export type ManagedHostInstallationReasonCode = 'host_not_detected' | 'managed_config_missing' | 'managed_config_drifted' | 'host_auth_unverified' | 'host_trust_required' | 'host_invocation_unobserved' | 'host_boundary_cooperative' | 'host_boundary_observe_only' | 'host_boundary_post_change';
+export interface ManagedHostInstallationAttestation {
+    schemaVersion: typeof MANAGED_HOST_INSTALLATION_SCHEMA_VERSION;
+    adapter: string;
+    state: ManagedHostInstallationState;
+    distribution: ManagedHostInstallationDistribution;
+    manifestVersion: string;
+    configIntegrity: ManagedHostConfigIntegrity;
+    trustState: ManagedHostTrustState;
+    checkedAt: string;
+    fingerprint: string | null;
+    reasonCodes: ManagedHostInstallationReasonCode[];
 }
 export interface FirstValueActivationProofPayload {
     schemaVersion: typeof FIRST_VALUE_ACTIVATION_PROOF_SCHEMA_VERSION;

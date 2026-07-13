@@ -264,7 +264,7 @@ function buildSetupPayload(agentArg, options) {
         global: options.global === true,
     });
     const instructionsAfter = (0, agent_adapter_setup_1.inspectAgentInstructions)({ target, repoRoot });
-    const host = (0, agent_adapter_setup_1.inspectHostRuntimeFacts)({ target, repoRoot });
+    const host = (0, agent_adapter_setup_1.inspectHostRuntimeFacts)({ target, repoRoot, persist: options.write === true });
     const goal = options.goal || 'modify one named safe file and keep protected boundaries untouched';
     return {
         schemaVersion: agent_adapter_setup_1.AGENT_ADAPTER_SETUP_SCHEMA_VERSION,
@@ -565,6 +565,7 @@ function buildDoctorPayload(agentArg, options) {
         global: options.global === true,
     });
     const instructionInspection = (0, agent_adapter_setup_1.inspectAgentInstructions)({ target, repoRoot });
+    const host = (0, agent_adapter_setup_1.inspectHostRuntimeFacts)({ target, repoRoot });
     const staleness = (0, v0_governance_1.getProfileStaleness)(repoRoot);
     const activeSession = (0, governance_runtime_1.loadActiveSession)(repoRoot);
     const capability = capabilityFor(inspection.adapter);
@@ -578,6 +579,16 @@ function buildDoctorPayload(agentArg, options) {
             message: `${inspection.adapter} reports ${controlLevelLabel(capability?.controlLevel)} (${capability?.enforcementLevel ?? 'cooperative'}, ${capability?.automatic ? 'automatic' : 'explicit agent calls'}).`,
         },
         configCheck(inspection),
+        {
+            id: 'managed_host_installation',
+            label: 'Managed host installation',
+            status: host.installation.state === 'healthy' ? 'pass'
+                : host.installation.state === 'attention' ? 'warn' : 'fail',
+            message: host.installation.configIntegrity === 'verified'
+                ? `Managed configuration fingerprint is verified; trust is ${host.installation.trustState.replace(/_/g, ' ')}.`
+                : `Managed configuration is ${host.installation.configIntegrity}; ${host.installation.reasonCodes.join(', ') || 'reconciliation is required'}.`,
+            recommendation: host.installation.state === 'healthy' ? undefined : host.repairCommand,
+        },
         instructionCheck(instructionInspection),
         ...(needsNpx ? [npxCheck()] : []),
         {
@@ -624,7 +635,7 @@ function buildDoctorPayload(agentArg, options) {
         controlLabel: controlLevelLabel(capability?.controlLevel),
         enforcement: {
             level: capability?.enforcementLevel ?? 'unknown',
-            automatic: capability?.automatic ?? false,
+            automatic: host.automaticPreWriteInterception,
             compatibilityMode: capability?.compatibilityMode ?? 'unknown',
             enforceable: capability?.enforceable ?? [],
             advisoryOnly: capability?.advisoryOnly ?? [],
@@ -632,6 +643,7 @@ function buildDoctorPayload(agentArg, options) {
         checks,
         summary,
         cliVersionWarning,
+        host,
         next: summary.fail > 0
             ? 'Resolve failed checks before relying on agent MCP calls.'
             : inspection.configured === false
@@ -1341,7 +1353,7 @@ function agentCommand(program) {
                 ? [payload.adapter, 'codex-mcp']
                 : [payload.adapter];
             await (0, runtime_authority_1.recordActivatedRuntime)(payload.repoRoot, adapters, { scheduleBrain: false });
-            if (payload.target === 'codex' && payload.host.configured) {
+            if (payload.target !== 'generic-mcp' && payload.host.configured) {
                 const originalCwd = process.cwd();
                 try {
                     process.chdir(payload.repoRoot);
@@ -1357,16 +1369,17 @@ function agentCommand(program) {
                                 projectId: binding.projectId,
                                 repoId,
                                 stage: 'agent_setup',
-                                agentTarget: 'codex',
+                                agentTarget: payload.target,
                                 commandFamily: 'agent:bootstrap',
-                                reasonCode: 'agent_setup.codex_hooks_configured',
+                                reasonCode: 'agent_setup.host_installation_verified',
                                 localPosture: {
                                     repoConfigPresent: true,
                                     runtimeConfigured: true,
                                     hostDetected: payload.host.detected,
                                     hostConfigured: true,
                                     hostAuthenticated: payload.host.authenticated,
-                                    automaticPreWriteInterception: true,
+                                    automaticPreWriteInterception: payload.host.automaticPreWriteInterception,
+                                    hostInstallation: payload.host.installation,
                                 },
                             }),
                         });
