@@ -1,6 +1,7 @@
 name: OSS CI
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main]
   push:
@@ -14,6 +15,7 @@ jobs:
   validate:
     name: Validate OSS Safety + CLI Surface
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
 
@@ -32,7 +34,7 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile=false
+        run: pnpm install --frozen-lockfile
 
       - name: Run OSS quality gates
         run: pnpm ci:oss
