@@ -23,6 +23,7 @@ const cursor_gate_1 = require("../utils/cursor-gate");
 const session_allowlist_rules_1 = require("../utils/session-allowlist-rules");
 const runtime_authority_1 = require("../utils/runtime-authority");
 const activation_proof_1 = require("../utils/activation-proof");
+const enterprise_trust_1 = require("../utils/enterprise-trust");
 let chalk;
 try {
     chalk = require('chalk');
@@ -37,6 +38,17 @@ catch {
         cyan: (s) => s,
         white: (s) => s,
     };
+}
+function enterpriseHostForAgent(agent) {
+    const normalized = String(agent || 'claude').trim().toLowerCase();
+    if (normalized === 'claude-code')
+        return 'claude';
+    if (normalized === 'github-copilot')
+        return 'copilot';
+    if (normalized === 'vs-code')
+        return 'vscode';
+    return ['claude', 'copilot', 'codex', 'cursor', 'vscode'].includes(normalized)
+        ? normalized : null;
 }
 const AGENT_TO_ADAPTER = {
     claude: 'claude-code-hooks',
@@ -1554,6 +1566,9 @@ function agentCommand(program) {
         .option('--json', 'Output machine-readable JSON')
         .action(async (agent, options) => {
         try {
+            const enterpriseHost = enterpriseHostForAgent(agent);
+            if (enterpriseHost)
+                await (0, enterprise_trust_1.assertEnterpriseSessionAdmission)({ repoRoot: options.dir, host: enterpriseHost });
             const result = await (0, agent_session_launcher_1.launchAgentSession)({
                 agent,
                 goal: options.goal || '',
@@ -1808,6 +1823,9 @@ function agentCommand(program) {
         .option('--json', 'Output machine-readable JSON')
         .action(async (agent, options) => {
         try {
+            const enterpriseHost = enterpriseHostForAgent(agent);
+            if (enterpriseHost)
+                await (0, enterprise_trust_1.assertEnterpriseSessionAdmission)({ repoRoot: options.dir, host: enterpriseHost });
             const launch = await (0, agent_session_launcher_1.launchAgentSession)({
                 agent,
                 goal: options.goal || '',

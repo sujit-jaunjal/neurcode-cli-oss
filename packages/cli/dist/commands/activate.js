@@ -13,6 +13,7 @@ const runtime_connection_1 = require("../utils/runtime-connection");
 const runtime_authority_1 = require("../utils/runtime-authority");
 const activation_telemetry_1 = require("../utils/activation-telemetry");
 const agent_adapter_setup_1 = require("../utils/agent-adapter-setup");
+const enterprise_trust_1 = require("../utils/enterprise-trust");
 let chalk;
 try {
     chalk = require('chalk');
@@ -571,6 +572,9 @@ function activateCommand(program) {
                 changed: runtimeAuthority.changed,
                 brainState: runtimeAuthority.brain.state,
             };
+            if (result.connection?.connected) {
+                await (0, enterprise_trust_1.reportEnterprisePostureBestEffort)({ repoRoot: result.repoRoot, host: agent });
+            }
             if (options.json) {
                 console.log(JSON.stringify(result, null, 2));
             }

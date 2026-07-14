@@ -20,6 +20,7 @@ export * from './progressive-authority';
 export * from './integrations-compatibility-v1';
 export * from './runtime-risk-pack-v1';
 export * from './runtime-policy-config';
+export * from './enterprise-trust';
 export declare const RUNTIME_COMPATIBILITY_CONTRACT_ID = "neurcode-runtime-compatibility";
 export declare const RUNTIME_COMPATIBILITY_CONTRACT_VERSION = "2026-04-04";
 export declare const RUNTIME_COMPATIBILITY_MANIFEST_VERSION = "2026-06-19.1";

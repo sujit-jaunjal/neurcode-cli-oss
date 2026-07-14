@@ -90,7 +90,8 @@ Current adapter guarantees:
 |---|---|
 | Claude Code hooks | Automatic pre-write `hard_deny` for Edit/Write/MultiEdit |
 | GitHub Copilot Agent Mode hooks | Host-dependent hook-backed checks through `.github/hooks/neurcode.json` when VS Code/Copilot discovers repo hooks |
-| Codex/Cursor/Gemini MCP | Cooperative `plan.capture` and `edit.before` events plus local guard supervision |
+| Codex | Automatic guardrail on classified/intercepted `apply_patch`, supported Bash, and MCP paths; no universal unified-execution claim |
+| Cursor/Gemini MCP | Cooperative `plan.capture` and `edit.before` events plus local guard supervision |
 | VS Code extension | `observe_only` companion and exact approval UI |
 | GitHub Action | Post-PR advisory routing and runtime admission display |
 
@@ -122,6 +123,21 @@ neurcode activate action
 These commands refresh the repository profile and print the control level,
 enforced/recorded facts, advisory limits, and next commands. They do not install
 Claude-style hard hooks.
+
+For an organization-connected repository, inspect and refresh source-free
+runtime trust without starting a daemon:
+
+```bash
+neurcode trust status --host codex
+neurcode trust status --host codex --json
+neurcode trust status --host codex --local-only
+```
+
+The authenticated form reports opaque installation/repository bindings,
+versions, managed-configuration fingerprint, policy version, timestamp, and a
+nonce. It never uploads source, prompts, diffs, secrets, environment values, or
+absolute personal paths. A healthy result describes evidence health; it does
+not expand the host capability shown above.
 
 ## Secondary Verification Loop
 

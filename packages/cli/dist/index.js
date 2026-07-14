@@ -89,6 +89,7 @@ const demo_1 = require("./commands/demo");
 const eval_1 = require("./commands/eval");
 const pilot_1 = require("./commands/pilot");
 const reality_1 = require("./commands/reality");
+const trust_1 = require("./commands/trust");
 const execution_bus_1 = require("./utils/execution-bus");
 const execution_actions_1 = require("./utils/execution-actions");
 const cli_startup_1 = require("./utils/cli-startup");
@@ -460,6 +461,7 @@ program
 (0, runtime_report_1.reportCommand)(program);
 (0, runtime_sync_1.syncCommand)(program);
 (0, runtime_1.runtimeCommand)(program);
+(0, trust_1.trustCommand)(program);
 (0, ops_1.opsCommand)(program);
 (0, admission_1.admissionCommand)(program);
 (0, demo_1.demoCommand)(program);

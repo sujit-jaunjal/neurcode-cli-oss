@@ -25,6 +25,7 @@ const repo_brain_impact_1 = require("../utils/repo-brain-impact");
 const runtime_privacy_1 = require("../utils/runtime-privacy");
 const cli_runtime_1 = require("@neurcode-ai/cli-runtime");
 const brain_lifecycle_1 = require("../utils/brain-lifecycle");
+const enterprise_trust_1 = require("../utils/enterprise-trust");
 let chalk;
 try {
     chalk = require('chalk');
@@ -810,6 +811,28 @@ async function runtimeSyncCommand(options = {}) {
                 lastError: response.failed > 0 ? `${response.failed} runtime session upload failed` : undefined,
             },
         }));
+        const inferredHost = (() => {
+            try {
+                const parsed = JSON.parse((0, fs_1.readFileSync)((0, path_1.join)(repoRoot, '.neurcode', 'host-enforcement.json'), 'utf8'));
+                const adapter = parsed.installation?.adapter || '';
+                if (adapter === 'claude-code-hooks')
+                    return 'claude';
+                if (adapter === 'codex-hooks' || adapter === 'codex-mcp')
+                    return 'codex';
+                if (adapter === 'copilot-hooks')
+                    return 'copilot';
+                if (adapter === 'cursor-mcp')
+                    return 'cursor';
+                if (adapter === 'vscode-extension')
+                    return 'vscode';
+                if (adapter === 'github-action')
+                    return 'action';
+            }
+            catch { /* no selected host posture yet */ }
+            return null;
+        })();
+        if (inferredHost)
+            await (0, enterprise_trust_1.reportEnterprisePostureBestEffort)({ repoRoot, host: inferredHost });
         if (options.json) {
             console.log(JSON.stringify({
                 ...response,
