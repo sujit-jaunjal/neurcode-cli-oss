@@ -126,8 +126,22 @@ function codexHookRunner() {
 function isCodexHooksConfigured(repoRoot) {
     const hooksPath = codexHooksPath(repoRoot);
     const runnerPath = codexHookRunnerPath(repoRoot);
-    return readText(hooksPath).includes(CODEX_HOOK_MARKER)
-        && readText(runnerPath).includes(`'codex-hooks'`);
+    if (!(0, node_fs_1.existsSync)(hooksPath))
+        return false;
+    try {
+        const parsed = parseJsoncObject(hooksPath);
+        const hooks = parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)
+            ? parsed.hooks
+            : {};
+        const groupsCurrent = Object.entries(codexHookGroups()).every(([event, expected]) => {
+            const groups = Array.isArray(hooks[event]) ? hooks[event] : [];
+            return groups.some((group) => JSON.stringify(group) === JSON.stringify(expected));
+        });
+        return groupsCurrent && readText(runnerPath) === codexHookRunner();
+    }
+    catch {
+        return false;
+    }
 }
 function cursorConfigPath(repoRoot, global) {
     return global
@@ -621,12 +635,17 @@ function mergeCodexHookGroups(path) {
             ? parsed.hooks
             : {};
         const existingGroups = Array.isArray(hooks[event]) ? hooks[event] : [];
-        if (existingGroups.some((entry) => JSON.stringify(entry).includes(CODEX_HOOK_MARKER)))
+        const managedIndex = existingGroups.findIndex((entry) => JSON.stringify(entry).includes(CODEX_HOOK_MARKER));
+        if (managedIndex >= 0 && JSON.stringify(existingGroups[managedIndex]) === JSON.stringify(group))
             continue;
-        const editPath = existingGroups.length > 0 ? ['hooks', event, existingGroups.length] : ['hooks', event];
-        const value = existingGroups.length > 0 ? group : [group];
+        const editPath = managedIndex >= 0
+            ? ['hooks', event, managedIndex]
+            : existingGroups.length > 0
+                ? ['hooks', event, existingGroups.length]
+                : ['hooks', event];
+        const value = managedIndex >= 0 || existingGroups.length > 0 ? group : [group];
         const edits = (0, jsonc_parser_1.modify)(text, editPath, value, {
-            isArrayInsertion: existingGroups.length > 0,
+            isArrayInsertion: managedIndex < 0 && existingGroups.length > 0,
             formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
         });
         text = (0, jsonc_parser_1.applyEdits)(text, edits);
